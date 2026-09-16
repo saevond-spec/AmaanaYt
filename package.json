@@ -1,0 +1,20 @@
+{
+  "name": "amaana-yt",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Approval-based YouTube Shorts manager for Saevond",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "check": "node --check src/server.js && node --check src/youtube.js && node --check src/store.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-session": "^1.18.1",
+    "googleapis": "^144.0.0",
+    "helmet": "^8.0.0",
+    "multer": "^1.4.5-lts.1"
+  }
+}
