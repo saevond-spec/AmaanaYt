@@ -4,24 +4,26 @@ const store = require('./store');
 
 const SCOPES = ['https://www.googleapis.com/auth/youtube.upload'];
 
-function oauthClient() {
+async function oauthClient() {
   const redirectUri = new URL('/oauth2/callback', process.env.BASE_URL).toString();
   const client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
     redirectUri
   );
-  const tokens = store.getTokens();
+  const tokens = await store.getTokens();
   if (tokens) client.setCredentials(tokens);
   client.on('tokens', (fresh) => {
-    const current = store.getTokens() || {};
-    store.saveTokens({ ...current, ...fresh });
+    store.getTokens()
+      .then((current) => store.saveTokens({ ...(current || {}), ...fresh }))
+      .catch((error) => console.error('Failed to persist refreshed YouTube token:', error.message));
   });
   return client;
 }
 
-function authorizationUrl(state) {
-  return oauthClient().generateAuthUrl({
+async function authorizationUrl(state) {
+  const client = await oauthClient();
+  return client.generateAuthUrl({
     access_type: 'offline',
     prompt: 'consent',
     include_granted_scopes: true,
@@ -31,14 +33,14 @@ function authorizationUrl(state) {
 }
 
 async function exchangeCode(code) {
-  const client = oauthClient();
+  const client = await oauthClient();
   const { tokens } = await client.getToken(code);
-  store.saveTokens(tokens);
+  await store.saveTokens(tokens);
   return tokens;
 }
 
-function service() {
-  const client = oauthClient();
+async function service() {
+  const client = await oauthClient();
   if (!client.credentials?.refresh_token && !client.credentials?.access_token) {
     throw new Error('YouTube is not connected');
   }
@@ -46,21 +48,12 @@ function service() {
 }
 
 async function uploadPrivate({ filePath, title, description, tags, madeForKids = false }) {
-  const youtube = service();
+  const youtube = await service();
   const response = await youtube.videos.insert({
     part: ['snippet', 'status'],
     requestBody: {
-      snippet: {
-        title,
-        description,
-        tags,
-        categoryId: '20',
-        defaultLanguage: 'en'
-      },
-      status: {
-        privacyStatus: 'private',
-        selfDeclaredMadeForKids: Boolean(madeForKids)
-      }
+      snippet: { title, description, tags, categoryId: '20', defaultLanguage: 'en' },
+      status: { privacyStatus: 'private', selfDeclaredMadeForKids: Boolean(madeForKids) }
     },
     media: { body: fs.createReadStream(filePath) }
   });
@@ -68,7 +61,7 @@ async function uploadPrivate({ filePath, title, description, tags, madeForKids =
 }
 
 async function publish(videoId, publishAt) {
-  const youtube = service();
+  const youtube = await service();
   const status = publishAt
     ? { privacyStatus: 'private', publishAt: new Date(publishAt).toISOString() }
     : { privacyStatus: 'public' };
@@ -80,7 +73,8 @@ async function publish(videoId, publishAt) {
 }
 
 async function getVideo(videoId) {
-  const response = await service().videos.list({
+  const youtube = await service();
+  const response = await youtube.videos.list({
     part: ['snippet', 'status', 'processingDetails'],
     id: [videoId]
   });
