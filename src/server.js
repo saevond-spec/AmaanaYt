@@ -9,7 +9,7 @@ const multer = require('multer');
 const store = require('./store');
 const youtube = require('./youtube');
 
-for (const name of ['BASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SESSION_SECRET', 'TOKEN_ENCRYPTION_KEY', 'AGENT_KEY', 'ADMIN_KEY']) {
+for (const name of ['BASE_URL', 'DATABASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SESSION_SECRET', 'TOKEN_ENCRYPTION_KEY', 'AGENT_KEY', 'ADMIN_KEY']) {
   if (!process.env[name]) throw new Error(`Missing required environment variable: ${name}`);
 }
 
@@ -31,12 +31,7 @@ app.use(session({
   secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
-  cookie: {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
-    maxAge: 10 * 60 * 1000
-  }
+  cookie: { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', maxAge: 10 * 60 * 1000 }
 }));
 
 function keyGuard(environmentName, message) {
@@ -45,9 +40,7 @@ function keyGuard(environmentName, message) {
     const expected = process.env[environmentName];
     const a = Buffer.from(String(supplied || ''));
     const b = Buffer.from(String(expected));
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-      return res.status(401).json({ error: message });
-    }
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(401).json({ error: message });
     next();
   };
 }
@@ -55,19 +48,28 @@ function keyGuard(environmentName, message) {
 const agent = keyGuard('AGENT_KEY', 'Agent key required');
 const admin = keyGuard('ADMIN_KEY', 'Owner approval key required');
 
-app.get('/healthz', (_req, res) => res.json({ ok: true }));
+app.get('/healthz', async (_req, res) => {
+  try {
+    await store.ping();
+    res.json({ ok: true, database: 'connected' });
+  } catch {
+    res.status(503).json({ ok: false, database: 'unavailable' });
+  }
+});
 
-app.get('/auth/google', admin, (req, res) => {
-  const state = crypto.randomBytes(24).toString('hex');
-  req.session.oauthState = state;
-  res.redirect(youtube.authorizationUrl(state));
+app.get('/auth/google', admin, async (req, res, next) => {
+  try {
+    const state = crypto.randomBytes(24).toString('hex');
+    req.session.oauthState = state;
+    res.redirect(await youtube.authorizationUrl(state));
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.get('/oauth2/callback', async (req, res, next) => {
   try {
-    if (!req.query.state || req.query.state !== req.session.oauthState) {
-      return res.status(400).send('Invalid OAuth state');
-    }
+    if (!req.query.state || req.query.state !== req.session.oauthState) return res.status(400).send('Invalid OAuth state');
     await youtube.exchangeCode(req.query.code);
     delete req.session.oauthState;
     res.send('YouTube connected. You may close this page.');
@@ -76,7 +78,13 @@ app.get('/oauth2/callback', async (req, res, next) => {
   }
 });
 
-app.get('/api/drafts', admin, (_req, res) => res.json(store.listDrafts()));
+app.get('/api/drafts', admin, async (_req, res, next) => {
+  try {
+    res.json(await store.listDrafts());
+  } catch (error) {
+    next(error);
+  }
+});
 
 app.post('/api/drafts', agent, upload.single('video'), async (req, res, next) => {
   try {
@@ -92,7 +100,7 @@ app.post('/api/drafts', agent, upload.single('video'), async (req, res, next) =>
       madeForKids: req.body.madeForKids === 'true'
     });
     fs.unlink(req.file.path, () => {});
-    const draft = store.addDraft({
+    const draft = await store.addDraft({
       id: crypto.randomUUID(),
       youtubeVideoId: uploaded.id,
       title,
@@ -108,11 +116,11 @@ app.post('/api/drafts', agent, upload.single('video'), async (req, res, next) =>
 
 app.post('/api/drafts/:id/approve', admin, async (req, res, next) => {
   try {
-    const draft = store.listDrafts().find((item) => item.id === req.params.id);
+    const draft = await store.getDraft(req.params.id);
     if (!draft) return res.status(404).json({ error: 'Draft not found' });
     if (draft.status !== 'awaiting_owner_approval') return res.status(409).json({ error: 'Draft was already handled' });
     const published = await youtube.publish(draft.youtubeVideoId, req.body.publishAt || null);
-    const updated = store.updateDraft(draft.id, {
+    const updated = await store.updateDraft(draft.id, {
       status: req.body.publishAt ? 'scheduled' : 'published',
       publishAt: req.body.publishAt || null,
       youtubeUrl: `https://youtu.be/${draft.youtubeVideoId}`
@@ -125,7 +133,7 @@ app.post('/api/drafts/:id/approve', admin, async (req, res, next) => {
 
 app.get('/api/drafts/:id/status', admin, async (req, res, next) => {
   try {
-    const draft = store.listDrafts().find((item) => item.id === req.params.id);
+    const draft = await store.getDraft(req.params.id);
     if (!draft) return res.status(404).json({ error: 'Draft not found' });
     res.json(await youtube.getVideo(draft.youtubeVideoId));
   } catch (error) {
@@ -138,6 +146,9 @@ app.use((error, _req, res, _next) => {
   res.status(error.code || 500).json({ error: error.message || 'Unexpected server error' });
 });
 
-app.listen(process.env.PORT || 3000, () => {
-  console.log(`AmaanaYt listening on port ${process.env.PORT || 3000}`);
-});
+store.init()
+  .then(() => app.listen(process.env.PORT || 3000, () => console.log(`AmaanaYt listening on port ${process.env.PORT || 3000}`)))
+  .catch((error) => {
+    console.error('Database initialization failed:', error.message);
+    process.exit(1);
+  });
