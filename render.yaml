@@ -2,7 +2,6 @@ services:
   - type: web
     name: amaana-yt
     runtime: node
-    plan: free
     buildCommand: npm ci
     startCommand: npm start
     healthCheckPath: /healthz
@@ -18,6 +17,8 @@ services:
       - key: SESSION_SECRET
         generateValue: true
       - key: TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: AGENT_KEY
         sync: false
       - key: ADMIN_KEY
         sync: false
