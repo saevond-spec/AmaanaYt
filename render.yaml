@@ -2,7 +2,7 @@ services:
   - type: web
     name: amaana-yt
     runtime: node
-    buildCommand: npm ci
+    buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /healthz
     envVars:
