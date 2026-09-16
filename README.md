@@ -2,83 +2,120 @@
 
 Approval-based YouTube Shorts publishing service for **@saevond**.
 
-AmaanaYt connects to YouTube with Google OAuth, lets an OpenClaw agent upload Shorts as **private drafts**, and requires a separate owner key before a draft can become public or scheduled.
+AmaanaYt connects to YouTube with Google OAuth, lets an OpenClaw agent upload Shorts as private drafts, and requires a separate owner key before a draft can become public or scheduled.
 
 ## Security model
 
-- Google password is never collected.
+- Google passwords are never collected.
 - OAuth credentials and refresh tokens are never committed to GitHub.
-- Stored YouTube tokens are encrypted with AES-256-GCM.
+- YouTube tokens are encrypted with AES-256-GCM before database storage.
 - `AGENT_KEY` can upload private drafts but cannot publish them.
-- `ADMIN_KEY` is owner-only and controls OAuth connection, draft review, publication, and scheduling.
+- `ADMIN_KEY` controls OAuth connection, draft review, publication, and scheduling.
 - New uploads always start as private.
-- The service does not delete existing channel videos.
+- The service does not delete existing videos.
 
 Keep `ADMIN_KEY` out of OpenClaw. Give OpenClaw only `AGENT_KEY`.
 
-## 1. Google Cloud setup
+## Free deployment architecture
 
-1. Create a Google Cloud project.
-2. Enable **YouTube Data API v3**.
-3. Configure the Google Auth consent screen.
-4. Create an OAuth client of type **Web application**.
-5. Add this authorized redirect URI exactly:
-   `https://YOUR-SERVICE-DOMAIN/oauth2/callback`
-6. Save the client ID and client secret as hosting environment variables. Never commit them.
+- Render Free web service runs the Node.js application.
+- A free external PostgreSQL project stores encrypted OAuth tokens and draft records.
+- Temporary video files use `/tmp/uploads` and are deleted after upload.
+- No Render persistent disk or payment method is required.
 
-The requested OAuth scope is only:
+Render Free can sleep when idle, so the first request after inactivity may take about a minute. The external database preserves the YouTube connection across Render restarts.
 
-`https://www.googleapis.com/auth/youtube.upload`
+## 1. Create the free database
 
-## 2. Environment variables
+Create a free PostgreSQL project, for example at [Supabase](https://supabase.com/).
 
-Copy `.env.example` to `.env` for local development.
+In Supabase:
 
-Generate strong secrets:
+1. Create a new project and save its database password.
+2. Open **Connect**.
+3. Select the **Session pooler** connection string. This is generally the safest choice for an IPv4 hosting service.
+4. Copy the URI connection string.
+5. Replace the password placeholder with the database password.
+6. Save the complete URI as `DATABASE_URL` in Render.
+
+It resembles:
+
+`postgresql://postgres.PROJECT:PASSWORD@POOLER-HOST:5432/postgres`
+
+Treat this URL as a secret. Never commit or post it publicly. AmaanaYt creates its two required tables automatically.
+
+## 2. Deploy the Render Blueprint
+
+1. Sign in at [Render](https://dashboard.render.com/) using GitHub.
+2. Choose **New → Blueprint**.
+3. Connect `saevond-spec/AmaanaYt`.
+4. Use branch `main` and the root `render.yaml`.
+5. Confirm that the service plan says **Free**.
+6. Supply the environment variables requested by Render.
+7. Deploy the Blueprint.
+
+Required values:
+
+- `BASE_URL`: exact Render HTTPS origin, with no trailing slash
+- `DATABASE_URL`: external PostgreSQL session-pooler URI
+- `GOOGLE_CLIENT_ID`: Google OAuth web client ID
+- `GOOGLE_CLIENT_SECRET`: Google OAuth client secret
+- `TOKEN_ENCRYPTION_KEY`: exactly 64 hexadecimal characters
+- `AGENT_KEY`: long random upload-only secret
+- `ADMIN_KEY`: different owner-only secret
+
+Render generates `SESSION_SECRET`.
+
+Generate independent secrets with:
 
 ```bash
 openssl rand -hex 32
 ```
 
-Use separate generated values for `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`, `AGENT_KEY`, and `ADMIN_KEY`. `TOKEN_ENCRYPTION_KEY` must be exactly 64 hexadecimal characters.
+Run it three times for `TOKEN_ENCRYPTION_KEY`, `AGENT_KEY`, and `ADMIN_KEY`.
 
-Set `BASE_URL` to the public HTTPS origin with no trailing path, for example:
+## 3. Google Cloud setup
 
-`https://amaana-yt.example.com`
+1. Create a Google Cloud project.
+2. Enable **YouTube Data API v3**.
+3. Configure the Google Auth consent screen.
+4. Create an OAuth client of type **Web application**.
+5. Add the exact authorized redirect URI:
+   `https://YOUR-RENDER-DOMAIN/oauth2/callback`
+6. Store the client ID and secret only in Render.
 
-## 3. Run locally
+The app requests only:
 
-```bash
-npm install
-npm start
+`https://www.googleapis.com/auth/youtube.upload`
+
+## 4. Verify deployment
+
+Open:
+
+`https://YOUR-RENDER-DOMAIN/healthz`
+
+Expected response:
+
+```json
+{"ok":true,"database":"connected"}
 ```
 
-Health check:
+## 5. Connect @saevond
 
-`GET /healthz`
-
-## 4. Connect @saevond to YouTube
-
-Open this URL in your normal browser and send the owner key as the `x-admin-key` header:
+Send an authenticated request to:
 
 `GET /auth/google`
 
-For easiest setup, use an API client such as Postman for this one request. Sign in on Google's own page, choose the Google account that owns **@saevond**, review the requested upload permission, and approve it.
+using the `x-admin-key` header. Open the returned Google authorization URL, choose the Google account that owns **@saevond**, and approve the upload permission.
 
-The callback stores an encrypted refresh token in `DATA_DIR`. That directory must use persistent storage in production or the connection will be lost when the service restarts.
+## 6. OpenClaw installation
 
-## 5. OpenClaw installation
+Copy `skills/youtube-manager` into the OpenClaw skills directory and configure:
 
-Copy this folder into the OpenClaw skills directory:
+- `AMAANA_YT_URL`: deployed Render origin
+- `AMAANA_YT_AGENT_KEY`: same value as `AGENT_KEY`
 
-`skills/youtube-manager`
-
-Configure the OpenClaw runtime with:
-
-- `AMAANA_YT_URL`: deployed service origin
-- `AMAANA_YT_AGENT_KEY`: same value as the service's `AGENT_KEY`
-
-Do **not** give OpenClaw `ADMIN_KEY`.
+Do not give OpenClaw `ADMIN_KEY`.
 
 ## API workflow
 
@@ -94,7 +131,7 @@ curl -X POST "$AMAANA_YT_URL/api/drafts" \
   -F "madeForKids=false"
 ```
 
-### Review drafts as the owner
+### Review drafts
 
 ```bash
 curl "$AMAANA_YT_URL/api/drafts" -H "x-admin-key: YOUR_ADMIN_KEY"
@@ -118,14 +155,8 @@ curl -X POST "$AMAANA_YT_URL/api/drafts/DRAFT_ID/approve" \
   -d '{"publishAt":"2026-09-20T18:00:00-04:00"}'
 ```
 
-Scheduled videos must remain private until YouTube releases them at `publishAt`.
-
 ## Shorts requirements
 
 Use square or vertical video no longer than three minutes. For gameplay, 1080×1920 (9:16) is recommended. Confirm music and footage rights before uploading.
 
-## Deployment note
-
-`render.yaml` includes a persistent disk because encrypted OAuth tokens and the approval ledger must survive restarts. Confirm the current hosting price before deploying; persistent disks may not be included in free hosting.
-
-New Google API projects created after July 28, 2020 can be limited to private API uploads until Google completes an API compliance audit. The private-first workflow will still upload drafts, but public automation may require that audit.
+New Google API projects can be limited to private API uploads until Google completes an API compliance audit. Private drafts will still work, but public automation may require that audit.
