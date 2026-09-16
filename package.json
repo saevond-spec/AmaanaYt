@@ -1,6 +1,6 @@
 {
   "name": "amaana-yt",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Approval-based YouTube Shorts manager for Saevond",
   "main": "src/server.js",
@@ -15,6 +15,7 @@
     "express-session": "^1.18.1",
     "googleapis": "^144.0.0",
     "helmet": "^8.0.0",
-    "multer": "^1.4.5-lts.1"
+    "multer": "^1.4.5-lts.1",
+    "pg": "^8.13.1"
   }
 }
