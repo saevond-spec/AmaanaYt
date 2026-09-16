@@ -9,7 +9,7 @@ const multer = require('multer');
 const store = require('./store');
 const youtube = require('./youtube');
 
-for (const name of ['BASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SESSION_SECRET', 'TOKEN_ENCRYPTION_KEY', 'ADMIN_KEY']) {
+for (const name of ['BASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SESSION_SECRET', 'TOKEN_ENCRYPTION_KEY', 'AGENT_KEY', 'ADMIN_KEY']) {
   if (!process.env[name]) throw new Error(`Missing required environment variable: ${name}`);
 }
 
@@ -39,20 +39,25 @@ app.use(session({
   }
 }));
 
-function admin(req, res, next) {
-  const supplied = req.get('x-admin-key') || req.body?.adminKey;
-  const expected = process.env.ADMIN_KEY;
-  const a = Buffer.from(String(supplied || ''));
-  const b = Buffer.from(String(expected));
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    return res.status(401).json({ error: 'Owner approval key required' });
-  }
-  next();
+function keyGuard(environmentName, message) {
+  return (req, res, next) => {
+    const supplied = req.get(environmentName === 'ADMIN_KEY' ? 'x-admin-key' : 'x-agent-key');
+    const expected = process.env[environmentName];
+    const a = Buffer.from(String(supplied || ''));
+    const b = Buffer.from(String(expected));
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return res.status(401).json({ error: message });
+    }
+    next();
+  };
 }
+
+const agent = keyGuard('AGENT_KEY', 'Agent key required');
+const admin = keyGuard('ADMIN_KEY', 'Owner approval key required');
 
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
-app.get('/auth/google', (req, res) => {
+app.get('/auth/google', admin, (req, res) => {
   const state = crypto.randomBytes(24).toString('hex');
   req.session.oauthState = state;
   res.redirect(youtube.authorizationUrl(state));
@@ -73,7 +78,7 @@ app.get('/oauth2/callback', async (req, res, next) => {
 
 app.get('/api/drafts', admin, (_req, res) => res.json(store.listDrafts()));
 
-app.post('/api/drafts', admin, upload.single('video'), async (req, res, next) => {
+app.post('/api/drafts', agent, upload.single('video'), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'A video file is required' });
     const title = String(req.body.title || '').trim();
