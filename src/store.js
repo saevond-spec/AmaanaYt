@@ -1,27 +1,33 @@
-const fs = require('fs');
-const path = require('path');
 const crypto = require('crypto');
+const { Pool } = require('pg');
 
-const dataDir = path.resolve(process.env.DATA_DIR || './data');
-const storeFile = path.join(dataDir, 'store.json');
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
+  max: 3,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000
+});
 
-function ensureStore() {
-  fs.mkdirSync(dataDir, { recursive: true });
-  if (!fs.existsSync(storeFile)) {
-    fs.writeFileSync(storeFile, JSON.stringify({ encryptedTokens: null, drafts: [] }, null, 2), { mode: 0o600 });
+let initialized;
+
+function init() {
+  if (!initialized) {
+    initialized = pool.query(`
+      CREATE TABLE IF NOT EXISTS amaana_state (
+        key TEXT PRIMARY KEY,
+        value JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS amaana_drafts (
+        id UUID PRIMARY KEY,
+        payload JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
   }
-}
-
-function readStore() {
-  ensureStore();
-  return JSON.parse(fs.readFileSync(storeFile, 'utf8'));
-}
-
-function writeStore(data) {
-  ensureStore();
-  const temp = storeFile + '.tmp';
-  fs.writeFileSync(temp, JSON.stringify(data, null, 2), { mode: 0o600 });
-  fs.renameSync(temp, storeFile);
+  return initialized;
 }
 
 function key() {
@@ -51,34 +57,71 @@ function decrypt(payload) {
   ]).toString('utf8'));
 }
 
-function saveTokens(tokens) {
-  const data = readStore();
-  data.encryptedTokens = encrypt(tokens);
-  writeStore(data);
+async function saveTokens(tokens) {
+  await init();
+  await pool.query(
+    `INSERT INTO amaana_state (key, value, updated_at)
+     VALUES ('youtube_tokens', $1::jsonb, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [JSON.stringify(encrypt(tokens))]
+  );
 }
 
-function getTokens() {
-  return decrypt(readStore().encryptedTokens);
+async function getTokens() {
+  await init();
+  const result = await pool.query(`SELECT value FROM amaana_state WHERE key = 'youtube_tokens'`);
+  return decrypt(result.rows[0]?.value || null);
 }
 
-function listDrafts() {
-  return readStore().drafts.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+async function listDrafts() {
+  await init();
+  const result = await pool.query('SELECT payload FROM amaana_drafts ORDER BY created_at DESC');
+  return result.rows.map((row) => row.payload);
 }
 
-function addDraft(draft) {
-  const data = readStore();
-  data.drafts.push(draft);
-  writeStore(data);
+async function getDraft(id) {
+  await init();
+  const result = await pool.query('SELECT payload FROM amaana_drafts WHERE id = $1', [id]);
+  return result.rows[0]?.payload || null;
+}
+
+async function addDraft(draft) {
+  await init();
+  await pool.query(
+    'INSERT INTO amaana_drafts (id, payload) VALUES ($1, $2::jsonb)',
+    [draft.id, JSON.stringify(draft)]
+  );
   return draft;
 }
 
-function updateDraft(id, patch) {
-  const data = readStore();
-  const index = data.drafts.findIndex((draft) => draft.id === id);
-  if (index < 0) return null;
-  data.drafts[index] = { ...data.drafts[index], ...patch, updatedAt: new Date().toISOString() };
-  writeStore(data);
-  return data.drafts[index];
+async function updateDraft(id, patch) {
+  await init();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query('SELECT payload FROM amaana_drafts WHERE id = $1 FOR UPDATE', [id]);
+    if (!result.rows[0]) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    const updated = { ...result.rows[0].payload, ...patch, updatedAt: new Date().toISOString() };
+    await client.query(
+      'UPDATE amaana_drafts SET payload = $2::jsonb, updated_at = NOW() WHERE id = $1',
+      [id, JSON.stringify(updated)]
+    );
+    await client.query('COMMIT');
+    return updated;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
-module.exports = { saveTokens, getTokens, listDrafts, addDraft, updateDraft };
+async function ping() {
+  await init();
+  await pool.query('SELECT 1');
+}
+
+module.exports = { init, ping, saveTokens, getTokens, listDrafts, getDraft, addDraft, updateDraft };
