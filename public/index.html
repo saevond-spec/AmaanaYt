@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#090b11">
+  <title>Amaana | Saevond YouTube Manager</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div class="brand-mark" aria-hidden="true">A</div>
+      <div>
+        <p class="eyebrow">SAEVOND CREATOR SYSTEM</p>
+        <h1>Amaana</h1>
+        <p class="subtitle">Private-first YouTube Shorts manager</p>
+      </div>
+    </header>
+
+    <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
+
+    <section id="loginView" class="card login-card">
+      <p class="eyebrow">OWNER ACCESS</p>
+      <h2>Open your dashboard</h2>
+      <p class="muted">Use the private admin key stored in Render. It is never sent to Google or saved in this browser.</p>
+      <form id="loginForm">
+        <label for="adminKey">Admin key</label>
+        <input id="adminKey" name="adminKey" type="password" autocomplete="current-password" required>
+        <button class="primary full" type="submit">Unlock dashboard</button>
+      </form>
+    </section>
+
+    <section id="dashboardView" class="hidden">
+      <div class="toolbar">
+        <div>
+          <p class="eyebrow">OWNER DASHBOARD</p>
+          <h2>@saevond</h2>
+        </div>
+        <button id="logoutButton" class="ghost" type="button">Log out</button>
+      </div>
+
+      <section class="card connection-card">
+        <div>
+          <p class="eyebrow">YOUTUBE CONNECTION</p>
+          <div class="status-line">
+            <span id="connectionDot" class="status-dot"></span>
+            <strong id="connectionText">Checking…</strong>
+          </div>
+          <p id="connectionHelp" class="muted">Checking your encrypted YouTube authorization.</p>
+        </div>
+        <button id="connectButton" class="youtube" type="button">Connect YouTube</button>
+      </section>
+
+      <section class="card">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">PRIVATE UPLOAD</p>
+            <h2>Create a Short draft</h2>
+          </div>
+          <span class="safe-badge">Private first</span>
+        </div>
+        <form id="uploadForm">
+          <label for="video">Video file</label>
+          <input id="video" name="video" type="file" accept="video/*" required>
+
+          <label for="title">Title</label>
+          <input id="title" name="title" maxlength="100" placeholder="Your Short title" required>
+
+          <label for="description">Description</label>
+          <textarea id="description" name="description" rows="4" placeholder="Description, CTA, and affiliate disclosure when relevant"></textarea>
+
+          <label for="tags">Tags</label>
+          <input id="tags" name="tags" placeholder="NARAKA BLADEPOINT, gaming, shorts">
+
+          <label class="check-row" for="madeForKids">
+            <input id="madeForKids" name="madeForKids" type="checkbox" value="true">
+            <span>This video is made for kids</span>
+          </label>
+
+          <button id="uploadButton" class="primary full" type="submit">Upload as private draft</button>
+          <p class="fine-print">Nothing becomes public until you approve it below.</p>
+        </form>
+      </section>
+
+      <section class="draft-section">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">APPROVAL QUEUE</p>
+            <h2>Short drafts</h2>
+          </div>
+          <button id="refreshButton" class="ghost" type="button">Refresh</button>
+        </div>
+        <div id="draftList" class="draft-list">
+          <div class="empty-state">Loading drafts…</div>
+        </div>
+      </section>
+    </section>
+  </main>
+</body>
+</html>

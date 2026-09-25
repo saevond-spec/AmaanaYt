@@ -15,6 +15,7 @@ for (const name of ['BASE_URL', 'DATABASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIE
 
 const app = express();
 const uploadDir = path.resolve(process.env.UPLOAD_DIR || './uploads');
+const publicDir = path.resolve(__dirname, '../public');
 fs.mkdirSync(uploadDir, { recursive: true });
 
 const upload = multer({
@@ -31,22 +32,41 @@ app.use(session({
   secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
-  cookie: { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', maxAge: 10 * 60 * 1000 }
+  rolling: true,
+  cookie: { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', maxAge: 30 * 60 * 1000 }
 }));
+app.use(express.static(publicDir, { index: false, maxAge: '1h' }));
+
+function keysMatch(supplied, expected) {
+  const a = Buffer.from(String(supplied || ''));
+  const b = Buffer.from(String(expected || ''));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
 
 function keyGuard(environmentName, message) {
   return (req, res, next) => {
     const supplied = req.get(environmentName === 'ADMIN_KEY' ? 'x-admin-key' : 'x-agent-key');
-    const expected = process.env[environmentName];
-    const a = Buffer.from(String(supplied || ''));
-    const b = Buffer.from(String(expected));
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(401).json({ error: message });
+    if (!keysMatch(supplied, process.env[environmentName])) return res.status(401).json({ error: message });
     next();
   };
 }
 
-const agent = keyGuard('AGENT_KEY', 'Agent key required');
-const admin = keyGuard('ADMIN_KEY', 'Owner approval key required');
+const agentKey = keyGuard('AGENT_KEY', 'Agent key required');
+
+function admin(req, res, next) {
+  if (req.session?.adminAuthenticated || keysMatch(req.get('x-admin-key'), process.env.ADMIN_KEY)) return next();
+  return res.status(401).json({ error: 'Owner approval required' });
+}
+
+function agentOrAdmin(req, res, next) {
+  if (req.session?.adminAuthenticated || keysMatch(req.get('x-admin-key'), process.env.ADMIN_KEY)) return next();
+  return agentKey(req, res, next);
+}
+
+app.get('/', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.sendFile(path.join(publicDir, 'index.html'));
+});
 
 app.get('/healthz', async (_req, res) => {
   try {
@@ -54,6 +74,41 @@ app.get('/healthz', async (_req, res) => {
     res.json({ ok: true, database: 'connected' });
   } catch {
     res.status(503).json({ ok: false, database: 'unavailable' });
+  }
+});
+
+app.get('/api/admin/session', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ authenticated: Boolean(req.session?.adminAuthenticated) });
+});
+
+app.post('/api/admin/login', (req, res, next) => {
+  if (!keysMatch(req.body?.key, process.env.ADMIN_KEY)) {
+    return res.status(401).json({ error: 'Incorrect admin key' });
+  }
+  req.session.regenerate((error) => {
+    if (error) return next(error);
+    req.session.adminAuthenticated = true;
+    req.session.save((saveError) => {
+      if (saveError) return next(saveError);
+      res.json({ ok: true });
+    });
+  });
+});
+
+app.post('/api/admin/logout', admin, (req, res, next) => {
+  req.session.destroy((error) => {
+    if (error) return next(error);
+    res.clearCookie('connect.sid');
+    res.json({ ok: true });
+  });
+});
+
+app.get('/api/youtube/status', admin, async (_req, res, next) => {
+  try {
+    res.json({ connected: await youtube.isConnected() });
+  } catch (error) {
+    next(error);
   }
 });
 
@@ -69,10 +124,11 @@ app.get('/auth/google', admin, async (req, res, next) => {
 
 app.get('/oauth2/callback', async (req, res, next) => {
   try {
-    if (!req.query.state || req.query.state !== req.session.oauthState) return res.status(400).send('Invalid OAuth state');
+    if (!req.query.state || req.query.state !== req.session.oauthState) return res.status(400).send('Invalid OAuth state. Return to the dashboard and try connecting again.');
+    if (!req.query.code) return res.status(400).send('Google did not return an authorization code.');
     await youtube.exchangeCode(req.query.code);
     delete req.session.oauthState;
-    res.send('YouTube connected. You may close this page.');
+    res.redirect('/?youtube=connected');
   } catch (error) {
     next(error);
   }
@@ -86,7 +142,7 @@ app.get('/api/drafts', admin, async (_req, res, next) => {
   }
 });
 
-app.post('/api/drafts', agent, upload.single('video'), async (req, res, next) => {
+app.post('/api/drafts', agentOrAdmin, upload.single('video'), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'A video file is required' });
     const title = String(req.body.title || '').trim();
