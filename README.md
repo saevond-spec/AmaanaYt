@@ -2,13 +2,13 @@
 
 Approval-based YouTube Shorts publishing service for **@saevond**.
 
-AmaanaYt connects to YouTube with Google OAuth, lets an OpenClaw agent upload Shorts as private drafts, and requires a separate owner key before a draft can become public or scheduled.
+AmaanaYt connects to YouTube and Twitch with OAuth, turns approved Twitch VOD timestamps into vertical Shorts, uploads them privately, and requires a separate owner key before a draft can become public or scheduled.
 
 ## Security model
 
 - Google passwords are never collected.
 - OAuth credentials and refresh tokens are never committed to GitHub.
-- YouTube tokens are encrypted with AES-256-GCM before database storage.
+- YouTube and Twitch tokens are encrypted with AES-256-GCM before database storage.
 - `AGENT_KEY` can upload private drafts but cannot publish them.
 - `ADMIN_KEY` controls OAuth connection, draft review, publication, and scheduling.
 - New uploads always start as private.
@@ -60,6 +60,8 @@ Required values:
 - `DATABASE_URL`: external PostgreSQL session-pooler URI
 - `GOOGLE_CLIENT_ID`: Google OAuth web client ID
 - `GOOGLE_CLIENT_SECRET`: Google OAuth client secret
+- `TWITCH_CLIENT_ID`: client ID for a dedicated Twitch application
+- `TWITCH_CLIENT_SECRET`: secret for that Twitch application
 - `TOKEN_ENCRYPTION_KEY`: exactly 64 hexadecimal characters
 - `AGENT_KEY`: long random upload-only secret
 - `ADMIN_KEY`: different owner-only secret
@@ -88,7 +90,19 @@ The app requests only:
 
 `https://www.googleapis.com/auth/youtube.upload`
 
-## 4. Verify deployment
+## 4. Twitch developer setup
+
+1. Open the Twitch Developer Console and register a dedicated application for Amaana.
+2. Add this exact OAuth redirect URL:
+   `https://YOUR-RENDER-DOMAIN/oauth/twitch/callback`
+3. Copy the Client ID and generate a Client Secret.
+4. Store them only in Render as `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET`.
+5. Redeploy Amaana, open the dashboard, and tap **Connect Twitch**.
+6. Sign in with the Twitch account that owns the Saevond channel and approve `channel:manage:clips`.
+
+In Twitch **Creator Dashboard → Settings → Stream → VOD Settings**, enable **Store past broadcasts**. Automatic post-stream clipping cannot work if Twitch never creates the archive VOD.
+
+## 5. Verify deployment
 
 Open:
 
@@ -100,7 +114,7 @@ Expected response:
 {"ok":true,"database":"connected"}
 ```
 
-## 5. Connect @saevond
+## 6. Connect @saevond
 
 Send an authenticated request to:
 
@@ -108,7 +122,17 @@ Send an authenticated request to:
 
 using the `x-admin-key` header. Open the returned Google authorization URL, choose the Google account that owns **@saevond**, and approve the upload permission.
 
-## 6. OpenClaw installation
+## 7. Connect SweatyClanker
+
+On the SweatyClanker Render service, add:
+
+- `CLIP_WEBHOOK_URL=https://YOUR-RENDER-DOMAIN/api/twitch/vod-clips`
+- `CLIP_WEBHOOK_KEY`: the same secret already stored as Amaana's `AGENT_KEY`
+- `HIGHLIGHT_DETECTION_ENABLED=true`
+
+Never paste the webhook key into chat or commit it to GitHub.
+
+## 8. OpenClaw installation
 
 Copy `skills/youtube-manager` into the OpenClaw skills directory and configure:
 
@@ -118,6 +142,17 @@ Copy `skills/youtube-manager` into the OpenClaw skills directory and configure:
 Do not give OpenClaw `ADMIN_KEY`.
 
 ## API workflow
+
+### Queue AI-selected Twitch VOD moments
+
+```bash
+curl -X POST "$AMAANA_YT_URL/api/twitch/vod-clips" \
+  -H "content-type: application/json" \
+  -H "x-agent-key: $AMAANA_YT_AGENT_KEY" \
+  -d '{"vodId":"1234567890","channel":"saevond","timestamps":[{"startSeconds":90,"endSeconds":125,"title":"The comeback was unreal","reason":"Strong clutch reaction","score":91}]}'
+```
+
+Amaana accepts up to three top moments per request, creates official Twitch clips, uses Twitch's portrait media when available, otherwise formats landscape gameplay as a 9:16 video, and uploads each result privately to YouTube.
 
 ### Upload a private Short
 

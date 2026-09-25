@@ -7,8 +7,13 @@ const connectionDot = document.querySelector('#connectionDot');
 const connectionText = document.querySelector('#connectionText');
 const connectionHelp = document.querySelector('#connectionHelp');
 const connectButton = document.querySelector('#connectButton');
+const twitchConnectionDot = document.querySelector('#twitchConnectionDot');
+const twitchConnectionText = document.querySelector('#twitchConnectionText');
+const twitchConnectionHelp = document.querySelector('#twitchConnectionHelp');
+const twitchConnectButton = document.querySelector('#twitchConnectButton');
 const draftList = document.querySelector('#draftList');
 const uploadButton = document.querySelector('#uploadButton');
+let draftPoll = null;
 
 function showNotice(message, isError = false) {
   notice.textContent = message;
@@ -36,6 +41,8 @@ async function api(url, options = {}) {
 }
 
 function showLogin() {
+  if (draftPoll) clearInterval(draftPoll);
+  draftPoll = null;
   loginView.classList.remove('hidden');
   dashboardView.classList.add('hidden');
 }
@@ -44,6 +51,9 @@ function showDashboard() {
   loginView.classList.add('hidden');
   dashboardView.classList.remove('hidden');
   refreshDashboard();
+  if (!draftPoll) draftPoll = setInterval(() => {
+    if (!document.hidden) loadDrafts();
+  }, 12000);
 }
 
 async function refreshConnection() {
@@ -54,6 +64,25 @@ async function refreshConnection() {
     ? 'Amaana can upload private Shorts to your authorized channel.'
     : 'Connect the Google account that owns @saevond.';
   connectButton.textContent = status.connected ? 'Reconnect YouTube' : 'Connect YouTube';
+}
+
+async function refreshTwitchConnection() {
+  const status = await api('/api/twitch/status');
+  twitchConnectionDot.classList.toggle('connected', status.connected);
+  twitchConnectionText.textContent = status.connected
+    ? `Connected as ${status.displayName || status.login || 'Twitch user'}`
+    : 'Not connected';
+  if (!status.configured) {
+    twitchConnectionHelp.textContent = 'Add the Twitch Client ID and Client Secret in Render first.';
+    twitchConnectButton.disabled = true;
+    twitchConnectButton.textContent = 'Setup required';
+  } else {
+    twitchConnectionHelp.textContent = status.connected
+      ? 'Amaana can create and download clips from your Twitch VODs.'
+      : (status.error || 'Connect the Twitch account that owns the Saevond channel.');
+    twitchConnectButton.disabled = false;
+    twitchConnectButton.textContent = status.connected ? 'Reconnect Twitch' : 'Connect Twitch';
+  }
 }
 
 function element(tag, className, text) {
@@ -92,6 +121,21 @@ function renderDraft(draft) {
   const created = draft.createdAt ? new Date(draft.createdAt).toLocaleString() : 'Unknown date';
   card.append(element('p', 'draft-meta', `Created ${created}`));
 
+  if (draft.sourceType === 'twitch_vod') {
+    const source = element('p', 'draft-meta', `Twitch VOD ${draft.vodId} · ${Math.round(draft.startSeconds || 0)}s–${Math.round(draft.endSeconds || 0)}s`);
+    card.append(source);
+    if (draft.twitchUrl) {
+      const twitchLink = element('a', 'ghost video-link');
+      twitchLink.href = draft.twitchUrl;
+      twitchLink.target = '_blank';
+      twitchLink.rel = 'noopener noreferrer';
+      twitchLink.textContent = 'Open Twitch clip';
+      card.append(twitchLink);
+    }
+  }
+
+  if (draft.error) card.append(element('p', 'draft-error', draft.error));
+
   if (draft.youtubeUrl) {
     const link = element('a', 'ghost video-link');
     link.href = draft.youtubeUrl;
@@ -126,6 +170,25 @@ function renderDraft(draft) {
     actions.append(publish, scheduleRow);
     card.append(actions);
   }
+
+  if (draft.status === 'clip_failed') {
+    const retry = element('button', 'ghost', 'Retry clip');
+    retry.type = 'button';
+    retry.addEventListener('click', async () => {
+      retry.disabled = true;
+      retry.textContent = 'Retrying…';
+      try {
+        await api(`/api/drafts/${encodeURIComponent(draft.id)}/retry`, { method: 'POST' });
+        showNotice('Clip job queued again.');
+        await loadDrafts();
+      } catch (error) {
+        showNotice(error.message, true);
+        retry.disabled = false;
+        retry.textContent = 'Retry clip';
+      }
+    });
+    card.append(retry);
+  }
   return card;
 }
 
@@ -146,7 +209,7 @@ async function loadDrafts() {
 
 async function refreshDashboard() {
   try {
-    await Promise.all([refreshConnection(), loadDrafts()]);
+    await Promise.all([refreshConnection(), refreshTwitchConnection(), loadDrafts()]);
   } catch (error) {
     if (error.status === 401) return showLogin();
     showNotice(error.message, true);
@@ -196,6 +259,7 @@ uploadForm.addEventListener('submit', async (event) => {
 });
 
 connectButton.addEventListener('click', () => window.location.assign('/auth/google'));
+twitchConnectButton.addEventListener('click', () => window.location.assign('/auth/twitch'));
 document.querySelector('#refreshButton').addEventListener('click', refreshDashboard);
 document.querySelector('#logoutButton').addEventListener('click', async () => {
   try { await api('/api/admin/logout', { method: 'POST' }); } catch {}
@@ -207,6 +271,10 @@ document.querySelector('#logoutButton').addEventListener('click', async () => {
   if (params.get('youtube') === 'connected') {
     history.replaceState({}, '', '/');
     showNotice('YouTube connected successfully.');
+  }
+  if (params.get('twitch') === 'connected') {
+    history.replaceState({}, '', '/');
+    showNotice('Twitch connected successfully. AI-detected VOD highlights can now become private Short drafts.');
   }
   try {
     const session = await api('/api/admin/session');
