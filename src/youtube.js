@@ -21,6 +21,11 @@ async function oauthClient() {
   return client;
 }
 
+async function isConnected() {
+  const tokens = await store.getTokens();
+  return Boolean(tokens?.refresh_token || tokens?.access_token);
+}
+
 async function authorizationUrl(state) {
   const client = await oauthClient();
   return client.generateAuthUrl({
@@ -81,4 +86,4 @@ async function getVideo(videoId) {
   return response.data.items?.[0] || null;
 }
 
-module.exports = { authorizationUrl, exchangeCode, uploadPrivate, publish, getVideo };
+module.exports = { isConnected, authorizationUrl, exchangeCode, uploadPrivate, publish, getVideo };
