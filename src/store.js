@@ -57,21 +57,28 @@ function decrypt(payload) {
   ]).toString('utf8'));
 }
 
-async function saveTokens(tokens) {
+async function saveEncryptedState(stateKey, value) {
   await init();
+  if (!/^[a-z0-9_:-]{1,80}$/i.test(stateKey)) throw new Error('Invalid state key');
   await pool.query(
     `INSERT INTO amaana_state (key, value, updated_at)
-     VALUES ('youtube_tokens', $1::jsonb, NOW())
+     VALUES ($1, $2::jsonb, NOW())
      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-    [JSON.stringify(encrypt(tokens))]
+    [stateKey, JSON.stringify(encrypt(value))]
   );
 }
 
-async function getTokens() {
+async function getEncryptedState(stateKey) {
   await init();
-  const result = await pool.query(`SELECT value FROM amaana_state WHERE key = 'youtube_tokens'`);
+  if (!/^[a-z0-9_:-]{1,80}$/i.test(stateKey)) throw new Error('Invalid state key');
+  const result = await pool.query('SELECT value FROM amaana_state WHERE key = $1', [stateKey]);
   return decrypt(result.rows[0]?.value || null);
 }
+
+const saveTokens = (tokens) => saveEncryptedState('youtube_tokens', tokens);
+const getTokens = () => getEncryptedState('youtube_tokens');
+const saveTwitchTokens = (tokens) => saveEncryptedState('twitch_tokens', tokens);
+const getTwitchTokens = () => getEncryptedState('twitch_tokens');
 
 async function listDrafts() {
   await init();
@@ -124,4 +131,15 @@ async function ping() {
   await pool.query('SELECT 1');
 }
 
-module.exports = { init, ping, saveTokens, getTokens, listDrafts, getDraft, addDraft, updateDraft };
+module.exports = {
+  init,
+  ping,
+  saveTokens,
+  getTokens,
+  saveTwitchTokens,
+  getTwitchTokens,
+  listDrafts,
+  getDraft,
+  addDraft,
+  updateDraft
+};
