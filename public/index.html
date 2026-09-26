@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#090b11">
-  <title>Amaana | Saevond YouTube Manager</title>
+  <title>Amaana | Saevond Video Manager</title>
   <link rel="stylesheet" href="/styles.css">
   <script src="/app.js" defer></script>
 </head>
@@ -15,7 +15,7 @@
       <div>
         <p class="eyebrow">SAEVOND CREATOR SYSTEM</p>
         <h1>Amaana</h1>
-        <p class="subtitle">Private-first YouTube Shorts manager</p>
+        <p class="subtitle">Stream highlights, YouTube Shorts, and TikTok-ready clips</p>
       </div>
     </header>
 
@@ -65,10 +65,22 @@
         <button id="twitchConnectButton" class="twitch" type="button">Connect Twitch</button>
       </section>
 
+      <section class="card connection-card">
+        <div>
+          <p class="eyebrow">TIKTOK INBOX CONNECTION</p>
+          <div class="status-line">
+            <span id="tiktokConnectionDot" class="status-dot"></span>
+            <strong id="tiktokConnectionText">Checking…</strong>
+          </div>
+          <p id="tiktokConnectionHelp" class="muted">Checking TikTok upload authorization.</p>
+        </div>
+        <button id="tiktokConnectButton" class="twitch" type="button">Connect TikTok</button>
+      </section>
+
       <section class="card workflow-card">
         <p class="eyebrow">AUTOMATIC CLIP WORKFLOW</p>
         <h2>Twitch VOD → highlight video → Shorts</h2>
-        <p class="muted">After your stream ends, SweatyClanker sends its best chat-detected moments. Amaana assembles one longer highlight video and cuts vertical Shorts from it. Every YouTube upload stays private until you approve it. Source clips created on Twitch may be visible there.</p>
+        <p class="muted">After your stream ends, SweatyClanker sends its best chat-detected moments. Amaana assembles one longer highlight video and cuts vertical Shorts from it. Every YouTube upload stays private until you approve it. You can review each Short, then send it to your TikTok inbox to finish posting there. Source clips created on Twitch may be visible there.</p>
       </section>
 
       <section class="card">

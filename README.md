@@ -1,17 +1,21 @@
 # AmaanaYt
 
-Approval-based YouTube Shorts publishing service for **@saevond**.
+Approval-based YouTube Shorts and TikTok inbox service for **@saevond**.
 
 AmaanaYt connects to YouTube and Twitch with OAuth. After SweatyClanker detects moments in an ended Twitch stream, Amaana assembles them into a landscape highlight video, then cuts vertical Shorts from that assembled video. The highlight and each Short become separate private YouTube drafts; an owner key is required to publish or schedule each one.
+
+Generated Shorts can also be sent to the creator's TikTok inbox **one at a time after the creator previews and consents to each transfer**. The creator edits and completes each post in the TikTok app. TikTok delivery does not happen automatically at stream end.
 
 ## Security model
 
 - Google passwords are never collected.
 - OAuth credentials and refresh tokens are never committed to GitHub.
 - YouTube and Twitch tokens are encrypted with AES-256-GCM before database storage.
+- TikTok access and refresh tokens use the same encrypted database storage.
 - `AGENT_KEY` can upload private drafts but cannot publish them.
 - `ADMIN_KEY` controls OAuth connection, draft review, publication, and scheduling.
 - New uploads always start as private.
+- TikTok delivery requires owner approval per Short. TikTok media URLs are signed and expire.
 - The service does not delete existing videos.
 
 Keep `ADMIN_KEY` out of OpenClaw. Give OpenClaw only `AGENT_KEY`.
@@ -68,6 +72,8 @@ Required values:
 
 Render generates `SESSION_SECRET`.
 
+For TikTok inbox delivery, also configure `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, and the URL verification values described below.
+
 Generate independent secrets with:
 
 ```bash
@@ -103,6 +109,20 @@ The app requests:
 6. Sign in with the Twitch account that owns the Saevond channel and approve `channel:manage:clips`.
 
 In Twitch **Creator Dashboard → Settings → Stream → VOD Settings**, enable **Store past broadcasts**. Automatic post-stream clipping cannot work if Twitch never creates the archive VOD.
+
+## TikTok developer setup
+
+1. Register an app with TikTok for Developers. Enable Login Kit for Web and Content Posting API, and obtain the approved `user.info.basic` and `video.upload` scopes.
+2. Register this exact Login Kit redirect URI: `https://YOUR-RENDER-DOMAIN/oauth/tiktok/callback`.
+3. In TikTok's **URL properties** for this app, verify the URL prefix `https://YOUR-RENDER-DOMAIN/tiktok-media/`. TikTok gives you a signature file: put its filename in `TIKTOK_VERIFICATION_FILENAME` and its exact contents in `TIKTOK_VERIFICATION_CONTENT` in Render, then verify the file at `https://YOUR-RENDER-DOMAIN/tiktok-media/YOUR-FILENAME` before clicking Verify in TikTok. TikTok must be able to pull HTTPS MP4 files under that prefix without redirects. Amaana serves a newly generated file after the owner requests a transfer; it is not a permanent media archive.
+4. Store the app's client key and client secret as `TIKTOK_CLIENT_KEY` and `TIKTOK_CLIENT_SECRET` in Amaana's Render environment. Keep the secret out of GitHub and chat.
+5. Redeploy Amaana, open the owner dashboard, and choose **Connect TikTok**. Authorize the TikTok account you want to receive your stream Shorts.
+
+After a Short appears in Amaana, open its private YouTube preview, review the audio and footage, check the consent box, and select **Send to TikTok inbox**. TikTok will notify the connected creator account. Open the TikTok inbox notification to edit the post, add the suggested caption if desired, and publish it. Use **Check TikTok status** in Amaana to see when delivery or publication completes.
+
+TikTok may limit pending inbox shares (its documentation notes at most five within a 24-hour period), and a stopped or restarted free Render instance may lose the temporary media file before TikTok finishes pulling it. If TikTok reports a failed pull, retry the Short from the owner dashboard.
+
+TikTok's Direct Post API for automatic public publication requires an audited app and per-post review and consent in the app. TikTok's published criteria also say an internal utility for just one account is not an acceptable Direct Post app. The TikTok inbox route above lets the creator complete public posting inside TikTok without claiming that the bot can publish public posts unattended.
 
 ## 5. Verify deployment
 

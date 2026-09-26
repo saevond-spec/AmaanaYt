@@ -6,7 +6,8 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "check": "node --check src/server.js && node --check src/youtube.js && node --check src/twitch.js && node --check src/video.js && node --check src/store.js"
+    "check": "node --check src/server.js && node --check src/youtube.js && node --check src/twitch.js && node --check src/tiktok.js && node --check src/video.js && node --check src/store.js && node --check public/app.js",
+    "test": "node --test test/*.test.js"
   },
   "engines": { "node": ">=20" },
   "dependencies": {

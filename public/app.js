@@ -11,9 +11,14 @@ const twitchConnectionDot = document.querySelector('#twitchConnectionDot');
 const twitchConnectionText = document.querySelector('#twitchConnectionText');
 const twitchConnectionHelp = document.querySelector('#twitchConnectionHelp');
 const twitchConnectButton = document.querySelector('#twitchConnectButton');
+const tiktokConnectionDot = document.querySelector('#tiktokConnectionDot');
+const tiktokConnectionText = document.querySelector('#tiktokConnectionText');
+const tiktokConnectionHelp = document.querySelector('#tiktokConnectionHelp');
+const tiktokConnectButton = document.querySelector('#tiktokConnectButton');
 const draftList = document.querySelector('#draftList');
 const uploadButton = document.querySelector('#uploadButton');
 let draftPoll = null;
+let tiktokConnected = false;
 
 function showNotice(message, isError = false) {
   notice.textContent = message;
@@ -87,6 +92,22 @@ async function refreshTwitchConnection() {
   }
 }
 
+async function refreshTikTokConnection() {
+  const status = await api('/api/tiktok/status');
+  tiktokConnected = status.connected;
+  tiktokConnectionDot.classList.toggle('connected', status.connected);
+  tiktokConnectionText.textContent = status.connected
+    ? `Connected as ${status.displayName || 'TikTok creator'}` : 'Not connected';
+  tiktokConnectButton.disabled = !status.configured;
+  tiktokConnectButton.textContent = !status.configured ? 'Setup required'
+    : status.connected ? 'Reconnect TikTok' : 'Connect TikTok';
+  tiktokConnectionHelp.textContent = !status.configured
+    ? 'Add a TikTok developer app key and secret in Render, and approve video.upload.'
+    : status.connected
+      ? 'Review a Short below, then send it to TikTok. Finish the post in your TikTok inbox.'
+      : status.error || 'Connect your TikTok account to send reviewed Shorts to its inbox.';
+}
+
 function element(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -148,6 +169,64 @@ function renderDraft(draft) {
     link.rel = 'noopener noreferrer';
     link.textContent = 'Open on YouTube';
     card.append(link);
+  }
+
+  if (draft.sourceType === 'twitch_highlight_short' && draft.youtubeVideoId) {
+    const status = draft.tiktokStatus || 'not_sent';
+    card.append(element('p', 'draft-meta', `TikTok: ${status.replaceAll('_', ' ')}`));
+    if (draft.tiktokError) card.append(element('p', 'draft-error', draft.tiktokError));
+    const caption = `${draft.title || 'Saevond livestream highlight'} #Saevond #Gaming`;
+    if ((!draft.tiktokPublishId && status !== 'preparing') || status === 'failed') {
+      const captionBox = element('p', 'draft-meta', `Suggested TikTok caption: ${caption}`);
+      card.append(captionBox);
+      const copy = element('button', 'ghost', 'Copy TikTok caption');
+      copy.type = 'button';
+      copy.addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText(caption); showNotice('Caption copied for TikTok.'); }
+        catch { showNotice('Select and copy the suggested caption above.', true); }
+      });
+      card.append(copy);
+      const consentRow = element('label', 'check-row');
+      const consent = document.createElement('input');
+      consent.type = 'checkbox';
+      consentRow.append(consent, element('span', '', 'I reviewed this Short and agree to send its video and audio to my TikTok inbox.'));
+      card.append(consentRow);
+      const send = element('button', 'ghost', 'Send to TikTok inbox');
+      send.type = 'button';
+      send.disabled = !tiktokConnected;
+      consent.addEventListener('change', () => { send.disabled = !tiktokConnected || !consent.checked; });
+      send.addEventListener('click', async () => {
+        send.disabled = true;
+        send.textContent = 'Preparing TikTok video…';
+        try {
+          await api(`/api/drafts/${encodeURIComponent(draft.id)}/tiktok-inbox`, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ consent: consent.checked })
+          });
+          showNotice('Preparing your Short for TikTok. Check status shortly, then finish posting from your TikTok inbox.');
+          await loadDrafts();
+        } catch (error) {
+          showNotice(error.message, true);
+          send.textContent = 'Send to TikTok inbox';
+          send.disabled = !consent.checked;
+        }
+      });
+      card.append(send);
+    } else if (status !== 'published') {
+      const refresh = element('button', 'ghost', 'Check TikTok status');
+      refresh.type = 'button';
+      refresh.addEventListener('click', async () => {
+        refresh.disabled = true;
+        try {
+          const result = await api(`/api/drafts/${encodeURIComponent(draft.id)}/tiktok-status`);
+          showNotice(result.status === 'ready_in_tiktok_inbox'
+            ? 'TikTok delivered the clip. Open your TikTok inbox to edit and post it.'
+            : `TikTok: ${result.status.replaceAll('_', ' ')}`);
+          await loadDrafts();
+        } catch (error) { showNotice(error.message, true); refresh.disabled = false; }
+      });
+      card.append(refresh);
+    }
   }
 
   if (draft.status === 'awaiting_owner_approval') {
@@ -214,7 +293,8 @@ async function loadDrafts() {
 
 async function refreshDashboard() {
   try {
-    await Promise.all([refreshConnection(), refreshTwitchConnection(), loadDrafts()]);
+    await Promise.all([refreshConnection(), refreshTwitchConnection(), refreshTikTokConnection()]);
+    await loadDrafts();
   } catch (error) {
     if (error.status === 401) return showLogin();
     showNotice(error.message, true);
@@ -265,6 +345,7 @@ uploadForm.addEventListener('submit', async (event) => {
 
 connectButton.addEventListener('click', () => window.location.assign('/auth/google'));
 twitchConnectButton.addEventListener('click', () => window.location.assign('/auth/twitch'));
+tiktokConnectButton.addEventListener('click', () => window.location.assign('/auth/tiktok'));
 document.querySelector('#refreshButton').addEventListener('click', refreshDashboard);
 document.querySelector('#logoutButton').addEventListener('click', async () => {
   try { await api('/api/admin/logout', { method: 'POST' }); } catch {}
@@ -280,6 +361,10 @@ document.querySelector('#logoutButton').addEventListener('click', async () => {
   if (params.get('twitch') === 'connected') {
     history.replaceState({}, '', '/');
     showNotice('Twitch connected successfully. AI-detected VOD highlights can now become private Short drafts.');
+  }
+  if (params.get('tiktok') === 'connected') {
+    history.replaceState({}, '', '/');
+    showNotice('TikTok connected. Review a Short to send it to your TikTok inbox.');
   }
   try {
     const session = await api('/api/admin/session');
