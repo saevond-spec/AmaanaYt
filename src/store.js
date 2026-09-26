@@ -128,6 +128,39 @@ async function updateDraft(id, patch) {
   }
 }
 
+async function claimTikTokDelivery(id, automatic) {
+  await init();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query('SELECT payload FROM amaana_drafts WHERE id = $1 FOR UPDATE', [id]);
+    const draft = result.rows[0]?.payload;
+    if (!draft || draft.sourceType !== 'twitch_highlight_short' || !draft.youtubeVideoId ||
+        !draft.tiktokEligible || draft.youtubePrivacyStatus !== 'public' ||
+        !Number.isSafeInteger(draft.youtubeViews) || draft.youtubeViews <= 2000 ||
+        draft.tiktokPublishId && draft.tiktokStatus !== 'failed' ||
+        draft.tiktokStatus === 'preparing' && Date.now() - Date.parse(draft.tiktokQueuedAt || 0) < 15 * 60 * 1000 ||
+        automatic && (!draft.tiktokAutoSendConsent || draft.tiktokAttemptedAt)) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    const now = new Date().toISOString();
+    const updated = { ...draft, tiktokStatus: 'preparing', tiktokError: null,
+      tiktokPublishId: null, tiktokQueuedAt: now, tiktokAttemptedAt: now, updatedAt: now };
+    await client.query(
+      'UPDATE amaana_drafts SET payload = $2::jsonb, updated_at = NOW() WHERE id = $1',
+      [id, JSON.stringify(updated)]
+    );
+    await client.query('COMMIT');
+    return updated;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function ping() {
   await init();
   await pool.query('SELECT 1');
@@ -145,5 +178,6 @@ module.exports = {
   listDrafts,
   getDraft,
   addDraft,
-  updateDraft
+  updateDraft,
+  claimTikTokDelivery
 };

@@ -104,7 +104,7 @@ async function refreshTikTokConnection() {
   tiktokConnectionHelp.textContent = !status.configured
     ? 'Add a TikTok developer app key and secret in Render, and approve video.upload.'
     : status.connected
-      ? 'Review a Short below, then send it to TikTok. Finish the post in your TikTok inbox.'
+      ? 'Review each Short and enable automatic TikTok delivery. Amaana sends it after its public YouTube video exceeds 2,000 views; finish posting in your TikTok inbox.'
       : status.error || 'Connect your TikTok account to send reviewed Shorts to its inbox.';
 }
 
@@ -173,6 +173,23 @@ function renderDraft(draft) {
 
   if (draft.sourceType === 'twitch_highlight_short' && draft.youtubeVideoId) {
     const status = draft.tiktokStatus || 'not_sent';
+    const eligible = draft.tiktokEligible && draft.youtubePrivacyStatus === 'public' && draft.youtubeViews > 2000;
+    const viewText = Number.isSafeInteger(draft.youtubeViews)
+      ? `${draft.youtubeViews.toLocaleString()} YouTube views` : 'YouTube views not checked yet';
+    card.append(element('p', 'draft-meta', `${viewText} · ${eligible ? 'Eligible for TikTok' : 'TikTok requires a public Short with more than 2,000 views'}`));
+    const checkViews = element('button', 'ghost', 'Check YouTube views');
+    checkViews.type = 'button';
+    checkViews.addEventListener('click', async () => {
+      checkViews.disabled = true;
+      try {
+        const result = await api(`/api/drafts/${encodeURIComponent(draft.id)}/youtube-views`);
+        showNotice(result.eligible
+          ? `Short eligible: ${result.views.toLocaleString()} YouTube views.`
+          : `TikTok needs over 2,000 public YouTube views. Current views: ${result.views?.toLocaleString() ?? 'unavailable'}.`);
+        await loadDrafts();
+      } catch (error) { showNotice(error.message, true); checkViews.disabled = false; }
+    });
+    card.append(checkViews);
     card.append(element('p', 'draft-meta', `TikTok: ${status.replaceAll('_', ' ')}`));
     if (draft.tiktokError) card.append(element('p', 'draft-error', draft.tiktokError));
     const caption = `${draft.title || 'Saevond livestream highlight'} #Saevond #Gaming`;
@@ -186,32 +203,75 @@ function renderDraft(draft) {
         catch { showNotice('Select and copy the suggested caption above.', true); }
       });
       card.append(copy);
-      const consentRow = element('label', 'check-row');
-      const consent = document.createElement('input');
-      consent.type = 'checkbox';
-      consentRow.append(consent, element('span', '', 'I reviewed this Short and agree to send its video and audio to my TikTok inbox.'));
-      card.append(consentRow);
-      const send = element('button', 'ghost', 'Send to TikTok inbox');
-      send.type = 'button';
-      send.disabled = !tiktokConnected;
-      consent.addEventListener('change', () => { send.disabled = !tiktokConnected || !consent.checked; });
-      send.addEventListener('click', async () => {
-        send.disabled = true;
-        send.textContent = 'Preparing TikTok video…';
-        try {
-          await api(`/api/drafts/${encodeURIComponent(draft.id)}/tiktok-inbox`, {
-            method: 'POST', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ consent: consent.checked })
+      if (!draft.tiktokAttemptedAt && status !== 'failed') {
+        if (draft.tiktokAutoSendConsent) {
+          card.append(element('p', 'draft-meta', 'Automatic TikTok inbox delivery enabled for this Short. It will run after the public YouTube Short exceeds 2,000 views.'));
+          const cancelAuto = element('button', 'ghost', 'Turn off automatic delivery');
+          cancelAuto.type = 'button';
+          cancelAuto.addEventListener('click', async () => {
+            cancelAuto.disabled = true;
+            try {
+              await api(`/api/drafts/${encodeURIComponent(draft.id)}/tiktok-auto`, {
+                method: 'POST', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ consent: false })
+              });
+              showNotice('Automatic TikTok delivery turned off for this Short.');
+              await loadDrafts();
+            } catch (error) { showNotice(error.message, true); cancelAuto.disabled = false; }
           });
-          showNotice('Preparing your Short for TikTok. Check status shortly, then finish posting from your TikTok inbox.');
-          await loadDrafts();
-        } catch (error) {
-          showNotice(error.message, true);
-          send.textContent = 'Send to TikTok inbox';
-          send.disabled = !consent.checked;
+          card.append(cancelAuto);
+        } else {
+          const autoConsentRow = element('label', 'check-row');
+          const autoConsent = document.createElement('input');
+          autoConsent.type = 'checkbox';
+          autoConsentRow.append(autoConsent, element('span', '', 'I reviewed this Short and authorize Amaana to send its video and audio to my TikTok inbox automatically once it exceeds 2,000 public YouTube views. I will finish publishing in TikTok.'));
+          card.append(autoConsentRow);
+          const enableAuto = element('button', 'ghost', 'Enable automatic TikTok delivery');
+          enableAuto.type = 'button';
+          enableAuto.disabled = true;
+          autoConsent.addEventListener('change', () => { enableAuto.disabled = !tiktokConnected || !autoConsent.checked; });
+          enableAuto.addEventListener('click', async () => {
+            enableAuto.disabled = true;
+            try {
+              await api(`/api/drafts/${encodeURIComponent(draft.id)}/tiktok-auto`, {
+                method: 'POST', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ consent: autoConsent.checked })
+              });
+              showNotice('Automatic TikTok inbox delivery enabled for this Short after it passes 2,000 public YouTube views.');
+              await loadDrafts();
+            } catch (error) { showNotice(error.message, true); enableAuto.disabled = !tiktokConnected || !autoConsent.checked; }
+          });
+          card.append(enableAuto);
         }
-      });
-      card.append(send);
+      }
+      if (!draft.tiktokAutoSendConsent || status === 'failed') {
+        const consentRow = element('label', 'check-row');
+        const consent = document.createElement('input');
+        consent.type = 'checkbox';
+        consentRow.append(consent, element('span', '', 'I reviewed this Short and agree to send its video and audio to my TikTok inbox.'));
+        card.append(consentRow);
+        const send = element('button', 'ghost', 'Send to TikTok inbox');
+        send.type = 'button';
+        send.disabled = true;
+        consent.addEventListener('change', () => { send.disabled = !tiktokConnected || !eligible || !consent.checked; });
+        send.addEventListener('click', async () => {
+          send.disabled = true;
+          send.textContent = 'Preparing TikTok video…';
+          try {
+            await api(`/api/drafts/${encodeURIComponent(draft.id)}/tiktok-inbox`, {
+              method: 'POST', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ consent: consent.checked })
+            });
+            showNotice('Preparing your Short for TikTok. Check status shortly, then finish posting from your TikTok inbox.');
+            await loadDrafts();
+          } catch (error) {
+            showNotice(error.message, true);
+            send.textContent = 'Send to TikTok inbox';
+            send.disabled = !tiktokConnected || !eligible || !consent.checked;
+          }
+        });
+        card.append(send);
+      }
     } else if (status !== 'published') {
       const refresh = element('button', 'ghost', 'Check TikTok status');
       refresh.type = 'button';

@@ -95,4 +95,17 @@ async function getVideo(videoId) {
   return response.data.items?.[0] || null;
 }
 
-module.exports = { isConnected, canApprove, authorizationUrl, exchangeCode, uploadPrivate, publish, getVideo };
+async function getVideoViews(videoIds) {
+  if (!Array.isArray(videoIds) || !videoIds.length || videoIds.length > 50) {
+    throw new Error('Request views for 1–50 YouTube videos at a time');
+  }
+  const youtube = await service();
+  const response = await youtube.videos.list({
+    part: ['statistics', 'status'],
+    id: videoIds,
+    fields: 'items(id,statistics(viewCount),status(privacyStatus))'
+  });
+  return response.data.items || [];
+}
+
+module.exports = { isConnected, canApprove, authorizationUrl, exchangeCode, uploadPrivate, publish, getVideo, getVideoViews };
