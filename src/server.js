@@ -11,6 +11,7 @@ const youtube = require('./youtube');
 const twitch = require('./twitch');
 const video = require('./video');
 const tiktok = require('./tiktok');
+const { createShortViewMonitor, TIKTOK_VIEW_THRESHOLD } = require('./short-views');
 
 for (const name of ['BASE_URL', 'DATABASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SESSION_SECRET', 'TOKEN_ENCRYPTION_KEY', 'AGENT_KEY', 'ADMIN_KEY']) {
   if (!process.env[name]) throw new Error(`Missing required environment variable: ${name}`);
@@ -59,6 +60,53 @@ const clipQueue = [];
 const queuedClipIds = new Set();
 let clipWorkerRunning = false;
 const tiktokJobs = new Set();
+const SHORT_VIEW_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+let lastShortViewCheck = 0;
+let shortViewCheckRunning = false;
+
+async function queueTikTokShort(draft, automatic = false) {
+  if (!draft?.tiktokEligible || draft.youtubePrivacyStatus !== 'public' ||
+      !Number.isSafeInteger(draft.youtubeViews) || draft.youtubeViews <= TIKTOK_VIEW_THRESHOLD) {
+    return false;
+  }
+  if (draft.tiktokPublishId && draft.tiktokStatus !== 'failed') return false;
+  if (tiktokJobs.has(draft.id) || draft.tiktokStatus === 'preparing' &&
+      Date.now() - Date.parse(draft.tiktokQueuedAt || 0) < 15 * 60 * 1000) return false;
+  if (automatic && (!draft.tiktokAutoSendConsent || draft.tiktokAttemptedAt || tiktokJobs.size)) return false;
+  const connection = await tiktok.connectionStatus();
+  if (!connection.connected) return false;
+  if (automatic) {
+    const recent = (await store.listDrafts()).filter((item) => item.tiktokAttemptedAt &&
+      Date.now() - Date.parse(item.tiktokAttemptedAt) < 24 * 60 * 60 * 1000);
+    if (recent.length >= 5 || recent.some((item) =>
+      Date.now() - Date.parse(item.tiktokAttemptedAt) < 55 * 60 * 1000)) return false;
+  }
+  // The connection check above yields to other requests. Check the local lock again.
+  if (tiktokJobs.has(draft.id) || automatic && tiktokJobs.size) return false;
+  tiktokJobs.add(draft.id);
+  try {
+    const claimed = await store.claimTikTokDelivery(draft.id, automatic);
+    if (!claimed) { tiktokJobs.delete(draft.id); return false; }
+  } catch (error) { tiktokJobs.delete(draft.id); throw error; }
+  setImmediate(() => sendTikTokShort(draft.id));
+  return true;
+}
+
+const shortViews = createShortViewMonitor({ store, youtube, onEligible: async (draft) => {
+  try { await queueTikTokShort(draft, true); }
+  catch (error) { console.error(`TikTok auto delivery ${draft.id} failed:`, error.message); }
+} });
+
+function scheduleShortViewCheck() {
+  if (shortViewCheckRunning || Date.now() - lastShortViewCheck < SHORT_VIEW_CHECK_INTERVAL_MS) return;
+  lastShortViewCheck = Date.now();
+  shortViewCheckRunning = true;
+  setImmediate(async () => {
+    try { await shortViews.refreshAll(); }
+    catch (error) { console.error('YouTube Short view check failed:', error.message); }
+    finally { shortViewCheckRunning = false; }
+  });
+}
 
 function tiktokMediaPath(id) {
   return path.join(uploadDir, `tiktok-${id}.mp4`);
@@ -107,6 +155,8 @@ async function sendTikTokShort(id) {
     const signature = tiktokMediaSignature(id, expires);
     const url = new URL(`/tiktok-media/${id}/${expires}/${signature}.mp4`, process.env.BASE_URL);
     if (url.protocol !== 'https:') throw new Error('TikTok requires an HTTPS media URL');
+    const checked = await shortViews.refreshOne(id);
+    if (!checked?.tiktokEligible) throw new Error('YouTube Short is no longer public with over 2,000 views');
     initiatedPublishId = await tiktok.uploadToInbox(url.toString());
     await store.updateDraft(id, { tiktokStatus: 'processing_download', tiktokPublishId: initiatedPublishId,
       tiktokError: null, tiktokSentAt: new Date().toISOString() });
@@ -378,6 +428,7 @@ app.get('/', (_req, res) => {
 app.get('/healthz', async (_req, res) => {
   try {
     await store.ping();
+    scheduleShortViewCheck();
     res.json({ ok: true, database: 'connected' });
   } catch {
     res.status(503).json({ ok: false, database: 'unavailable' });
@@ -524,10 +575,66 @@ app.get('/oauth/tiktok/callback', async (req, res, next) => {
 
 app.get('/api/drafts', admin, async (_req, res, next) => {
   try {
+    scheduleShortViewCheck();
     res.json(await store.listDrafts());
   } catch (error) {
     next(error);
   }
+});
+
+app.get('/api/shorts/eligible', async (_req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    scheduleShortViewCheck();
+    const drafts = await store.listDrafts();
+    res.json(drafts.filter((draft) => draft.sourceType === 'twitch_highlight_short'
+      && draft.youtubePrivacyStatus === 'public' && draft.tiktokEligible
+      && draft.youtubeViews > TIKTOK_VIEW_THRESHOLD).map((draft) => ({
+      title: draft.title,
+      youtubeUrl: `https://youtu.be/${draft.youtubeVideoId}`,
+      views: draft.youtubeViews,
+      eligibleAt: draft.tiktokEligibleAt
+    })));
+  } catch (error) { next(error); }
+});
+
+app.get('/api/drafts/:id/youtube-views', admin, async (req, res, next) => {
+  try {
+    const updated = await shortViews.refreshOne(req.params.id);
+    if (!updated) return res.status(404).json({ error: 'Stream Short not found' });
+    res.json({ views: updated.youtubeViews, privacyStatus: updated.youtubePrivacyStatus,
+      eligible: updated.tiktokEligible, checkedAt: updated.youtubeViewsCheckedAt });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/drafts/:id/tiktok-auto', admin, async (req, res, next) => {
+  try {
+    const draft = await store.getDraft(req.params.id);
+    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    if (draft.sourceType !== 'twitch_highlight_short' || !draft.youtubeVideoId) {
+      return res.status(409).json({ error: 'Only completed stream Shorts can be sent to TikTok' });
+    }
+    if (draft.tiktokPublishId || draft.tiktokAttemptedAt) {
+      return res.status(409).json({ error: 'TikTok delivery was already attempted for this Short' });
+    }
+    if (req.body?.consent !== true && req.body?.consent !== false) {
+      return res.status(400).json({ error: 'Explicit consent is required for this Short' });
+    }
+    if (req.body.consent) {
+      const status = await tiktok.connectionStatus();
+      if (!status.connected) return res.status(409).json({ error: status.error || 'Connect TikTok first' });
+    }
+    const updated = await store.updateDraft(draft.id, {
+      tiktokAutoSendConsent: req.body.consent,
+      tiktokAutoSendAt: req.body.consent ? new Date().toISOString() : null
+    });
+    if (req.body.consent) {
+      // Consent remains saved if YouTube is temporarily unavailable; the hourly check will retry.
+      try { await shortViews.refreshOne(draft.id); }
+      catch (error) { console.error(`Short view check ${draft.id} failed:`, error.message); }
+    }
+    res.json({ consent: updated.tiktokAutoSendConsent });
+  } catch (error) { next(error); }
 });
 
 app.post('/api/drafts/:id/tiktok-inbox', admin, async (req, res, next) => {
@@ -547,14 +654,13 @@ app.post('/api/drafts/:id/tiktok-inbox', admin, async (req, res, next) => {
         Date.now() - Date.parse(draft.tiktokQueuedAt || 0) < 15 * 60 * 1000) {
       return res.status(409).json({ error: 'TikTok delivery is already in progress' });
     }
-    const status = await tiktok.connectionStatus();
-    if (!status.connected) return res.status(409).json({ error: status.error || 'Connect TikTok first' });
-    tiktokJobs.add(draft.id);
-    try {
-      await store.updateDraft(draft.id, { tiktokStatus: 'preparing', tiktokError: null,
-        tiktokPublishId: null, tiktokQueuedAt: new Date().toISOString() });
-    } catch (error) { tiktokJobs.delete(draft.id); throw error; }
-    setImmediate(() => sendTikTokShort(draft.id));
+    const checked = await shortViews.refreshOne(draft.id);
+    if (!checked?.tiktokEligible) {
+      return res.status(409).json({ error: 'This public YouTube Short must exceed 2,000 views before TikTok delivery' });
+    }
+    if (!await queueTikTokShort(checked)) {
+      return res.status(409).json({ error: 'Connect TikTok or wait for the current delivery to finish' });
+    }
     res.status(202).json({ accepted: true, tiktokStatus: 'preparing' });
   } catch (error) { next(error); }
 });
@@ -693,6 +799,7 @@ store.init()
     const port = process.env.PORT || 3000;
     app.listen(port, async () => {
       console.log(`AmaanaYt listening on port ${port}`);
+      scheduleShortViewCheck();
       try {
         const drafts = await store.listDrafts();
         const resumable = new Set([
