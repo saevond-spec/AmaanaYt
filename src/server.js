@@ -108,7 +108,7 @@ function normalizeHighlights(items) {
   for (const item of normalized.sort((a, b) => (b.score || 0) - (a.score || 0))) {
     if (!deduplicated.some((existing) => Math.abs(existing.endSeconds - item.endSeconds) < 12)) deduplicated.push(item);
   }
-  return deduplicated.slice(0, 3);
+  return deduplicated.slice(0, 8).sort((a, b) => a.startSeconds - b.startSeconds);
 }
 
 function unlinkQuietly(filePath) {
@@ -216,6 +216,89 @@ function enqueueClipProcessing(id) {
   setImmediate(() => runClipQueue().catch((error) => console.error('Clip queue failed:', error.message)));
 }
 
+async function processHighlightBatch(id) {
+  const directory = path.join(uploadDir, `highlights-${id}`);
+  try {
+    const batch = await store.getDraft(id);
+    if (!batch || batch.sourceType !== 'twitch_highlight_batch' || batch.status === 'completed') return;
+    await fs.promises.mkdir(directory, { recursive: true });
+    await store.updateDraft(id, { status: 'creating_twitch_clips', error: null });
+    const sources = [];
+    const twitchClips = [...(batch.twitchClips || [])];
+    for (let index = 0; index < batch.highlights.length; index += 1) {
+      const moment = batch.highlights[index];
+      const clip = twitchClips[index] || await twitch.createClipFromVod({ vodId: batch.vodId, vodOffset: moment.endSeconds, duration: moment.duration, title: moment.title });
+      if (!twitchClips[index]) {
+        twitchClips[index] = clip;
+        await store.updateDraft(id, { twitchClips });
+      }
+      const download = await twitch.waitForClipDownload({ clipId: clip.id, broadcasterId: clip.broadcasterId, editorId: clip.editorId });
+      const url = download.landscape_download_url || download.portrait_download_url;
+      if (!url) throw new Error('Twitch clip media was unavailable');
+      const source = path.join(directory, `source-${index}.mp4`);
+      await twitch.downloadClip(url, source);
+      sources.push(source);
+    }
+    const montage = path.join(directory, 'highlight.mp4');
+    await store.updateDraft(id, { status: 'assembling_highlight_video' });
+    const durations = await video.assembleHighlights(sources, montage, directory);
+    const highlight = batch.youtubeVideoId ? { id: batch.youtubeVideoId } : await youtube.uploadPrivate({
+      filePath: montage,
+      title: cleanText(`${batch.streamTitle || 'Saevond livestream'} | Best moments`, 100),
+      description: `Highlights from https://www.twitch.tv/videos/${batch.vodId}\n#Saevond #Gaming`,
+      tags: ['Saevond', 'gaming', 'livestream highlights']
+    });
+    await store.updateDraft(id, { status: 'creating_shorts', youtubeVideoId: highlight.id, duration: durations.reduce((a, b) => a + b, 0) });
+    const existingShorts = (await store.listDrafts()).filter((draft) => draft.parentId === id);
+    let offset = 0;
+    const failures = [];
+    for (let index = 0; index < batch.highlights.length; index += 1) {
+      const moment = batch.highlights[index];
+      const length = Math.min(60, durations[index]);
+      const shortPath = path.join(directory, `short-${index}.mp4`);
+      try {
+        if (existingShorts.some((draft) => draft.highlightIndex === index)) { offset += durations[index]; continue; }
+        await video.shortFromHighlight(montage, offset, length, shortPath);
+        const uploaded = await youtube.uploadPrivate({ filePath: shortPath, title: moment.title,
+          description: `${moment.reason || 'Livestream highlight'}\n\nHighlight video: https://youtu.be/${highlight.id}\n#Saevond #Shorts`,
+          tags: ['Saevond', 'gaming', 'Shorts'] });
+        await store.addDraft({ id: crypto.randomUUID(), sourceType: 'twitch_highlight_short', parentId: id, highlightIndex: index,
+          vodId: batch.vodId, title: moment.title, youtubeVideoId: uploaded.id,
+          status: 'awaiting_owner_approval', createdAt: new Date().toISOString() });
+      } catch (error) {
+        failures.push(`${index + 1}: ${cleanText(error.message, 150)}`);
+      }
+      offset += durations[index];
+    }
+    await store.updateDraft(id, { status: 'awaiting_owner_approval',
+      error: failures.length ? failures.join('; ') : null, processedAt: new Date().toISOString() });
+  } catch (error) {
+    console.error(`Highlight batch ${id} failed:`, error.message);
+    await store.updateDraft(id, { status: 'clip_failed', error: cleanText(error.message, 500) }).catch(() => {});
+  } finally {
+    await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+const batchQueue = [];
+const queuedBatchIds = new Set();
+let batchWorkerRunning = false;
+function enqueueHighlightBatch(id) {
+  if (queuedBatchIds.has(id)) return;
+  queuedBatchIds.add(id);
+  batchQueue.push(id);
+  setImmediate(async () => {
+    if (batchWorkerRunning) return;
+    batchWorkerRunning = true;
+    try {
+      while (batchQueue.length) {
+        const next = batchQueue.shift();
+        try { await processHighlightBatch(next); } finally { queuedBatchIds.delete(next); }
+      }
+    } finally { batchWorkerRunning = false; }
+  });
+}
+
 app.get('/', (_req, res) => {
   res.set('Cache-Control', 'no-store');
   res.sendFile(path.join(publicDir, 'index.html'));
@@ -259,7 +342,7 @@ app.post('/api/admin/logout', admin, (req, res, next) => {
 
 app.get('/api/youtube/status', admin, async (_req, res, next) => {
   try {
-    res.json({ connected: await youtube.isConnected() });
+    res.json({ connected: await youtube.isConnected(), canApprove: await youtube.canApprove() });
   } catch (error) {
     next(error);
   }
@@ -363,37 +446,19 @@ app.post('/api/twitch/vod-clips', agentOrAdmin, async (req, res, next) => {
     if (!twitchStatus.connected) return res.status(409).json({ error: twitchStatus.error || 'Connect Twitch in the Amaana dashboard first' });
     const highlights = normalizeHighlights(req.body?.timestamps);
     const channel = cleanText(req.body?.channel || 'saevond', 50);
-    const created = [];
     const existingDrafts = await store.listDrafts();
-    for (const highlight of highlights) {
-      const existing = existingDrafts.find((draft) => draft.sourceType === 'twitch_vod'
-        && draft.vodId === vodId
-        && Math.abs(Number(draft.endSeconds) - highlight.endSeconds) < 12);
-      if (existing) {
-        created.push(existing);
-        continue;
-      }
-      const draft = await store.addDraft({
-        id: crypto.randomUUID(),
-        title: highlight.title,
-        status: 'clip_queued',
-        sourceType: 'twitch_vod',
-        sourceChannel: channel,
-        vodId,
-        startSeconds: highlight.startSeconds,
-        endSeconds: highlight.endSeconds,
-        duration: highlight.duration,
-        reason: highlight.reason,
-        score: highlight.score,
-        createdAt: new Date().toISOString()
-      });
-      created.push(draft);
-      existingDrafts.push(draft);
-      enqueueClipProcessing(draft.id);
+    let batch = existingDrafts.find((draft) => draft.sourceType === 'twitch_highlight_batch' && draft.vodId === vodId);
+    if (!batch) {
+      batch = await store.addDraft({ id: crypto.randomUUID(), sourceType: 'twitch_highlight_batch',
+        sourceChannel: channel, vodId, highlights, streamTitle: cleanText(req.body?.streamTitle, 80),
+        title: cleanText(`${req.body?.streamTitle || 'Saevond livestream'} | Best moments`, 100),
+        status: 'clip_queued', createdAt: new Date().toISOString() });
+      enqueueHighlightBatch(batch.id);
     }
     res.status(202).json({
       accepted: true,
-      clips: created.map((draft) => ({ id: draft.id, status: draft.status, title: draft.title }))
+      highlightVideo: { id: batch.id, status: batch.status, title: batch.title },
+      shortsPlanned: batch.highlights.length
     });
   } catch (error) {
     next(error);
@@ -404,11 +469,13 @@ app.post('/api/drafts/:id/retry', admin, async (req, res, next) => {
   try {
     const draft = await store.getDraft(req.params.id);
     if (!draft) return res.status(404).json({ error: 'Draft not found' });
-    if (draft.sourceType !== 'twitch_vod' || draft.status !== 'clip_failed') {
+    if (!['twitch_vod', 'twitch_highlight_batch'].includes(draft.sourceType)
+      || (draft.status !== 'clip_failed' && !(draft.sourceType === 'twitch_highlight_batch' && draft.error))) {
       return res.status(409).json({ error: 'Only failed Twitch clip jobs can be retried' });
     }
     const updated = await store.updateDraft(draft.id, { status: 'clip_queued', error: null });
-    enqueueClipProcessing(draft.id);
+    if (draft.sourceType === 'twitch_highlight_batch') enqueueHighlightBatch(draft.id);
+    else enqueueClipProcessing(draft.id);
     res.json(updated);
   } catch (error) {
     next(error);
@@ -466,6 +533,9 @@ store.init()
         ]);
         drafts.filter((draft) => draft.sourceType === 'twitch_vod' && resumable.has(draft.status))
           .forEach((draft) => enqueueClipProcessing(draft.id));
+        drafts.filter((draft) => draft.sourceType === 'twitch_highlight_batch'
+          && ['clip_queued', 'creating_twitch_clips', 'assembling_highlight_video', 'creating_shorts'].includes(draft.status))
+          .forEach((draft) => enqueueHighlightBatch(draft.id));
       } catch (error) {
         console.error('Failed to resume Twitch clip jobs:', error.message);
       }

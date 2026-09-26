@@ -2,7 +2,15 @@ const fs = require('fs');
 const { google } = require('googleapis');
 const store = require('./store');
 
-const SCOPES = ['https://www.googleapis.com/auth/youtube.upload'];
+const SCOPES = [
+  'https://www.googleapis.com/auth/youtube.upload',
+  'https://www.googleapis.com/auth/youtube.force-ssl'
+];
+
+async function canApprove() {
+  const tokens = await store.getTokens();
+  return Boolean(tokens?.scope?.split(/\s+/).includes('https://www.googleapis.com/auth/youtube.force-ssl'));
+}
 
 async function oauthClient() {
   const redirectUri = new URL('/oauth2/callback', process.env.BASE_URL).toString();
@@ -66,6 +74,7 @@ async function uploadPrivate({ filePath, title, description, tags, madeForKids =
 }
 
 async function publish(videoId, publishAt) {
+  if (!await canApprove()) throw new Error('Reconnect YouTube in the owner dashboard to grant video approval permission');
   const youtube = await service();
   const status = publishAt
     ? { privacyStatus: 'private', publishAt: new Date(publishAt).toISOString() }
@@ -86,4 +95,4 @@ async function getVideo(videoId) {
   return response.data.items?.[0] || null;
 }
 
-module.exports = { isConnected, authorizationUrl, exchangeCode, uploadPrivate, publish, getVideo };
+module.exports = { isConnected, canApprove, authorizationUrl, exchangeCode, uploadPrivate, publish, getVideo };

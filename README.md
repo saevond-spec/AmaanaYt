@@ -2,7 +2,7 @@
 
 Approval-based YouTube Shorts publishing service for **@saevond**.
 
-AmaanaYt connects to YouTube and Twitch with OAuth, turns approved Twitch VOD timestamps into vertical Shorts, uploads them privately, and requires a separate owner key before a draft can become public or scheduled.
+AmaanaYt connects to YouTube and Twitch with OAuth. After SweatyClanker detects moments in an ended Twitch stream, Amaana assembles them into a landscape highlight video, then cuts vertical Shorts from that assembled video. The highlight and each Short become separate private YouTube drafts; an owner key is required to publish or schedule each one.
 
 ## Security model
 
@@ -86,9 +86,11 @@ Run it three times for `TOKEN_ENCRYPTION_KEY`, `AGENT_KEY`, and `ADMIN_KEY`.
    `https://YOUR-RENDER-DOMAIN/oauth2/callback`
 6. Store the client ID and secret only in Render.
 
-The app requests only:
+The app requests:
 
 `https://www.googleapis.com/auth/youtube.upload`
+
+`https://www.googleapis.com/auth/youtube.force-ssl` (required by YouTube for the owner approval and scheduling actions; reconnect YouTube after upgrading an existing installation)
 
 ## 4. Twitch developer setup
 
@@ -152,7 +154,7 @@ curl -X POST "$AMAANA_YT_URL/api/twitch/vod-clips" \
   -d '{"vodId":"1234567890","channel":"saevond","timestamps":[{"startSeconds":90,"endSeconds":125,"title":"The comeback was unreal","reason":"Strong clutch reaction","score":91}]}'
 ```
 
-Amaana accepts up to three top moments per request, creates official Twitch clips, uses Twitch's portrait media when available, otherwise formats landscape gameplay as a 9:16 video, and uploads each result privately to YouTube.
+Amaana accepts up to eight moments per VOD. It creates official Twitch clips (each at most 60 seconds), joins them in time order into one landscape highlight video, then cuts a 9:16 Short from each segment of that video. The maximum assembled length is about eight minutes, depending on the moments found. The YouTube highlight and Shorts are private drafts until the owner approves each one. Processing starts after the stream ends and the archive is available; a continuous 24/7 stream does not produce an end event. Creating source clips on Twitch may make those Twitch clips visible independently of the private YouTube drafts.
 
 ### Upload a private Short
 

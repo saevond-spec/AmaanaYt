@@ -61,7 +61,9 @@ async function refreshConnection() {
   connectionDot.classList.toggle('connected', status.connected);
   connectionText.textContent = status.connected ? 'Connected' : 'Not connected';
   connectionHelp.textContent = status.connected
-    ? 'Amaana can upload private Shorts to your authorized channel.'
+    ? (status.canApprove
+      ? 'Amaana can upload private drafts. You can approve publishing if Google permits it for this API project.'
+      : 'Private uploads work. Reconnect YouTube to grant permission for owner approval and scheduling.')
     : 'Connect the Google account that owns @saevond.';
   connectButton.textContent = status.connected ? 'Reconnect YouTube' : 'Connect YouTube';
 }
@@ -112,9 +114,10 @@ async function approveDraft(id, publishAt, button) {
 }
 
 function renderDraft(draft) {
+  const isHighlight = draft.sourceType === 'twitch_highlight_batch';
   const card = element('article', 'draft');
   const top = element('div', 'draft-top');
-  top.append(element('h3', '', draft.title || 'Untitled Short'));
+  top.append(element('h3', '', draft.title || (isHighlight ? 'Untitled highlight video' : 'Untitled Short')));
   top.append(element('span', 'draft-status', String(draft.status || 'unknown').replaceAll('_', ' ')));
   card.append(top);
 
@@ -133,12 +136,14 @@ function renderDraft(draft) {
       card.append(twitchLink);
     }
   }
+  if (isHighlight) card.append(element('p', 'draft-meta', `Twitch VOD ${draft.vodId} · ${(draft.highlights || []).length} selected moments · highlight video`));
+  if (draft.sourceType === 'twitch_highlight_short') card.append(element('p', 'draft-meta', 'Short made from a highlight video'));
 
   if (draft.error) card.append(element('p', 'draft-error', draft.error));
 
-  if (draft.youtubeUrl) {
+  if (draft.youtubeUrl || draft.youtubeVideoId) {
     const link = element('a', 'ghost video-link');
-    link.href = draft.youtubeUrl;
+    link.href = draft.youtubeUrl || `https://youtu.be/${encodeURIComponent(draft.youtubeVideoId)}`;
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
     link.textContent = 'Open on YouTube';
@@ -150,7 +155,7 @@ function renderDraft(draft) {
     const publish = element('button', 'publish', 'Publish now');
     publish.type = 'button';
     publish.addEventListener('click', () => {
-      if (window.confirm('Publish this Short publicly now?')) approveDraft(draft.id, null, publish);
+      if (window.confirm(`Publish this ${isHighlight ? 'highlight video' : 'Short'} publicly now?`)) approveDraft(draft.id, null, publish);
     });
 
     const scheduleRow = element('div', 'schedule-row');
@@ -171,20 +176,20 @@ function renderDraft(draft) {
     card.append(actions);
   }
 
-  if (draft.status === 'clip_failed') {
-    const retry = element('button', 'ghost', 'Retry clip');
+  if (draft.status === 'clip_failed' || (isHighlight && draft.error)) {
+    const retry = element('button', 'ghost', 'Retry processing');
     retry.type = 'button';
     retry.addEventListener('click', async () => {
       retry.disabled = true;
       retry.textContent = 'Retrying…';
       try {
         await api(`/api/drafts/${encodeURIComponent(draft.id)}/retry`, { method: 'POST' });
-        showNotice('Clip job queued again.');
+        showNotice('Highlight job queued again.');
         await loadDrafts();
       } catch (error) {
         showNotice(error.message, true);
         retry.disabled = false;
-        retry.textContent = 'Retry clip';
+        retry.textContent = 'Retry processing';
       }
     });
     card.append(retry);
