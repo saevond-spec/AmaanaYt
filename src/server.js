@@ -10,6 +10,7 @@ const store = require('./store');
 const youtube = require('./youtube');
 const twitch = require('./twitch');
 const video = require('./video');
+const tiktok = require('./tiktok');
 
 for (const name of ['BASE_URL', 'DATABASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SESSION_SECRET', 'TOKEN_ENCRYPTION_KEY', 'AGENT_KEY', 'ADMIN_KEY']) {
   if (!process.env[name]) throw new Error(`Missing required environment variable: ${name}`);
@@ -57,6 +58,76 @@ const agentKey = keyGuard('AGENT_KEY', 'Agent key required');
 const clipQueue = [];
 const queuedClipIds = new Set();
 let clipWorkerRunning = false;
+const tiktokJobs = new Set();
+
+function tiktokMediaPath(id) {
+  return path.join(uploadDir, `tiktok-${id}.mp4`);
+}
+
+function tiktokMediaSignature(id, expires) {
+  return crypto.createHmac('sha256', process.env.TOKEN_ENCRYPTION_KEY)
+    .update(`${id}:${expires}`).digest('hex');
+}
+
+async function generateTikTokShort(draft) {
+  const parent = await store.getDraft(draft.parentId);
+  const clip = parent?.twitchClips?.[draft.highlightIndex];
+  if (parent?.sourceType !== 'twitch_highlight_batch' || !clip?.id) {
+    throw new Error('Source Twitch clip is unavailable for this Short');
+  }
+  const directory = path.join(uploadDir, `tiktok-work-${draft.id}`);
+  const output = tiktokMediaPath(draft.id);
+  await fs.promises.mkdir(directory, { recursive: true });
+  try {
+    const download = await twitch.waitForClipDownload({
+      clipId: clip.id, broadcasterId: clip.broadcasterId, editorId: clip.editorId
+    });
+    const url = download.landscape_download_url || download.portrait_download_url;
+    if (!url) throw new Error('Twitch clip media is no longer available');
+    const source = path.join(directory, 'source.mp4');
+    const highlight = path.join(directory, 'highlight.mp4');
+    const short = path.join(directory, 'short.mp4');
+    await twitch.downloadClip(url, source);
+    const durations = await video.assembleHighlights([source], highlight, directory);
+    await video.shortFromHighlight(highlight, 0, Math.min(60, durations[0]), short);
+    await fs.promises.rename(short, output);
+  } finally {
+    await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => {});
+  }
+  return output;
+}
+
+async function sendTikTokShort(id) {
+  let initiatedPublishId;
+  try {
+    const draft = await store.getDraft(id);
+    if (!draft || draft.sourceType !== 'twitch_highlight_short') return;
+    await generateTikTokShort(draft);
+    const expires = Math.floor(Date.now() / 1000) + 2 * 60 * 60;
+    const signature = tiktokMediaSignature(id, expires);
+    const url = new URL(`/tiktok-media/${id}/${expires}/${signature}.mp4`, process.env.BASE_URL);
+    if (url.protocol !== 'https:') throw new Error('TikTok requires an HTTPS media URL');
+    initiatedPublishId = await tiktok.uploadToInbox(url.toString());
+    await store.updateDraft(id, { tiktokStatus: 'processing_download', tiktokPublishId: initiatedPublishId,
+      tiktokError: null, tiktokSentAt: new Date().toISOString() });
+  } catch (error) {
+    console.error(`TikTok inbox job ${id} failed:`, error.message);
+    if (initiatedPublishId) {
+      // TikTok may already be downloading. Keep the file available if database persistence fails.
+      await store.updateDraft(id, { tiktokStatus: 'processing_download', tiktokPublishId: initiatedPublishId,
+        tiktokError: cleanText(error.message, 300) }).catch(() => {});
+    } else {
+      unlinkQuietly(tiktokMediaPath(id));
+      await store.updateDraft(id, { tiktokStatus: 'failed', tiktokError: cleanText(error.message, 300) }).catch(() => {});
+    }
+  } finally {
+    if (initiatedPublishId) {
+      const timer = setTimeout(() => unlinkQuietly(tiktokMediaPath(id)), 2 * 60 * 60 * 1000);
+      timer.unref();
+    }
+    tiktokJobs.delete(id);
+  }
+}
 
 function admin(req, res, next) {
   if (req.session?.adminAuthenticated || keysMatch(req.get('x-admin-key'), process.env.ADMIN_KEY)) return next();
@@ -313,6 +384,29 @@ app.get('/healthz', async (_req, res) => {
   }
 });
 
+// TikTok pulls this temporary file after an owner explicitly sends a Short.
+// The URL is signed, expires, and contains no account credentials.
+app.get('/tiktok-media/:filename', (req, res, next) => {
+  if (!process.env.TIKTOK_VERIFICATION_FILENAME || !process.env.TIKTOK_VERIFICATION_CONTENT ||
+      req.params.filename !== process.env.TIKTOK_VERIFICATION_FILENAME) return next();
+  res.set('Cache-Control', 'no-store');
+  res.type('text/plain').end(process.env.TIKTOK_VERIFICATION_CONTENT);
+});
+
+app.get('/tiktok-media/:id/:expires/:signature.mp4', (req, res) => {
+  const { id, expires, signature } = req.params;
+  if (!/^[a-f0-9-]{36}$/.test(id) || !/^\d{10}$/.test(expires) ||
+      Number(expires) < Date.now() / 1000 || Number(expires) > Date.now() / 1000 + 2 * 60 * 60 ||
+      !keysMatch(signature, tiktokMediaSignature(id, expires))) {
+    return res.status(404).end();
+  }
+  res.set('Cache-Control', 'no-store');
+  res.type('mp4');
+  res.sendFile(tiktokMediaPath(id), (error) => {
+    if (error && !res.headersSent) res.status(error.status || 404).end();
+  });
+});
+
 app.get('/api/admin/session', (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ authenticated: Boolean(req.session?.adminAuthenticated) });
@@ -354,6 +448,12 @@ app.get('/api/twitch/status', admin, async (_req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+app.get('/api/tiktok/status', admin, async (_req, res, next) => {
+  try {
+    res.json(await tiktok.connectionStatus());
+  } catch (error) { next(error); }
 });
 
 app.get('/auth/google', admin, async (req, res, next) => {
@@ -402,12 +502,77 @@ app.get('/oauth/twitch/callback', async (req, res, next) => {
   }
 });
 
+app.get('/auth/tiktok', admin, (req, res, next) => {
+  try {
+    const state = crypto.randomBytes(24).toString('hex');
+    req.session.tiktokOauthState = state;
+    res.redirect(tiktok.authorizationUrl(state));
+  } catch (error) { next(error); }
+});
+
+app.get('/oauth/tiktok/callback', async (req, res, next) => {
+  try {
+    if (!req.query.state || req.query.state !== req.session.tiktokOauthState) {
+      return res.status(400).send('Invalid TikTok OAuth state. Return to the dashboard and try again.');
+    }
+    if (!req.query.code) return res.status(400).send('TikTok did not return an authorization code.');
+    await tiktok.exchangeCode(req.query.code);
+    delete req.session.tiktokOauthState;
+    res.redirect('/?tiktok=connected');
+  } catch (error) { next(error); }
+});
+
 app.get('/api/drafts', admin, async (_req, res, next) => {
   try {
     res.json(await store.listDrafts());
   } catch (error) {
     next(error);
   }
+});
+
+app.post('/api/drafts/:id/tiktok-inbox', admin, async (req, res, next) => {
+  try {
+    const draft = await store.getDraft(req.params.id);
+    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    if (draft.sourceType !== 'twitch_highlight_short' || !draft.youtubeVideoId) {
+      return res.status(409).json({ error: 'Only completed stream Shorts can be sent to TikTok' });
+    }
+    if (req.body?.consent !== true) {
+      return res.status(400).json({ error: 'Review the Short and explicitly consent to this TikTok upload' });
+    }
+    if (draft.tiktokPublishId && draft.tiktokStatus !== 'failed') {
+      return res.status(409).json({ error: 'This Short was already sent to TikTok' });
+    }
+    if (tiktokJobs.has(draft.id) || draft.tiktokStatus === 'preparing' &&
+        Date.now() - Date.parse(draft.tiktokQueuedAt || 0) < 15 * 60 * 1000) {
+      return res.status(409).json({ error: 'TikTok delivery is already in progress' });
+    }
+    const status = await tiktok.connectionStatus();
+    if (!status.connected) return res.status(409).json({ error: status.error || 'Connect TikTok first' });
+    tiktokJobs.add(draft.id);
+    try {
+      await store.updateDraft(draft.id, { tiktokStatus: 'preparing', tiktokError: null,
+        tiktokPublishId: null, tiktokQueuedAt: new Date().toISOString() });
+    } catch (error) { tiktokJobs.delete(draft.id); throw error; }
+    setImmediate(() => sendTikTokShort(draft.id));
+    res.status(202).json({ accepted: true, tiktokStatus: 'preparing' });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/drafts/:id/tiktok-status', admin, async (req, res, next) => {
+  try {
+    const draft = await store.getDraft(req.params.id);
+    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    if (!draft.tiktokPublishId) {
+      return res.json({ status: draft.tiktokStatus || 'not_sent', error: draft.tiktokError || null });
+    }
+    const result = await tiktok.fetchStatus(draft.tiktokPublishId);
+    const statuses = { SEND_TO_USER_INBOX: 'ready_in_tiktok_inbox', PUBLISH_COMPLETE: 'published', FAILED: 'failed' };
+    const status = statuses[result.status] || 'processing_download';
+    await store.updateDraft(draft.id, { tiktokStatus: status, tiktokError: result.reason });
+    if (status !== 'processing_download') unlinkQuietly(tiktokMediaPath(draft.id));
+    res.json({ status, error: result.reason });
+  } catch (error) { next(error); }
 });
 
 app.post('/api/drafts', agentOrAdmin, upload.single('video'), async (req, res, next) => {
@@ -518,6 +683,13 @@ app.use((error, _req, res, _next) => {
 
 store.init()
   .then(async () => {
+    fs.promises.readdir(uploadDir).then(async (names) => {
+      for (const name of names.filter((item) => /^tiktok-[a-f0-9-]{36}\.mp4$/.test(item))) {
+        const file = path.join(uploadDir, name);
+        const stat = await fs.promises.stat(file).catch(() => null);
+        if (stat && Date.now() - stat.mtimeMs > 2 * 60 * 60 * 1000) unlinkQuietly(file);
+      }
+    }).catch(() => {});
     const port = process.env.PORT || 3000;
     app.listen(port, async () => {
       console.log(`AmaanaYt listening on port ${port}`);

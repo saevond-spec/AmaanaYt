@@ -79,6 +79,8 @@ const saveTokens = (tokens) => saveEncryptedState('youtube_tokens', tokens);
 const getTokens = () => getEncryptedState('youtube_tokens');
 const saveTwitchTokens = (tokens) => saveEncryptedState('twitch_tokens', tokens);
 const getTwitchTokens = () => getEncryptedState('twitch_tokens');
+const saveTikTokTokens = (tokens) => saveEncryptedState('tiktok_tokens', tokens);
+const getTikTokTokens = () => getEncryptedState('tiktok_tokens');
 
 async function listDrafts() {
   await init();
@@ -138,6 +140,8 @@ module.exports = {
   getTokens,
   saveTwitchTokens,
   getTwitchTokens,
+  saveTikTokTokens,
+  getTikTokTokens,
   listDrafts,
   getDraft,
   addDraft,
