@@ -25,6 +25,24 @@ function init() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+      CREATE TABLE IF NOT EXISTS amaana_seo_packages (
+        video_id TEXT PRIMARY KEY,
+        source JSONB NOT NULL,
+        context JSONB NOT NULL DEFAULT '{}'::jsonb,
+        package JSONB,
+        status TEXT NOT NULL DEFAULT 'queued',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        claim_token UUID,
+        claimed_at TIMESTAMPTZ,
+        last_attempt_at TIMESTAMPTZ,
+        generated_at TIMESTAMPTZ,
+        next_attempt_at TIMESTAMPTZ,
+        error TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS amaana_seo_packages_status_idx
+        ON amaana_seo_packages (status, next_attempt_at, created_at);
     `);
   }
   return initialized;
@@ -166,6 +184,93 @@ async function ping() {
   await pool.query('SELECT 1');
 }
 
+async function saveSeoSyncState(value) {
+  await init();
+  await pool.query(`INSERT INTO amaana_state (key, value, updated_at) VALUES ('seo_sync', $1::jsonb, NOW())
+    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`, [JSON.stringify(value)]);
+}
+
+async function getSeoSyncState() {
+  await init();
+  const result = await pool.query("SELECT value FROM amaana_state WHERE key = 'seo_sync'");
+  return result.rows[0]?.value || { cursor: null, completed: false, enabled: true };
+}
+
+async function upsertSeoVideo(videoId, source) {
+  await init();
+  // Catalog rescans refresh metadata, while preserving any owner context or completed package.
+  await pool.query(`INSERT INTO amaana_seo_packages (video_id, source) VALUES ($1, $2::jsonb)
+    ON CONFLICT (video_id) DO UPDATE SET source = EXCLUDED.source, updated_at = NOW()`,
+  [videoId, JSON.stringify(source)]);
+}
+
+async function getSeoVideo(videoId) {
+  await init();
+  const result = await pool.query(`SELECT video_id AS "videoId", source, context, package, status, attempts,
+    error, generated_at AS "generatedAt", updated_at AS "updatedAt"
+    FROM amaana_seo_packages WHERE video_id = $1`, [videoId]);
+  return result.rows[0] || null;
+}
+
+async function listSeoVideos(limit = 50, offset = 0) {
+  await init();
+  const result = await pool.query(`SELECT video_id AS "videoId", source, context, package, status, attempts,
+    error, generated_at AS "generatedAt", updated_at AS "updatedAt"
+    FROM amaana_seo_packages ORDER BY (source->>'publishedAt') DESC NULLS LAST, created_at DESC
+    LIMIT $1 OFFSET $2`, [Math.min(100, Math.max(1, limit)), Math.max(0, offset)]);
+  return result.rows;
+}
+
+async function seoCounts() {
+  await init();
+  const results = await Promise.all([
+    pool.query('SELECT status, COUNT(*)::integer AS count FROM amaana_seo_packages GROUP BY status'),
+    pool.query("SELECT COUNT(*)::integer AS count FROM amaana_seo_packages WHERE last_attempt_at >= (date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')")
+  ]);
+  return {
+    statuses: Object.fromEntries(results[0].rows.map(({ status, count }) => [status, count])),
+    attemptedToday: results[1].rows[0].count
+  };
+}
+
+async function updateSeoContext(videoId, context) {
+  await init();
+  const result = await pool.query(`UPDATE amaana_seo_packages
+    SET context = $2::jsonb, status = 'queued', package = NULL, attempts = 0,
+      error = NULL, next_attempt_at = NULL, claim_token = NULL, claimed_at = NULL, updated_at = NOW()
+    WHERE video_id = $1 RETURNING video_id`, [videoId, JSON.stringify(context)]);
+  return Boolean(result.rowCount);
+}
+
+async function claimSeoVideo() {
+  await init();
+  const token = crypto.randomUUID();
+  const result = await pool.query(`WITH candidate AS (
+      SELECT video_id FROM amaana_seo_packages
+      WHERE ((status IN ('queued', 'retry') AND (next_attempt_at IS NULL OR next_attempt_at <= NOW()))
+        OR (status = 'generating' AND claimed_at < NOW() - INTERVAL '20 minutes'))
+      ORDER BY (source->>'publishedAt') DESC NULLS LAST, created_at ASC
+      LIMIT 1 FOR UPDATE SKIP LOCKED
+    )
+    UPDATE amaana_seo_packages p SET status = 'generating', claim_token = $1,
+      claimed_at = NOW(), last_attempt_at = NOW(), attempts = attempts + 1, updated_at = NOW()
+    FROM candidate WHERE p.video_id = candidate.video_id
+    RETURNING p.video_id AS "videoId", p.source, p.context, p.attempts`, [token]);
+  return result.rows[0] ? { ...result.rows[0], claimToken: token } : null;
+}
+
+async function finishSeoVideo(videoId, claimToken, generated, error) {
+  await init();
+  const status = generated ? (generated.missingEvidence.length ? 'needs_review' : 'ready') :
+    (error.retry ? 'retry' : 'failed');
+  const next = error?.retry ? new Date(Date.now() + Math.min(24, 2 ** error.attempts) * 60 * 60 * 1000) : null;
+  await pool.query(`UPDATE amaana_seo_packages SET package = $3::jsonb, status = $4,
+    generated_at = CASE WHEN $3::jsonb IS NOT NULL THEN NOW() ELSE generated_at END,
+    next_attempt_at = $5, error = $6, claim_token = NULL, claimed_at = NULL, updated_at = NOW()
+    WHERE video_id = $1 AND claim_token = $2`,
+  [videoId, claimToken, generated ? JSON.stringify(generated) : null, status, next, error?.message || null]);
+}
+
 module.exports = {
   init,
   ping,
@@ -179,5 +284,14 @@ module.exports = {
   getDraft,
   addDraft,
   updateDraft,
-  claimTikTokDelivery
+  claimTikTokDelivery,
+  saveSeoSyncState,
+  getSeoSyncState,
+  upsertSeoVideo,
+  getSeoVideo,
+  listSeoVideos,
+  seoCounts,
+  updateSeoContext,
+  claimSeoVideo,
+  finishSeoVideo
 };

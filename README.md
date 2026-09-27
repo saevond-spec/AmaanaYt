@@ -1,6 +1,6 @@
 # AmaanaYt
 
-Approval-based YouTube Shorts and TikTok inbox service for **@saevond**.
+Approval-based YouTube Shorts, TikTok inbox, and video SEO drafting service for **@saevond**.
 
 AmaanaYt connects to YouTube and Twitch with OAuth. After SweatyClanker detects moments in an ended Twitch stream, Amaana assembles them into a landscape highlight video, then cuts vertical Shorts from that assembled video. The highlight and each Short become separate private YouTube drafts; an owner key is required to publish or schedule each one.
 
@@ -16,6 +16,7 @@ Generated Shorts can also be sent to the creator's TikTok inbox **one at a time 
 - `ADMIN_KEY` controls OAuth connection, draft review, publication, and scheduling.
 - New uploads always start as private.
 - TikTok delivery requires owner approval per Short. TikTok media URLs are signed and expire.
+- SEO packages are review drafts. The service never changes existing YouTube video metadata, posts comments, or publishes community posts from them.
 - The service does not delete existing videos.
 
 Keep `ADMIN_KEY` out of OpenClaw. Give OpenClaw only `AGENT_KEY`.
@@ -46,7 +47,7 @@ It resembles:
 
 `postgresql://postgres.PROJECT:PASSWORD@POOLER-HOST:5432/postgres`
 
-Treat this URL as a secret. Never commit or post it publicly. AmaanaYt creates its two required tables automatically.
+Treat this URL as a secret. Never commit or post it publicly. AmaanaYt creates its required tables automatically.
 
 ## 2. Deploy the Render Blueprint
 
@@ -73,6 +74,8 @@ Required values:
 Render generates `SESSION_SECRET`.
 
 For TikTok inbox delivery, also configure `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, and the URL verification values described below.
+
+For SEO package generation, set `SEO_AI_API_KEY` and `SEO_AI_MODEL` for a JSON-capable OpenAI-compatible chat completion provider. The default `SEO_AI_BASE_URL` is `https://api.openai.com`; set a different provider origin if desired. Configure a model offered by that provider. `SEO_DAILY_LIMIT` defaults to 20 generation attempts per UTC day (maximum 100). Package generation sends each video's title, description, tags, and any owner-entered notes to that provider; choose the provider and budget accordingly. Without these variables Amaana scans the catalog and queues packages but makes no model requests.
 
 Generate independent secrets with:
 
@@ -166,6 +169,28 @@ Copy `skills/youtube-manager` into the OpenClaw skills directory and configure:
 Do not give OpenClaw `ADMIN_KEY`.
 
 ## API workflow
+
+### SEO packages for every channel upload
+
+After deployment, Amaana reads the authenticated channel's uploads playlist in pages of up to 50 videos, then fetches the video metadata in batches. It keeps a database cursor, rescans the newest page for future uploads, and resumes the older catalog after restarts. The hourly `/healthz` wake-up also advances this work; on Render Free, sleep and delayed GitHub Actions runs can extend the schedule. The dashboard shows discovery progress, generated packages, and items needing footage review. You can pause or restart the scan from the owner dashboard; rescanning preserves existing package drafts. If the connected YouTube channel changes, the scan pauses rather than mixing two channels in one catalog.
+
+Each package contains three search titles, three curiosity titles, three hybrid titles (each under 60 characters), three thumbnail briefs, a 125–150 character keyword hook, description paragraphs, chapters where validated times exist, resource placeholders, three hashtags, 10–15 tags, a pinned comment draft, a community post teaser, and 2–3 clip recommendations when enough source moments exist. This is draft copy for owner review and testing; no SEO result or AI summary appearance is guaranteed. YouTube says tags have a limited role in discovery, so titles, thumbnails, and useful descriptions deserve the most attention.
+
+Amaana accepts verified chapter and clip markers as seconds from the final video, including the offsets it measures when assembling Twitch highlights. For older videos it can reuse chapter lines already present in a description. It never guesses timestamps from a title. A video without enough markers gets a review flag and a visible chapter placeholder. Chapter sequences require at least three positions starting at zero, with chapters at least ten seconds long. Short clips with fewer than two verified moments keep an explicit review flag.
+
+Add the topic, primary keyword, script or key takeaways, audience, and video type in the owner dashboard for a stronger package. To specify exact moments, open the video's **Review package and edit context** panel and enter JSON markers such as:
+
+```json
+[
+  {"kind":"chapter","startSeconds":0,"title":"Opening"},
+  {"kind":"chapter","startSeconds":42,"title":"First round"},
+  {"kind":"chapter","startSeconds":93,"title":"Final fight"},
+  {"kind":"clip","startSeconds":96,"endSeconds":132,"title":"Final fight"},
+  {"kind":"clip","startSeconds":145,"endSeconds":175,"title":"Reaction"}
+]
+```
+
+Saving context queues a replacement package. SEO status and catalog APIs require the owner session or `x-admin-key`: `GET /api/seo/status`, `GET /api/seo/videos?offset=0`, `PUT /api/seo/videos/{videoId}/context`, `POST /api/seo/videos/{videoId}/regenerate`, and `POST /api/seo/backfill` with `{"enabled":true}` or `{"enabled":true,"restart":true}`. Pausing with `{"enabled":false}` pauses generation too. New private uploads from the dashboard and Twitch jobs enter the same queue automatically. Uploaded videos remain private until their existing approval flow is used; SEO package review does not publish or edit them.
 
 ### Queue AI-selected Twitch VOD moments
 

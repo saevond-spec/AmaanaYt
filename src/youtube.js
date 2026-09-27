@@ -89,10 +89,41 @@ async function publish(videoId, publishAt) {
 async function getVideo(videoId) {
   const youtube = await service();
   const response = await youtube.videos.list({
-    part: ['snippet', 'status', 'processingDetails'],
+    part: ['snippet', 'status', 'processingDetails', 'contentDetails'],
     id: [videoId]
   });
   return response.data.items?.[0] || null;
+}
+
+async function ownedChannel() {
+  const youtube = await service();
+  const response = await youtube.channels.list({ part: ['snippet', 'contentDetails'], mine: true,
+    fields: 'items(id,snippet(title),contentDetails(relatedPlaylists(uploads)))' });
+  const channel = response.data.items?.[0];
+  if (!channel?.id || !channel.contentDetails?.relatedPlaylists?.uploads) {
+    throw new Error('The connected YouTube account has no uploads playlist');
+  }
+  return { id: channel.id, title: channel.snippet?.title, uploads: channel.contentDetails.relatedPlaylists.uploads };
+}
+
+async function uploadsPage(playlistId, pageToken) {
+  const youtube = await service();
+  const response = await youtube.playlistItems.list({
+    part: ['contentDetails'], playlistId, maxResults: 50,
+    ...(pageToken ? { pageToken } : {}),
+    fields: 'nextPageToken,items(contentDetails(videoId))'
+  });
+  return { ids: (response.data.items || []).map((item) => item.contentDetails?.videoId).filter(Boolean),
+    nextPageToken: response.data.nextPageToken || null };
+}
+
+async function videoMetadata(ids) {
+  if (!Array.isArray(ids) || ids.length > 50) throw new Error('Request metadata for up to 50 videos');
+  if (!ids.length) return [];
+  const youtube = await service();
+  const response = await youtube.videos.list({ part: ['snippet', 'status', 'contentDetails'], id: ids,
+    fields: 'items(id,snippet(title,description,tags,publishedAt,channelId,categoryId),status(privacyStatus),contentDetails(duration))' });
+  return response.data.items || [];
 }
 
 async function getVideoViews(videoIds) {
@@ -108,4 +139,5 @@ async function getVideoViews(videoIds) {
   return response.data.items || [];
 }
 
-module.exports = { isConnected, canApprove, authorizationUrl, exchangeCode, uploadPrivate, publish, getVideo, getVideoViews };
+module.exports = { isConnected, canApprove, authorizationUrl, exchangeCode, uploadPrivate, publish,
+  getVideo, getVideoViews, ownedChannel, uploadsPage, videoMetadata };
