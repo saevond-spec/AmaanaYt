@@ -151,7 +151,7 @@ using the `x-admin-key` header. Open the returned Google authorization URL, choo
 On the SweatyClanker Render service, add:
 
 - `CLIP_WEBHOOK_URL=https://YOUR-RENDER-DOMAIN/api/twitch/vod-clips`
-- `CLIP_WEBHOOK_KEY`: the same secret already stored as Amaana's `AGENT_KEY`
+- `CLIP_WEBHOOK_KEY`: the same secret stored as Amaana's `VOD_WEBHOOK_KEY`. The existing `AGENT_KEY` also works for older bot setups.
 - `HIGHLIGHT_DETECTION_ENABLED=true`
 
 Never paste the webhook key into chat or commit it to GitHub.
