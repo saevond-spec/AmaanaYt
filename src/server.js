@@ -189,6 +189,12 @@ function agentOrAdmin(req, res, next) {
   return agentKey(req, res, next);
 }
 
+function vodWebhookOrAgentOrAdmin(req, res, next) {
+  const key = process.env.VOD_WEBHOOK_KEY;
+  if (key && keysMatch(req.get('x-agent-key'), key)) return next();
+  return agentOrAdmin(req, res, next);
+}
+
 function cleanText(value, maxLength) {
   return String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maxLength);
 }
@@ -709,7 +715,7 @@ app.post('/api/drafts', agentOrAdmin, upload.single('video'), async (req, res, n
   }
 });
 
-app.post('/api/twitch/vod-clips', agentOrAdmin, async (req, res, next) => {
+app.post('/api/twitch/vod-clips', vodWebhookOrAgentOrAdmin, async (req, res, next) => {
   try {
     const vodId = cleanText(req.body?.vodId, 40);
     if (!/^\d+$/.test(vodId)) return res.status(400).json({ error: 'vodId must be a Twitch VOD number' });
