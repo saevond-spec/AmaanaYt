@@ -35,7 +35,9 @@ services:
         sync: false
       - key: SEO_AI_BASE_URL
         sync: false
+      - key: SEO_AI_TIMEOUT_MS
+        value: '120000'
       - key: SEO_DAILY_LIMIT
-        value: '20'
+        value: '200'
       - key: UPLOAD_DIR
         value: /tmp/uploads
