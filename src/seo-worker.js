@@ -44,8 +44,9 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console }
         await store.saveSeoSyncState(state);
       }
       if (!env.SEO_AI_API_KEY || !env.SEO_AI_MODEL || state.enabled === false) return;
-      if (Date.parse(state.providerBlockedUntil) > Date.now()) return;
       const counts = await store.seoCounts();
+      logger.info?.(`SEO queue statuses: ${JSON.stringify(counts.statuses || {})}; attemptedToday=${counts.attemptedToday}`);
+      if (Date.parse(state.providerBlockedUntil) > Date.now()) return;
       const remaining = Math.min(2, dailyLimit - counts.attemptedToday);
       for (let index = 0; index < remaining; index += 1) {
         const job = await store.claimSeoVideo();
