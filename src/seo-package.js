@@ -215,6 +215,12 @@ DATA: ${JSON.stringify(payload)}`;
   if (!response.ok) {
     const error = new Error(`SEO provider returned HTTP ${response.status}`);
     error.status = response.status;
+    // OpenAI uses HTTP 429 for both temporary rate limits and exhausted credits.
+    // Keep the machine-readable code so the worker can pause only quota failures.
+    if (response.status === 429) {
+      const body = await response.json().catch(() => null);
+      error.code = body?.error?.code;
+    }
     throw error;
   }
   const body = await response.json();
