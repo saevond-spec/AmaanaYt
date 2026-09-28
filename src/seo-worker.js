@@ -1,6 +1,6 @@
 const { normalizeSource, normalizeContext, generatePackage } = require('./seo-package');
 
-function createSeoWorker({ store, youtube, env = process.env, logger = console }) {
+function createSeoWorker({ store, youtube, env = process.env, logger = console, sleep }) {
   let running = false;
   let scheduled = false;
   let rerunRequested = false;
@@ -58,11 +58,15 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console }
           const baseUrl = env.SEO_AI_BASE_URL || 'https://api.openai.com/v1';
           const fallbackModel = baseUrl.startsWith('https://generativelanguage.googleapis.com/')
             ? env.SEO_AI_FALLBACK_MODEL || 'gemini-3.5-flash-lite' : null;
+          const secondaryNativeModel = fallbackModel
+            ? env.SEO_AI_SECONDARY_MODEL || 'gemini-3.1-flash-lite' : null;
           const generated = await generatePackage(job.source, context, {
             apiKey: env.SEO_AI_API_KEY, model: env.SEO_AI_MODEL,
-            baseUrl, fallbackModel,
+            baseUrl, fallbackModel, secondaryNativeModel,
+            ...(sleep ? { sleep } : {}),
             onFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying fallback model ${fallback}`),
-            onNativeFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying native route with ${fallback}`)
+            onNativeFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying native route with ${fallback}`),
+            onSecondNativeFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying second native model ${fallback}`)
           });
           await store.finishSeoVideo(job.videoId, job.claimToken, generated, null);
           logger.info?.(`SEO package ${job.videoId} generated: ${generated.missingEvidence.length ? 'needs_review' : 'ready'}`);
