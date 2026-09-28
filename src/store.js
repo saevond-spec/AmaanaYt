@@ -54,6 +54,12 @@ function init() {
       );
       CREATE INDEX IF NOT EXISTS amaana_seo_packages_status_idx
         ON amaana_seo_packages (status, next_attempt_at, created_at);
+      CREATE TABLE IF NOT EXISTS amaana_video_analysis (
+        video_id TEXT PRIMARY KEY REFERENCES amaana_seo_packages(video_id) ON DELETE CASCADE,
+        analysis JSONB NOT NULL,
+        model TEXT NOT NULL,
+        analyzed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
     `);
   }
   return initialized;
@@ -217,19 +223,37 @@ async function upsertSeoVideo(videoId, source) {
 
 async function getSeoVideo(videoId) {
   await init();
-  const result = await pool.query(`SELECT video_id AS "videoId", source, context, package, status, attempts,
-    error, generated_at AS "generatedAt", updated_at AS "updatedAt"
-    FROM amaana_seo_packages WHERE video_id = $1`, [videoId]);
+  const result = await pool.query(`SELECT p.video_id AS "videoId", p.source, p.context, p.package, p.status, p.attempts,
+    p.error, p.generated_at AS "generatedAt", p.updated_at AS "updatedAt",
+    a.analysis, a.model AS "analysisModel", a.analyzed_at AS "analyzedAt"
+    FROM amaana_seo_packages p LEFT JOIN amaana_video_analysis a ON a.video_id = p.video_id
+    WHERE p.video_id = $1`, [videoId]);
   return result.rows[0] || null;
 }
 
 async function listSeoVideos(limit = 50, offset = 0) {
   await init();
-  const result = await pool.query(`SELECT video_id AS "videoId", source, context, package, status, attempts,
-    error, generated_at AS "generatedAt", updated_at AS "updatedAt"
-    FROM amaana_seo_packages ORDER BY (source->>'publishedAt') DESC NULLS LAST, created_at DESC
+  const result = await pool.query(`SELECT p.video_id AS "videoId", p.source, p.context, p.package, p.status, p.attempts,
+    p.error, p.generated_at AS "generatedAt", p.updated_at AS "updatedAt",
+    a.analysis, a.model AS "analysisModel", a.analyzed_at AS "analyzedAt"
+    FROM amaana_seo_packages p LEFT JOIN amaana_video_analysis a ON a.video_id = p.video_id
+    ORDER BY (p.source->>'publishedAt') DESC NULLS LAST, p.created_at DESC
     LIMIT $1 OFFSET $2`, [Math.min(100, Math.max(1, limit)), Math.max(0, offset)]);
   return result.rows;
+}
+
+async function getVideoAnalysis(videoId) {
+  await init();
+  const result = await pool.query(`SELECT analysis, model, analyzed_at AS "analyzedAt"
+    FROM amaana_video_analysis WHERE video_id = $1`, [videoId]);
+  return result.rows[0] || null;
+}
+
+async function saveVideoAnalysis(videoId, analysis, model) {
+  await init();
+  await pool.query(`INSERT INTO amaana_video_analysis (video_id, analysis, model)
+    VALUES ($1, $2::jsonb, $3) ON CONFLICT (video_id) DO NOTHING`,
+  [videoId, JSON.stringify(analysis), model]);
 }
 
 async function seoCounts() {
@@ -303,6 +327,8 @@ module.exports = {
   upsertSeoVideo,
   getSeoVideo,
   listSeoVideos,
+  getVideoAnalysis,
+  saveVideoAnalysis,
   seoCounts,
   updateSeoContext,
   claimSeoVideo,
