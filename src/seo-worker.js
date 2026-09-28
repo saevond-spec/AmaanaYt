@@ -1,4 +1,5 @@
 const { normalizeSource, normalizeContext, generatePackage, createModelCircuitBreaker } = require('./seo-package');
+const { analyzeVideo } = require('./video-analysis');
 
 function createSeoWorker({ store, youtube, env = process.env, logger = console, sleep }) {
   let running = false;
@@ -8,6 +9,63 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   const configuredLimit = Number(env.SEO_DAILY_LIMIT);
   const dailyLimit = Number.isSafeInteger(configuredLimit) && configuredLimit >= 1 ? configuredLimit : 200;
   const circuitBreaker = createModelCircuitBreaker();
+  const analysisCircuitBreaker = createModelCircuitBreaker();
+  const analysisEnabled = env.ENABLE_VIDEO_ANALYSIS === 'true';
+
+  async function videoAnalysis(job, state) {
+    if (!analysisEnabled) return null;
+    const id = job.videoId;
+    if (job.source.privacyStatus !== 'public') {
+      logger.info?.(`analysis_skipped ${id}: video is not public`);
+      return null;
+    }
+    try {
+      const cached = await store.getVideoAnalysis(id);
+      if (cached?.analysis) {
+        logger.info?.(`analysis_skipped ${id}: cached`);
+        return cached.analysis;
+      }
+      if (Date.parse(state.videoAnalysisBlockedUntil) > Date.now()) {
+        logger.info?.(`analysis_skipped ${id}: provider cooling down`);
+        return null;
+      }
+      const gemini = (env.SEO_AI_BASE_URL || '').startsWith('https://generativelanguage.googleapis.com/');
+      const apiKey = env.VIDEO_ANALYSIS_API_KEY || (gemini ? env.SEO_AI_API_KEY : null);
+      if (!apiKey) {
+        logger.info?.(`analysis_skipped ${id}: configure a Gemini video analysis key`);
+        return null;
+      }
+      const model = env.VIDEO_ANALYSIS_MODEL || (gemini ? env.SEO_AI_MODEL : 'gemini-3.8-flash');
+      logger.info?.(`analysis_started ${id}`);
+      const analysis = await analyzeVideo(`https://www.youtube.com/watch?v=${id}`, {
+        apiKey, model, durationSeconds: job.source.durationSeconds,
+        fallbackModels: [env.SEO_AI_FALLBACK_MODEL || 'gemini-3.5-flash-lite',
+          env.SEO_AI_SECONDARY_MODEL || 'gemini-3.1-flash-lite',
+          env.SEO_AI_FINAL_MODEL || 'gemini-3.8-flash'],
+        timeoutMs: env.VIDEO_ANALYSIS_TIMEOUT_MS, circuitBreaker: analysisCircuitBreaker,
+        ...(sleep ? { sleep } : {})
+      });
+      await store.saveVideoAnalysis(id, analysis, analysis.model);
+      logger.info?.(`analysis_completed ${id}: model=${analysis.model}`);
+      if (state.videoAnalysisBlockedUntil || state.consecutiveAnalysis503s) {
+        state.videoAnalysisBlockedUntil = null;
+        state.consecutiveAnalysis503s = 0;
+        await store.saveSeoSyncState(state);
+      }
+      return analysis;
+    } catch (error) {
+      logger.warn?.(`analysis_failed ${id}: ${error.status ? `HTTP ${error.status}` : error.message}`);
+      if ([429, 503].includes(error.status)) {
+        state.consecutiveAnalysis503s = error.status === 503 ? (state.consecutiveAnalysis503s || 0) + 1 : 0;
+        const pauseMs = error.status === 429
+          ? error.retryAfterPresent ? error.retryAfterMs : 60 * 60 * 1000
+          : Math.min(120, 15 * 2 ** state.consecutiveAnalysis503s) * 60 * 1000;
+        state.videoAnalysisBlockedUntil = new Date(Date.now() + pauseMs).toISOString();
+        await store.saveSeoSyncState(state);
+      }
+      return null; // Metadata-only generation still runs after analysis fails.
+    }
+  }
 
   async function catalogPage(channel, cursor) {
     const page = await youtube.uploadsPage(channel.uploads, cursor);
@@ -73,10 +131,11 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
             ? env.SEO_AI_SECONDARY_MODEL || 'gemini-3.1-flash-lite' : null;
           const finalNativeModel = fallbackModel
             ? env.SEO_AI_FINAL_MODEL || 'gemini-3.8-flash' : null;
+          const analysis = await videoAnalysis(job, state);
           const generated = await generatePackage(job.source, context, {
             apiKey: env.SEO_AI_API_KEY, model: env.SEO_AI_MODEL,
             baseUrl, fallbackModel, secondaryNativeModel, finalNativeModel,
-            timeoutMs: env.SEO_AI_TIMEOUT_MS, circuitBreaker,
+            analysis, timeoutMs: env.SEO_AI_TIMEOUT_MS, circuitBreaker,
             ...(sleep ? { sleep } : {}),
             onFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying fallback model ${fallback}`),
             onNativeFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying native route with ${fallback}`),
@@ -157,7 +216,8 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
 
   async function status() {
     const [state, counts] = await Promise.all([store.getSeoSyncState(), store.seoCounts()]);
-    return { ...state, ...counts, dailyLimit, providerConfigured: Boolean(env.SEO_AI_API_KEY && env.SEO_AI_MODEL),
+    return { ...state, ...counts, dailyLimit, videoAnalysisEnabled: analysisEnabled,
+      providerConfigured: Boolean(env.SEO_AI_API_KEY && env.SEO_AI_MODEL),
       running };
   }
 
