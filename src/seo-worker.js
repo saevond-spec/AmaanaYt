@@ -50,7 +50,9 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console }
         const job = await store.claimSeoVideo();
         if (!job) break;
         try {
-          const generated = await generatePackage(job.source, job.context, {
+          // Catalog rows start with an empty JSON context; normalize it before reading markers.
+          const context = normalizeContext(job.context, job.source.durationSeconds, true);
+          const generated = await generatePackage(job.source, context, {
             apiKey: env.SEO_AI_API_KEY, model: env.SEO_AI_MODEL,
             baseUrl: env.SEO_AI_BASE_URL || 'https://api.openai.com/v1'
           });
