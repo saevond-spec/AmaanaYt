@@ -14,6 +14,7 @@ const tiktok = require('./tiktok');
 const { createShortViewMonitor, TIKTOK_VIEW_THRESHOLD } = require('./short-views');
 const { createSeoWorker } = require('./seo-worker');
 const { normalizeContext } = require('./seo-package');
+const { analyzeVideo } = require('./video-analysis');
 const { createSessionStore } = require('./session-store');
 
 for (const name of ['BASE_URL', 'DATABASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SESSION_SECRET', 'TOKEN_ENCRYPTION_KEY', 'AGENT_KEY', 'ADMIN_KEY']) {
@@ -59,6 +60,30 @@ const queuedClipIds = new Set();
 let clipWorkerRunning = false;
 const tiktokJobs = new Set();
 const seo = createSeoWorker({ store, youtube });
+// One-time production smoke test for the public Saevond video. The database
+// claim prevents repeat provider calls if Render restarts or deploys twice.
+async function runVideoAnalysisSmokeTest() {
+  const videoId = '5uip4JyjuIc';
+  const marker = 'video_analysis_smoke_20260928';
+  const gemini = (process.env.SEO_AI_BASE_URL || '').startsWith('https://generativelanguage.googleapis.com/');
+  const apiKey = process.env.VIDEO_ANALYSIS_API_KEY || (gemini ? process.env.SEO_AI_API_KEY : null);
+  if (!apiKey) { console.warn(`analysis_test_skipped ${videoId}: no Gemini key configured`); return; }
+  const claim = await store.pool.query(`INSERT INTO amaana_state (key, value)
+    VALUES ($1, $2::jsonb) ON CONFLICT (key) DO NOTHING RETURNING key`,
+  [marker, JSON.stringify({ videoId, status: 'started', at: new Date().toISOString() })]);
+  if (!claim.rowCount) { console.log(`analysis_test_skipped ${videoId}: already attempted`); return; }
+  console.log(`analysis_test_started ${videoId}`);
+  try {
+    const analysis = await analyzeVideo(`https://www.youtube.com/watch?v=${videoId}`, {
+      apiKey, model: process.env.VIDEO_ANALYSIS_MODEL || (gemini ? process.env.SEO_AI_MODEL : 'gemini-3.8-flash'),
+      timeoutMs: process.env.VIDEO_ANALYSIS_TIMEOUT_MS, fallbackModels: []
+    });
+    await store.saveVideoAnalysis(videoId, analysis, analysis.model);
+    console.log(`analysis_test_completed ${videoId}: model=${analysis.model} keyword=${JSON.stringify(analysis.primaryKeyword)} summary=${JSON.stringify(analysis.summary.slice(0, 180))}`);
+  } catch (error) {
+    console.warn(`analysis_test_failed ${videoId}: ${error.status ? `HTTP ${error.status}` : error.message}`);
+  }
+}
 const SHORT_VIEW_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 let lastShortViewCheck = 0;
 let shortViewCheckRunning = false;
@@ -916,7 +941,8 @@ store.init()
     app.listen(port, async () => {
       console.log(`AmaanaYt listening on port ${port}`);
       scheduleShortViewCheck();
-      seo.schedule();
+      runVideoAnalysisSmokeTest().catch((error) => console.warn('analysis_test_failed:', error.message))
+        .finally(() => seo.schedule());
       try {
         const drafts = await store.listDrafts();
         const resumable = new Set([
