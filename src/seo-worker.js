@@ -52,7 +52,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console }
         try {
           const generated = await generatePackage(job.source, job.context, {
             apiKey: env.SEO_AI_API_KEY, model: env.SEO_AI_MODEL,
-            baseUrl: env.SEO_AI_BASE_URL || 'https://api.openai.com'
+            baseUrl: env.SEO_AI_BASE_URL || 'https://api.openai.com/v1'
           });
           await store.finishSeoVideo(job.videoId, job.claimToken, generated, null);
         } catch (error) {

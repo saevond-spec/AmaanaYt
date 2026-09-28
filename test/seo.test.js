@@ -81,6 +81,13 @@ test('sends factual input to a configured model and validates the response', asy
   assert.equal(request.url, 'https://api.openai.com/v1/chat/completions');
   assert.equal(pkg.titles.search.length, 3);
   assert.equal(pkg.shorts.length, 2);
+  await generatePackage(source, context, {
+    apiKey: 'unit-test-key', model: 'deepseek-flash', baseUrl: 'https://api.deepseek.com',
+    fetchImpl: async (url) => {
+      assert.equal(url.toString(), 'https://api.deepseek.com/chat/completions');
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) };
+    }
+  });
   assert.throws(() => validatePackage({ ...generated,
     titles: { ...generated.titles, search: ['Unrelated title', ...generated.titles.search.slice(1)] }
   }, source, context), /start with the primary keyword/);

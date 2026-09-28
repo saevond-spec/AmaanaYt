@@ -201,7 +201,9 @@ Do not invent games, outcomes, quotes, products, events, or steps absent from th
 Do not invent timestamps. Chapter and clip times are assembled separately from grounded markers. Provide clipHooks only for the supplied clip markers.
 Write in the video's language. No Markdown fencing. JSON only.
 DATA: ${JSON.stringify(payload)}`;
-  const response = await fetchImpl(new URL('/v1/chat/completions', baseUrl || 'https://api.openai.com'), {
+  // Preserve the provider's base path: OpenAI uses /v1; DeepSeek uses the origin.
+  const providerBase = String(baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '');
+  const response = await fetchImpl(new URL('chat/completions', `${providerBase}/`), {
     method: 'POST',
     headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
     body: JSON.stringify({ model, response_format: { type: 'json_object' }, messages: [
