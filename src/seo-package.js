@@ -179,7 +179,8 @@ function validatePackage(raw, source, context) {
 }
 
 async function generatePackage(source, context, { apiKey, model, baseUrl, fallbackModel,
-  secondaryNativeModel, onFallback, onNativeFallback, onSecondNativeFallback,
+  secondaryNativeModel, finalNativeModel, onFallback, onNativeFallback, onSecondNativeFallback,
+  onFinalNativeFallback,
   fetchImpl = fetch, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   if (!apiKey || !model) throw new Error('Configure SEO_AI_API_KEY and SEO_AI_MODEL to generate packages');
   const evidence = evidenceFor(source, context);
@@ -245,6 +246,11 @@ DATA: ${JSON.stringify(payload)}`;
         response = await requestNative(secondaryNativeModel);
         if (response.status !== 503) break;
       }
+    }
+    if (response.status === 503 && finalNativeModel &&
+      ![nativeModel, secondaryNativeModel].includes(finalNativeModel)) {
+      onFinalNativeFallback?.(finalNativeModel);
+      response = await requestNative(finalNativeModel);
     }
   }
   if (!response.ok) {
