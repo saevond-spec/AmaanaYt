@@ -75,7 +75,7 @@ Render generates `SESSION_SECRET`.
 
 For TikTok inbox delivery, also configure `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, and the URL verification values described below.
 
-For SEO package generation, set `SEO_AI_API_KEY` and `SEO_AI_MODEL` for a JSON-capable OpenAI-compatible chat completion provider. The default `SEO_AI_BASE_URL` is `https://api.openai.com`; set a different provider origin if desired. Configure a model offered by that provider. `SEO_DAILY_LIMIT` defaults to 20 generation attempts per UTC day (maximum 100). Package generation sends each video's title, description, tags, and any owner-entered notes to that provider; choose the provider and budget accordingly. Without these variables Amaana scans the catalog and queues packages but makes no model requests.
+For SEO package generation, set `SEO_AI_API_KEY` and `SEO_AI_MODEL` for a JSON-capable OpenAI-compatible chat completion provider. The default `SEO_AI_BASE_URL` is `https://api.openai.com/v1`; for DeepSeek use `https://api.deepseek.com` and a currently supported model such as `deepseek-flash`. `SEO_DAILY_LIMIT` defaults to 20 generation attempts per UTC day (maximum 100). Package generation sends each video's title, description, tags, and any owner-entered notes to that provider; choose the provider and budget accordingly. Without these variables Amaana scans the catalog and queues packages but makes no model requests.
 
 Generate independent secrets with:
 
