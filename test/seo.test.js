@@ -117,7 +117,9 @@ test('uses the native Gemini route if both compatible models return HTTP 503', a
     fetchImpl: async (url, options) => {
       requests.push({ url: String(url), options });
       return requests.length < 3 ? { ok: false, status: 503 } : {
-        ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(generated) }] } }] })
+        ok: true, json: async () => ({ candidates: [{ content: { parts: [
+          { thought: true, text: 'Do not parse this as JSON' }, { text: JSON.stringify(generated) }
+        ] } }] })
       };
     }
   });
