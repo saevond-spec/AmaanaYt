@@ -189,13 +189,41 @@ test('parses Retry-After seconds and dates, with a 60 second request default', (
 });
 
 test('exposes provider 429 Retry-After and machine-readable quota code', async () => {
+  const delays = [];
+  let requests = 0;
   await assert.rejects(generatePackage(source, context, {
     apiKey: 'unit-test-key', model: 'rate-test', circuitBreaker: createModelCircuitBreaker(),
-    fetchImpl: async () => ({ ok: false, status: 429,
+    sleep: async (ms) => { delays.push(ms); },
+    fetchImpl: async () => { requests += 1; return { ok: false, status: 429,
       headers: { get: (header) => header === 'retry-after' ? '25' : null },
-      json: async () => ({ error: { code: 'rate_limit_exceeded' } }) })
+      json: async () => ({ error: { code: 'rate_limit_exceeded' } }) }; }
   }), (error) => error.status === 429 && error.retryAfterPresent &&
     error.retryAfterMs === 25000 && error.code === 'rate_limit_exceeded');
+  assert.equal(requests, 2);
+  assert.deepEqual(delays, [25000]);
+});
+
+test('429 without a header retries once after 60 seconds; long headers defer to the queue', async () => {
+  const delays = [];
+  let requests = 0;
+  const options = { apiKey: 'unit-test-key', model: 'rate-default-test',
+    circuitBreaker: createModelCircuitBreaker(), sleep: async (ms) => { delays.push(ms); },
+    fetchImpl: async () => ++requests === 1 ? { ok: false, status: 429,
+      headers: { get: () => null } } : { ok: true,
+      json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) } };
+  const pkg = await generatePackage(source, context, options);
+  assert.equal(pkg.primaryKeyword, keyword);
+  assert.equal(requests, 2);
+  assert.deepEqual(delays, [60000]);
+  requests = 0;
+  await assert.rejects(generatePackage(source, context, {
+    ...options, fetchImpl: async () => {
+      requests += 1;
+      return { ok: false, status: 429, headers: { get: () => '120' }, json: async () => null };
+    }
+  }), (error) => error.retryAfterMs === 120000 && error.retryAfterPresent);
+  assert.equal(requests, 1);
+  assert.deepEqual(delays, [60000]);
 });
 
 test('opens a model circuit after three 503s and closes it after 30 minutes', async () => {
@@ -249,7 +277,8 @@ test('worker uses Retry-After on 429 and pauses 60 minutes when absent', async (
         headers: { get: (name) => name === 'retry-after' ? header : null },
         json: async () => ({ error: { code: 'rate_limit_exceeded' } }) });
       const worker = createSeoWorker({ store: fakeStore, youtube,
-        env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'rate-worker' }, logger: { error() {} } });
+        env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'rate-worker' },
+        sleep: async () => {}, logger: { error() {} } });
       await worker.run();
       const pause = Date.parse(state.providerBlockedUntil) - Date.now();
       assert.ok(Math.abs(pause - (header ? 45000 : 60 * 60 * 1000)) < 2000);

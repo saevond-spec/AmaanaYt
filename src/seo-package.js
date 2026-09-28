@@ -265,7 +265,16 @@ DATA: ${JSON.stringify(payload)}`;
   const checkedRequest = async (requestedModel, nativeRoute = false) => {
     const remaining = circuitBreaker.remaining(requestedModel);
     if (remaining) return { ok: false, status: 503, circuitOpen: true, retryAfterMs: remaining };
-    const result = await (nativeRoute ? requestNative : request)(requestedModel);
+    const send = nativeRoute ? requestNative : request;
+    let result = await send(requestedModel);
+    if (result.status === 429) {
+      const { retryAfterMs } = retryAfterDetails(result);
+      // Long Retry-After periods belong to the worker queue, not an in-flight request.
+      if (retryAfterMs <= 60000) {
+        await sleep(retryAfterMs);
+        result = await send(requestedModel);
+      }
+    }
     circuitBreaker.record(requestedModel, result.status);
     return result;
   };
