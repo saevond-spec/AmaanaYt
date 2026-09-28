@@ -1,9 +1,20 @@
 const crypto = require('crypto');
 const { Pool } = require('pg');
 
+function databaseConnectionString(value, production = false) {
+  if (!production || !value) return value;
+  const url = new URL(value);
+  // Keep older deployed URLs from using pg's deprecated sslmode=require alias.
+  // The DATABASE_URL should be updated to sslmode=verify-full as well.
+  if (!url.searchParams.has('sslmode') ||
+      url.searchParams.get('sslmode') === 'require' && url.searchParams.get('uselibpqcompat') !== 'true') {
+    url.searchParams.set('sslmode', 'verify-full');
+  }
+  return url.toString();
+}
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
+  connectionString: databaseConnectionString(process.env.DATABASE_URL, process.env.NODE_ENV === 'production'),
   max: 3,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000
@@ -272,6 +283,8 @@ async function finishSeoVideo(videoId, claimToken, generated, error) {
 }
 
 module.exports = {
+  pool,
+  databaseConnectionString,
   init,
   ping,
   saveTokens,
