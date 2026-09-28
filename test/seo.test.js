@@ -131,6 +131,29 @@ test('uses the native Gemini route if both compatible models return HTTP 503', a
   assert.equal(pkg.titles.search.length, 3);
 });
 
+test('recovers on a second native model after transient Gemini 503s', async () => {
+  const requests = [];
+  const delays = [];
+  const pkg = await generatePackage(source, context, {
+    apiKey: 'unit-test-key', model: 'gemini-3.6-flash', fallbackModel: 'gemini-3.5-flash-lite',
+    secondaryNativeModel: 'gemini-3.1-flash-lite',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    sleep: async (ms) => { delays.push(ms); },
+    fetchImpl: async (url) => {
+      requests.push(String(url));
+      return requests.length < 6 ? { ok: false, status: 503 } : {
+        ok: true, json: async () => ({ candidates: [{ content: { parts: [
+          { text: JSON.stringify(generated) }
+        ] } }] })
+      };
+    }
+  });
+  assert.deepEqual(requests.slice(3), Array(3).fill(
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent'));
+  assert.deepEqual(delays, [1000, 3000]);
+  assert.equal(pkg.titles.search.length, 3);
+});
+
 test('catalog scan pages through the uploads playlist and preserves a resume cursor', async () => {
   let state = { cursor: null, completed: false, enabled: true };
   const stored = new Map();
@@ -262,6 +285,7 @@ test('keeps a video retryable and pauses the queue after a transient Gemini 503'
     const worker = createSeoWorker({ store: fakeStore, youtube: fakeYoutube,
       env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'gemini-3.6-flash',
         SEO_AI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai' },
+      sleep: async () => {},
       logger: { error() {} } });
     await worker.run();
     assert.equal(finishError.retry, true);
@@ -270,7 +294,7 @@ test('keeps a video retryable and pauses the queue after a transient Gemini 503'
     assert.match(state.providerError, /HTTP 503/);
     await worker.run();
     assert.equal(claims, 1);
-    assert.equal(requests, 3);
+    assert.equal(requests, 6);
   } finally {
     global.fetch = originalFetch;
   }
