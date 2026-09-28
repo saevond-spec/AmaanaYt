@@ -14,6 +14,7 @@ const tiktok = require('./tiktok');
 const { createShortViewMonitor, TIKTOK_VIEW_THRESHOLD } = require('./short-views');
 const { createSeoWorker } = require('./seo-worker');
 const { normalizeContext } = require('./seo-package');
+const { createSessionStore } = require('./session-store');
 
 for (const name of ['BASE_URL', 'DATABASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SESSION_SECRET', 'TOKEN_ENCRYPTION_KEY', 'AGENT_KEY', 'ADMIN_KEY']) {
   if (!process.env[name]) throw new Error(`Missing required environment variable: ${name}`);
@@ -34,13 +35,8 @@ app.set('trust proxy', 1);
 app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false }));
-app.use(session({
-  secret: process.env.SESSION_SECRET,
-  resave: false,
-  saveUninitialized: false,
-  rolling: true,
-  cookie: { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', maxAge: 30 * 60 * 1000 }
-}));
+let sessionMiddleware;
+app.use((req, res, next) => sessionMiddleware(req, res, next));
 app.use(express.static(publicDir, { index: false, maxAge: '1h' }));
 
 function keysMatch(supplied, expected) {
@@ -900,6 +896,15 @@ app.use((error, _req, res, _next) => {
 
 store.init()
   .then(async () => {
+    const sessionStore = await createSessionStore({ pool: store.pool, redisUrl: process.env.REDIS_URL });
+    sessionMiddleware = session({
+      store: sessionStore,
+      secret: process.env.SESSION_SECRET,
+      resave: false,
+      saveUninitialized: false,
+      rolling: true,
+      cookie: { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', maxAge: 30 * 60 * 1000 }
+    });
     fs.promises.readdir(uploadDir).then(async (names) => {
       for (const name of names.filter((item) => /^tiktok-[a-f0-9-]{36}\.mp4$/.test(item))) {
         const file = path.join(uploadDir, name);

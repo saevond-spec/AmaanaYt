@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { normalizeContext, normalizeSource, validatePackage, generatePackage,
-  descriptionChapters } = require('../src/seo-package');
+  descriptionChapters, retryAfterDetails, createModelCircuitBreaker } = require('../src/seo-package');
 const { createSeoWorker } = require('../src/seo-worker');
 
 const keyword = 'NARAKA BLADEPOINT guide';
@@ -99,6 +99,7 @@ test('uses the Gemini fallback model only after a primary HTTP 503', async () =>
   const pkg = await generatePackage(source, context, {
     apiKey: 'unit-test-key', model: 'gemini-3.6-flash', fallbackModel: 'gemini-3.5-flash-lite',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    circuitBreaker: createModelCircuitBreaker(),
     fetchImpl: async (_url, options) => {
       models.push(JSON.parse(options.body).model);
       return models.length === 1 ? { ok: false, status: 503 } :
@@ -114,6 +115,7 @@ test('uses the native Gemini route if both compatible models return HTTP 503', a
   const pkg = await generatePackage(source, context, {
     apiKey: 'unit-test-key', model: 'gemini-3.6-flash', fallbackModel: 'gemini-3.5-flash-lite',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    circuitBreaker: createModelCircuitBreaker(),
     fetchImpl: async (url, options) => {
       requests.push({ url: String(url), options });
       return requests.length < 3 ? { ok: false, status: 503 } : {
@@ -138,6 +140,7 @@ test('recovers on a second native model after transient Gemini 503s', async () =
     apiKey: 'unit-test-key', model: 'gemini-3.6-flash', fallbackModel: 'gemini-3.5-flash-lite',
     secondaryNativeModel: 'gemini-3.1-flash-lite',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    circuitBreaker: createModelCircuitBreaker(), random: () => 0.5,
     sleep: async (ms) => { delays.push(ms); },
     fetchImpl: async (url) => {
       requests.push(String(url));
@@ -150,7 +153,7 @@ test('recovers on a second native model after transient Gemini 503s', async () =
   });
   assert.deepEqual(requests.slice(3), Array(3).fill(
     'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent'));
-  assert.deepEqual(delays, [1000, 3000]);
+  assert.deepEqual(delays, [1500, 5500, 15500]);
   assert.equal(pkg.titles.search.length, 3);
 });
 
@@ -160,6 +163,7 @@ test('uses the current stable Gemini model after older models return 503', async
     apiKey: 'unit-test-key', model: 'gemini-3.6-flash', fallbackModel: 'gemini-3.5-flash-lite',
     secondaryNativeModel: 'gemini-3.1-flash-lite', finalNativeModel: 'gemini-3.8-flash',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    circuitBreaker: createModelCircuitBreaker(),
     sleep: async () => {},
     fetchImpl: async (url) => {
       requests.push(String(url));
@@ -173,6 +177,142 @@ test('uses the current stable Gemini model after older models return 503', async
   assert.equal(requests[6],
     'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent');
   assert.equal(pkg.titles.search.length, 3);
+});
+
+test('parses Retry-After seconds and dates, with a 60 second request default', () => {
+  const response = (value) => ({ headers: { get: () => value } });
+  assert.deepEqual(retryAfterDetails(response('42')), { retryAfterPresent: true, retryAfterMs: 42000 });
+  assert.deepEqual(retryAfterDetails(response('Mon, 28 Sep 2026 16:02:00 GMT'),
+    () => Date.parse('Mon, 28 Sep 2026 16:00:00 GMT')),
+  { retryAfterPresent: true, retryAfterMs: 120000 });
+  assert.deepEqual(retryAfterDetails(response(null)), { retryAfterPresent: false, retryAfterMs: 60000 });
+});
+
+test('exposes provider 429 Retry-After and machine-readable quota code', async () => {
+  await assert.rejects(generatePackage(source, context, {
+    apiKey: 'unit-test-key', model: 'rate-test', circuitBreaker: createModelCircuitBreaker(),
+    fetchImpl: async () => ({ ok: false, status: 429,
+      headers: { get: (header) => header === 'retry-after' ? '25' : null },
+      json: async () => ({ error: { code: 'rate_limit_exceeded' } }) })
+  }), (error) => error.status === 429 && error.retryAfterPresent &&
+    error.retryAfterMs === 25000 && error.code === 'rate_limit_exceeded');
+});
+
+test('opens a model circuit after three 503s and closes it after 30 minutes', async () => {
+  let now = Date.now();
+  let requests = 0;
+  const circuitBreaker = createModelCircuitBreaker({ now: () => now });
+  const options = {
+    apiKey: 'unit-test-key', model: 'isolated-test', circuitBreaker,
+    fetchImpl: async () => { requests += 1; return { ok: false, status: 503 }; }
+  };
+  for (let index = 0; index < 4; index += 1) {
+    await assert.rejects(generatePackage(source, context, options), (error) => error.status === 503);
+  }
+  assert.equal(requests, 3);
+  now += 30 * 60 * 1000 + 1;
+  await assert.rejects(generatePackage(source, context, options), /HTTP 503/);
+  assert.equal(requests, 4);
+});
+
+test('uses SEO_AI_TIMEOUT_MS for model request signals', async () => {
+  const originalTimeout = AbortSignal.timeout;
+  const durations = [];
+  AbortSignal.timeout = (ms) => { durations.push(ms); return originalTimeout(ms); };
+  try {
+    await generatePackage(source, context, { apiKey: 'unit-test-key', model: 'timeout-test',
+      timeoutMs: '180000', circuitBreaker: createModelCircuitBreaker(),
+      fetchImpl: async () => ({ ok: true,
+        json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) }) });
+    assert.deepEqual(durations, [180000]);
+  } finally {
+    AbortSignal.timeout = originalTimeout;
+  }
+});
+
+test('worker uses Retry-After on 429 and pauses 60 minutes when absent', async () => {
+  const originalFetch = global.fetch;
+  try {
+    for (const header of ['45', null]) {
+      let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
+        completed: true, enabled: true };
+      const fakeStore = {
+        getSeoSyncState: async () => state,
+        saveSeoSyncState: async (next) => { state = next; },
+        seoCounts: async () => ({ attemptedToday: 0 }),
+        claimSeoVideo: async () => ({ videoId: 'rate-video', claimToken: 'claim', source, context: {}, attempts: 1 }),
+        finishSeoVideo: async () => {}
+      };
+      const youtube = { isConnected: async () => true,
+        ownedChannel: async () => ({ id: 'channel-1', title: 'Owner' }) };
+      global.fetch = async () => ({ ok: false, status: 429,
+        headers: { get: (name) => name === 'retry-after' ? header : null },
+        json: async () => ({ error: { code: 'rate_limit_exceeded' } }) });
+      const worker = createSeoWorker({ store: fakeStore, youtube,
+        env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'rate-worker' }, logger: { error() {} } });
+      await worker.run();
+      const pause = Date.parse(state.providerBlockedUntil) - Date.now();
+      assert.ok(Math.abs(pause - (header ? 45000 : 60 * 60 * 1000)) < 2000);
+      assert.equal(state.consecutive503s, 0);
+    }
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('worker grows consecutive 503 pauses to 120 minutes', async () => {
+  let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
+    completed: true, enabled: true };
+  const store = {
+    getSeoSyncState: async () => state,
+    saveSeoSyncState: async (next) => { state = next; },
+    seoCounts: async () => ({ attemptedToday: 0 }),
+    claimSeoVideo: async () => ({ videoId: 'overload-video', claimToken: 'claim', source, context: {}, attempts: 1 }),
+    finishSeoVideo: async () => {}
+  };
+  const youtube = { isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner' }) };
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: false, status: 503 });
+  try {
+    const worker = createSeoWorker({ store, youtube,
+      env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'overload-worker' }, logger: { error() {} } });
+    for (const [index, expectedMinutes] of [30, 60, 120, 120].entries()) {
+      state.providerBlockedUntil = null;
+      await worker.run();
+      assert.equal(state.consecutive503s, index + 1);
+      assert.ok(Math.abs(Date.parse(state.providerBlockedUntil) - Date.now() - expectedMinutes * 60000) < 2000);
+    }
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('worker can process more than five jobs in one run with default budget 200', async () => {
+  let claimed = 0;
+  let finished = 0;
+  const store = {
+    getSeoSyncState: async () => ({ channelId: 'channel-1', recentAt: new Date().toISOString(),
+      completed: true, enabled: true }),
+    seoCounts: async () => ({ attemptedToday: 0 }),
+    claimSeoVideo: async () => claimed++ < 6
+      ? { videoId: `video-${claimed}`, claimToken: 'claim', source, context: {}, attempts: 1 } : null,
+    finishSeoVideo: async () => { finished += 1; }
+  };
+  const youtube = { isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner' }) };
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: true,
+    json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) });
+  try {
+    const worker = createSeoWorker({ store, youtube,
+      env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'batch-worker' }, logger: { info() {}, error() {} } });
+    assert.equal((await worker.status()).dailyLimit, 200);
+    await worker.run();
+    assert.equal(finished, 6);
+  } finally {
+    global.fetch = originalFetch;
+  }
 });
 
 test('catalog scan pages through the uploads playlist and preserves a resume cursor', async () => {
