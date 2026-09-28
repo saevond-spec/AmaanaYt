@@ -39,5 +39,9 @@ services:
         value: '120000'
       - key: SEO_DAILY_LIMIT
         value: '200'
+      - key: ENABLE_VIDEO_ANALYSIS
+        value: 'false'
+      - key: VIDEO_ANALYSIS_TIMEOUT_MS
+        value: '180000'
       - key: UPLOAD_DIR
         value: /tmp/uploads
