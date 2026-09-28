@@ -64,7 +64,7 @@ const seo = createSeoWorker({ store, youtube });
 // claim prevents repeat provider calls if Render restarts or deploys twice.
 async function runVideoAnalysisSmokeTest() {
   const videoId = '5uip4JyjuIc';
-  const marker = 'video_analysis_smoke_20260928';
+  const marker = 'video_analysis_smoke_20260928_fallback';
   const gemini = (process.env.SEO_AI_BASE_URL || '').startsWith('https://generativelanguage.googleapis.com/');
   const apiKey = process.env.VIDEO_ANALYSIS_API_KEY || (gemini ? process.env.SEO_AI_API_KEY : null);
   if (!apiKey) { console.warn(`analysis_test_skipped ${videoId}: no Gemini key configured`); return; }
@@ -75,8 +75,10 @@ async function runVideoAnalysisSmokeTest() {
   console.log(`analysis_test_started ${videoId}`);
   try {
     const analysis = await analyzeVideo(`https://www.youtube.com/watch?v=${videoId}`, {
-      apiKey, model: process.env.VIDEO_ANALYSIS_MODEL || (gemini ? process.env.SEO_AI_MODEL : 'gemini-3.8-flash'),
-      timeoutMs: process.env.VIDEO_ANALYSIS_TIMEOUT_MS, fallbackModels: []
+      apiKey, model: process.env.SEO_AI_FALLBACK_MODEL || 'gemini-3.5-flash-lite',
+      timeoutMs: process.env.VIDEO_ANALYSIS_TIMEOUT_MS,
+      fallbackModels: [process.env.SEO_AI_SECONDARY_MODEL || 'gemini-3.1-flash-lite',
+        process.env.SEO_AI_FINAL_MODEL || 'gemini-3.8-flash']
     });
     await store.saveVideoAnalysis(videoId, analysis, analysis.model);
     console.log(`analysis_test_completed ${videoId}: model=${analysis.model} keyword=${JSON.stringify(analysis.primaryKeyword)} summary=${JSON.stringify(analysis.summary.slice(0, 180))}`);
