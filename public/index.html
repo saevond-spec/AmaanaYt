@@ -104,6 +104,17 @@
           <label for="tags">Tags</label>
           <input id="tags" name="tags" placeholder="NARAKA BLADEPOINT, gaming, shorts">
 
+          <label for="topic">Video topic (optional)</label>
+          <input id="topic" name="topic" maxlength="200" placeholder="What happens in this video?">
+          <label for="primaryKeyword">Primary keyword (optional)</label>
+          <input id="primaryKeyword" name="primaryKeyword" maxlength="59" placeholder="Specific search phrase">
+          <label for="takeaways">Key moments or script (optional)</label>
+          <textarea id="takeaways" name="takeaways" rows="3" placeholder="Only details actually shown in the video"></textarea>
+          <label for="audience">Audience (optional)</label>
+          <input id="audience" name="audience" maxlength="200" placeholder="Who is this for?">
+          <label for="videoType">Video type (optional)</label>
+          <input id="videoType" name="videoType" maxlength="60" placeholder="Gameplay, tutorial, review…">
+
           <label class="check-row" for="madeForKids">
             <input id="madeForKids" name="madeForKids" type="checkbox" value="true">
             <span>This video is made for kids</span>
@@ -112,6 +123,28 @@
           <button id="uploadButton" class="primary full" type="submit">Upload as private draft</button>
           <p class="fine-print">Nothing becomes public until you approve it below.</p>
         </form>
+      </section>
+
+      <section class="card seo-section">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">VIDEO SEO</p>
+            <h2>SEO packages for the channel</h2>
+          </div>
+          <button id="seoRefresh" class="ghost" type="button">Refresh SEO</button>
+        </div>
+        <p class="muted">Amaana discovers your uploads in batches and drafts metadata for review. It never edits published video details automatically. Chapters and Shorts timestamps need verified markers.</p>
+        <p id="seoStatus" class="draft-meta">Checking the catalog…</p>
+        <div class="draft-actions">
+          <button id="seoToggle" class="ghost" type="button">Pause SEO jobs</button>
+          <button id="seoRescan" class="ghost" type="button">Rescan channel</button>
+        </div>
+        <div id="seoList" class="draft-list"><div class="empty-state">Loading videos…</div></div>
+        <div class="draft-actions">
+          <button id="seoPrevious" class="ghost" type="button">Previous 50</button>
+          <span id="seoPage" class="draft-meta">1–50</span>
+          <button id="seoNext" class="ghost" type="button">Next 50</button>
+        </div>
       </section>
 
       <section class="draft-section">

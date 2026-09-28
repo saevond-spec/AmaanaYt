@@ -29,5 +29,13 @@ services:
         sync: false
       - key: ADMIN_KEY
         sync: false
+      - key: SEO_AI_API_KEY
+        sync: false
+      - key: SEO_AI_MODEL
+        sync: false
+      - key: SEO_AI_BASE_URL
+        value: https://api.openai.com
+      - key: SEO_DAILY_LIMIT
+        value: '20'
       - key: UPLOAD_DIR
         value: /tmp/uploads

@@ -177,6 +177,16 @@ button:disabled { cursor: wait; opacity: .58; }
 }
 .notice.error, .draft-error { border-color: rgba(255, 49, 88, .4); background: rgba(255, 49, 88, .1); color: #ffbbc8; }
 .draft-error { border-radius: 10px; padding: 9px 10px; font-size: .8rem; }
+.seo-section { margin-top: 22px; }
+.seo-section > .draft-actions { margin: 12px 0; }
+.seo-details { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+.seo-details summary { cursor: pointer; font-weight: 750; color: #d9ceff; }
+.seo-field { margin-top: 16px; }
+.seo-field h4 { margin: 0 0 5px; font-size: .85rem; }
+.seo-copy { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 0; color: var(--muted); line-height: 1.5; }
+.seo-context { margin: 20px 0; border-top: 1px solid var(--line); padding-top: 8px; }
+.seo-context button { margin-top: 12px; }
+.seo-details > button { margin-top: 12px; }
 .hidden { display: none !important; }
 
 @media (max-width: 560px) {

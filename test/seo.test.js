@@ -1,0 +1,117 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const { normalizeContext, normalizeSource, validatePackage, generatePackage,
+  descriptionChapters } = require('../src/seo-package');
+const { createSeoWorker } = require('../src/seo-worker');
+
+const keyword = 'NARAKA BLADEPOINT guide';
+const hook = 'NARAKA BLADEPOINT guide: Learn the opening strategy, key moments, and practical moves in this gameplay breakdown for players improving today.';
+const source = normalizeSource({
+  snippet: { title: 'NARAKA BLADEPOINT match', description: 'An intense match with a final fight.',
+    tags: ['NARAKA'], channelId: 'channel-1' },
+  contentDetails: { duration: 'PT3M10S' }, status: { privacyStatus: 'private' }
+});
+const context = normalizeContext({ primaryKeyword: keyword, takeaways: 'Opening, first round, final fight',
+  markers: [
+    { kind: 'chapter', startSeconds: 0, title: 'Opening' },
+    { kind: 'chapter', startSeconds: 42, title: 'First round' },
+    { kind: 'chapter', startSeconds: 93, title: 'Final fight' },
+    { kind: 'clip', startSeconds: 96, endSeconds: 132, title: 'Final fight' },
+    { kind: 'clip', startSeconds: 145, endSeconds: 175, title: 'Reaction' }
+  ] }, source.durationSeconds);
+const generated = {
+  primaryKeyword: keyword,
+  titles: {
+    search: [`${keyword}: First Fight`, `${keyword}: Match Tips`, `${keyword}: Final Fight`],
+    curiosity: ['The Last Fight Changed Everything', 'How Did This Match End?', 'I Almost Missed This Moment'],
+    hybrid: ['NARAKA Match: The Final Fight', 'NARAKA Gameplay With a Twist', 'NARAKA Guide: Last Fight']
+  },
+  thumbnails: [1, 2, 3].map((index) => ({
+    visual: `Close crop on frame ${index}`, overlay: 'LAST FIGHT', palette: 'Yellow and violet',
+    hook: 'Large final moment'
+  })),
+  hook,
+  paragraphs: ['A gameplay match with a clear opening and final fight for players.', 'Review the sequence and takeaways before your next match.'],
+  tags: ['NARAKA', 'NARAKA BLADEPOINT', 'NARAKA BLADEPOINT guide', 'gameplay', 'match', 'fight',
+    'opening strategy', 'final fight', 'combat tips', 'video game'],
+  hashtags: ['#NARAKA', '#Gameplay', '#Gaming'],
+  pinnedComment: 'Which round stood out to you most?',
+  communityPost: 'Watch the final fight in my latest match.',
+  clipHooks: ['The final fight starts here.', 'Watch the reaction at the end.']
+};
+
+test('uses only supplied markers for chapters and clips', () => {
+  const pkg = validatePackage(generated, source, context);
+  assert.equal(pkg.hook.length, 141);
+  assert.deepEqual(pkg.chapters, [
+    '00:00 - Opening', '00:42 - First round', '01:33 - Final fight'
+  ]);
+  assert.deepEqual(pkg.shorts.map(({ start, end }) => [start, end]),
+    [['01:36', '02:12'], ['02:25', '02:55']]);
+  assert.deepEqual(pkg.missingEvidence, []);
+  assert.ok(pkg.description.startsWith(hook));
+});
+
+test('missing footage evidence creates review flags and no invented timestamps', () => {
+  const pkg = validatePackage({ ...generated, clipHooks: [] }, source, normalizeContext({}, 190));
+  assert.deepEqual(pkg.chapters, []);
+  assert.deepEqual(pkg.shorts, []);
+  assert.ok(pkg.description.includes('[Add verified chapters after reviewing footage]'));
+  assert.ok(pkg.missingEvidence.length >= 2);
+  assert.throws(() => normalizeContext({ markers: [
+    { kind: 'clip', startSeconds: 180, endSeconds: 250 }
+  ] }, 190), /outside the video duration/);
+});
+
+test('reuses only valid chapters from an existing description', () => {
+  const description = '00:00 - Intro\n00:42 - First round\n01:33 - Final fight';
+  assert.equal(descriptionChapters(description, 190).length, 3);
+  assert.deepEqual(descriptionChapters(description, 96), []);
+});
+
+test('sends factual input to a configured model and validates the response', async () => {
+  let request;
+  const pkg = await generatePackage(source, context, {
+    apiKey: 'unit-test-key', model: 'test-model',
+    fetchImpl: async (url, options) => {
+      request = { url: url.toString(), options };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) };
+    }
+  });
+  assert.equal(request.url, 'https://api.openai.com/v1/chat/completions');
+  assert.equal(pkg.titles.search.length, 3);
+  assert.equal(pkg.shorts.length, 2);
+  assert.throws(() => validatePackage({ ...generated,
+    titles: { ...generated.titles, search: ['Unrelated title', ...generated.titles.search.slice(1)] }
+  }, source, context), /start with the primary keyword/);
+});
+
+test('catalog scan pages through the uploads playlist and preserves a resume cursor', async () => {
+  let state = { cursor: null, completed: false, enabled: true };
+  const stored = new Map();
+  const pages = [];
+  const fakeStore = {
+    getSeoSyncState: async () => state,
+    saveSeoSyncState: async (value) => { state = value; },
+    upsertSeoVideo: async (id, video) => { stored.set(id, video); },
+    seoCounts: async () => ({ attemptedToday: 0 })
+  };
+  const fakeYoutube = {
+    isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner', uploads: 'uploads-1' }),
+    uploadsPage: async (_playlistId, cursor) => {
+      pages.push(cursor || 'recent');
+      return cursor ? { ids: ['b'], nextPageToken: null } : { ids: ['a'], nextPageToken: 'older' };
+    },
+    videoMetadata: async (ids) => ids.map((id) => ({
+      id, snippet: { title: id, description: '', channelId: 'channel-1' }
+    }))
+  };
+  const worker = createSeoWorker({ store: fakeStore, youtube: fakeYoutube, env: {} });
+  await worker.run();
+  assert.deepEqual(pages, ['recent', 'older']);
+  assert.deepEqual([...stored.keys()], ['a', 'b']);
+  assert.equal(state.completed, true);
+  await worker.run();
+  assert.deepEqual(pages, ['recent', 'older']);
+});

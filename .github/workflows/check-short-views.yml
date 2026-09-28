@@ -1,4 +1,4 @@
-name: Check Short views
+name: Check Short views and SEO catalog
 
 on:
   schedule:
@@ -12,5 +12,5 @@ jobs:
   wake:
     runs-on: ubuntu-latest
     steps:
-      - name: Wake Amaana for YouTube view checks
+      - name: Wake Amaana for view checks and SEO backfill
         run: curl --fail --silent --show-error --retry 2 --retry-delay 20 --retry-all-errors --max-time 150 https://amaana-yt.onrender.com/healthz

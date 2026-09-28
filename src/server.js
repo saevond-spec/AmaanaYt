@@ -12,6 +12,8 @@ const twitch = require('./twitch');
 const video = require('./video');
 const tiktok = require('./tiktok');
 const { createShortViewMonitor, TIKTOK_VIEW_THRESHOLD } = require('./short-views');
+const { createSeoWorker } = require('./seo-worker');
+const { normalizeContext } = require('./seo-package');
 
 for (const name of ['BASE_URL', 'DATABASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SESSION_SECRET', 'TOKEN_ENCRYPTION_KEY', 'AGENT_KEY', 'ADMIN_KEY']) {
   if (!process.env[name]) throw new Error(`Missing required environment variable: ${name}`);
@@ -60,6 +62,7 @@ const clipQueue = [];
 const queuedClipIds = new Set();
 let clipWorkerRunning = false;
 const tiktokJobs = new Set();
+const seo = createSeoWorker({ store, youtube });
 const SHORT_VIEW_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 let lastShortViewCheck = 0;
 let shortViewCheckRunning = false;
@@ -314,6 +317,13 @@ async function processTwitchClipDraft(id) {
       error: null,
       processedAt: new Date().toISOString()
     });
+    await seo.registerUpload(uploaded.id, {
+      title: draft.title, description, tags: ['Saevond', 'gaming', 'livestream highlights', 'Shorts'],
+      durationSeconds: draft.duration,
+      context: { takeaways: draft.reason || draft.title, videoType: 'Gameplay' },
+      markers: [{ kind: 'clip', startSeconds: 0, endSeconds: draft.duration,
+        title: draft.title, provenance: 'twitch_highlight' }]
+    }).catch((error) => console.error('Short SEO registration failed:', error.message));
   } catch (error) {
     console.error(`Twitch clip job ${id} failed:`, error.message);
     await store.updateDraft(id, { status: 'clip_failed', error: cleanText(error.message, 500) }).catch(() => {});
@@ -376,6 +386,24 @@ async function processHighlightBatch(id) {
       tags: ['Saevond', 'gaming', 'livestream highlights']
     });
     await store.updateDraft(id, { status: 'creating_shorts', youtubeVideoId: highlight.id, duration: durations.reduce((a, b) => a + b, 0) });
+    let markerOffset = 0;
+    const markers = batch.highlights.flatMap((moment, index) => {
+      const length = durations[index];
+      const chapter = { kind: 'chapter', startSeconds: markerOffset, title: moment.title, provenance: 'twitch_highlight' };
+      const clip = { kind: 'clip', startSeconds: markerOffset, endSeconds: markerOffset + Math.min(60, length),
+        title: moment.title, provenance: 'twitch_highlight' };
+      markerOffset += length;
+      return [chapter, clip];
+    });
+    await seo.registerUpload(highlight.id, {
+      title: cleanText(`${batch.streamTitle || 'Saevond livestream'} | Best moments`, 100),
+      description: `Highlights from https://www.twitch.tv/videos/${batch.vodId}`,
+      tags: ['Saevond', 'gaming', 'livestream highlights'],
+      durationSeconds: markerOffset,
+      context: { topic: batch.streamTitle || '', takeaways: batch.highlights.map((moment) =>
+        `${moment.title}: ${moment.reason}`).join('\n'), videoType: 'Gameplay' },
+      markers
+    }).catch((error) => console.error('Highlight SEO registration failed:', error.message));
     const existingShorts = (await store.listDrafts()).filter((draft) => draft.parentId === id);
     let offset = 0;
     const failures = [];
@@ -392,6 +420,12 @@ async function processHighlightBatch(id) {
         await store.addDraft({ id: crypto.randomUUID(), sourceType: 'twitch_highlight_short', parentId: id, highlightIndex: index,
           vodId: batch.vodId, title: moment.title, youtubeVideoId: uploaded.id,
           status: 'awaiting_owner_approval', createdAt: new Date().toISOString() });
+        await seo.registerUpload(uploaded.id, {
+          title: moment.title, description: moment.reason || '', tags: ['Saevond', 'gaming', 'Shorts'],
+          durationSeconds: length, context: { takeaways: moment.reason || moment.title, videoType: 'Gameplay' },
+          markers: [{ kind: 'clip', startSeconds: 0, endSeconds: length,
+            title: moment.title, provenance: 'twitch_highlight' }]
+        }).catch((error) => console.error('Stream Short SEO registration failed:', error.message));
       } catch (error) {
         failures.push(`${index + 1}: ${cleanText(error.message, 150)}`);
       }
@@ -435,6 +469,7 @@ app.get('/healthz', async (_req, res) => {
   try {
     await store.ping();
     scheduleShortViewCheck();
+    seo.schedule();
     res.json({ ok: true, database: 'connected' });
   } catch {
     res.status(503).json({ ok: false, database: 'unavailable' });
@@ -499,6 +534,56 @@ app.get('/api/youtube/status', admin, async (_req, res, next) => {
   }
 });
 
+app.get('/api/seo/status', admin, async (_req, res, next) => {
+  try { res.set('Cache-Control', 'no-store'); res.json(await seo.status()); }
+  catch (error) { next(error); }
+});
+
+app.get('/api/seo/videos', admin, async (req, res, next) => {
+  try {
+    const offset = Math.max(0, Number.parseInt(req.query.offset, 10) || 0);
+    if (!Number.isSafeInteger(offset)) return res.status(400).json({ error: 'Invalid offset' });
+    res.set('Cache-Control', 'no-store');
+    res.json(await store.listSeoVideos(50, offset));
+  } catch (error) { next(error); }
+});
+
+app.post('/api/seo/backfill', admin, async (req, res, next) => {
+  try {
+    if (typeof req.body?.enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be true or false' });
+    res.json(await seo.setBackfill(req.body.enabled, req.body.restart === true));
+  } catch (error) { next(error); }
+});
+
+app.put('/api/seo/videos/:id/context', admin, async (req, res, next) => {
+  try {
+    if (!/^[a-zA-Z0-9_-]{11}$/.test(req.params.id)) return res.status(400).json({ error: 'Invalid video ID' });
+    const current = await store.getSeoVideo(req.params.id);
+    if (!current) return res.status(404).json({ error: 'Video not found in the channel catalog' });
+    const context = normalizeContext(req.body, current.source.durationSeconds);
+    await store.updateSeoContext(req.params.id, context);
+    seo.schedule(true);
+    res.json({ queued: true, videoId: req.params.id });
+  } catch (error) {
+    if (error.message.startsWith('Marker ') || error.message.startsWith('markers ') ||
+        error.message.startsWith('Primary keyword ')) {
+      return res.status(400).json({ error: error.message });
+    }
+    next(error);
+  }
+});
+
+app.post('/api/seo/videos/:id/regenerate', admin, async (req, res, next) => {
+  try {
+    if (!/^[a-zA-Z0-9_-]{11}$/.test(req.params.id)) return res.status(400).json({ error: 'Invalid video ID' });
+    const current = await store.getSeoVideo(req.params.id);
+    if (!current) return res.status(404).json({ error: 'Video not found in the channel catalog' });
+    await store.updateSeoContext(req.params.id, current.context);
+    seo.schedule(true);
+    res.json({ queued: true, videoId: req.params.id });
+  } catch (error) { next(error); }
+});
+
 app.get('/api/twitch/status', admin, async (_req, res, next) => {
   try {
     res.json(await twitch.connectionStatus());
@@ -529,6 +614,7 @@ app.get('/oauth2/callback', async (req, res, next) => {
     if (!req.query.code) return res.status(400).send('Google did not return an authorization code.');
     await youtube.exchangeCode(req.query.code);
     delete req.session.oauthState;
+    seo.schedule(true);
     res.redirect('/?youtube=connected');
   } catch (error) {
     next(error);
@@ -691,8 +777,25 @@ app.post('/api/drafts', agentOrAdmin, upload.single('video'), async (req, res, n
   try {
     if (!req.file) return res.status(400).json({ error: 'A video file is required' });
     const title = String(req.body.title || '').trim();
-    if (!title || title.length > 100) return res.status(400).json({ error: 'Title must contain 1–100 characters' });
+    if (!title || title.length > 100) {
+      unlinkQuietly(req.file.path);
+      return res.status(400).json({ error: 'Title must contain 1–100 characters' });
+    }
     const tags = String(req.body.tags || '').split(',').map((tag) => tag.trim()).filter(Boolean).slice(0, 30);
+    let markers = [];
+    if (req.body.markers) {
+      try { markers = JSON.parse(req.body.markers); }
+      catch { unlinkQuietly(req.file.path); return res.status(400).json({ error: 'markers must be a JSON array' }); }
+    }
+    let context;
+    try {
+      context = normalizeContext({ topic: req.body.topic, primaryKeyword: req.body.primaryKeyword,
+        takeaways: req.body.takeaways, audience: req.body.audience, videoType: req.body.videoType,
+        markers }, null);
+    } catch (error) {
+      unlinkQuietly(req.file.path);
+      return res.status(400).json({ error: error.message });
+    }
     const uploaded = await youtube.uploadPrivate({
       filePath: req.file.path,
       title,
@@ -708,6 +811,8 @@ app.post('/api/drafts', agentOrAdmin, upload.single('video'), async (req, res, n
       status: 'awaiting_owner_approval',
       createdAt: new Date().toISOString()
     });
+    await seo.registerUpload(uploaded.id, { title, description: String(req.body.description || ''),
+      tags, context }).catch((error) => console.error('Upload SEO registration failed:', error.message));
     res.status(201).json(draft);
   } catch (error) {
     if (req.file) fs.unlink(req.file.path, () => {});
@@ -806,6 +911,7 @@ store.init()
     app.listen(port, async () => {
       console.log(`AmaanaYt listening on port ${port}`);
       scheduleShortViewCheck();
+      seo.schedule();
       try {
         const drafts = await store.listDrafts();
         const resumable = new Set([

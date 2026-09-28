@@ -17,6 +17,14 @@ const tiktokConnectionHelp = document.querySelector('#tiktokConnectionHelp');
 const tiktokConnectButton = document.querySelector('#tiktokConnectButton');
 const draftList = document.querySelector('#draftList');
 const uploadButton = document.querySelector('#uploadButton');
+const seoList = document.querySelector('#seoList');
+const seoStatus = document.querySelector('#seoStatus');
+const seoToggle = document.querySelector('#seoToggle');
+const seoPrevious = document.querySelector('#seoPrevious');
+const seoNext = document.querySelector('#seoNext');
+const seoPage = document.querySelector('#seoPage');
+let seoOffset = 0;
+let seoEnabled = true;
 let draftPoll = null;
 let tiktokConnected = false;
 
@@ -336,6 +344,136 @@ function renderDraft(draft) {
   return card;
 }
 
+function seoHeading(label, value) {
+  const section = element('div', 'seo-field');
+  section.append(element('h4', '', label), element('p', 'seo-copy', value));
+  return section;
+}
+
+function renderSeoVideo(item) {
+  const card = element('article', 'draft');
+  const top = element('div', 'draft-top');
+  top.append(element('h3', '', item.source.title || item.videoId),
+    element('span', 'draft-status', item.status.replaceAll('_', ' ')));
+  card.append(top);
+  const link = element('a', 'ghost video-link', 'Open on YouTube');
+  link.href = `https://youtu.be/${encodeURIComponent(item.videoId)}`;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  card.append(link);
+  if (item.error) card.append(element('p', 'draft-error', item.error));
+
+  const details = document.createElement('details');
+  details.className = 'seo-details';
+  details.append(element('summary', '', item.package ? 'Review package and edit context' : 'Add video context'));
+  if (item.package) {
+    const pkg = item.package;
+    details.append(seoHeading('Primary keyword', pkg.primaryKeyword));
+    for (const group of ['search', 'curiosity', 'hybrid']) {
+      details.append(seoHeading(`${group[0].toUpperCase() + group.slice(1)} titles`,
+        (pkg.titles?.[group] || []).map((title, index) => `${index + 1}. ${title}`).join('\n')));
+    }
+    (pkg.thumbnails || []).forEach((brief, index) => {
+      details.append(seoHeading(`Thumbnail ${index + 1}`,
+        `${brief.overlay}\nVisual: ${brief.visual}\nPalette: ${brief.palette}\nHook: ${brief.hook}`));
+    });
+    details.append(seoHeading('Full description', pkg.description || ''));
+    details.append(seoHeading('Tags', (pkg.tags || []).join(', ')));
+    details.append(seoHeading('Pinned comment', pkg.pinnedComment || ''));
+    details.append(seoHeading('Community post', pkg.communityPost || ''));
+    details.append(seoHeading('Shorts clips', (pkg.shorts || []).map((clip) =>
+      `${clip.start}–${clip.end}: ${clip.title} — ${clip.hook}`).join('\n') || 'Add verified clip windows.'));
+    if (pkg.missingEvidence?.length) {
+      details.append(seoHeading('Review needed', pkg.missingEvidence.join('\n')));
+    }
+    const copy = element('button', 'ghost', 'Copy complete package');
+    copy.type = 'button';
+    copy.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(JSON.stringify(pkg, null, 2)); showNotice('SEO package copied.'); }
+      catch { showNotice('Clipboard unavailable on this device.', true); }
+    });
+    details.append(copy);
+  }
+
+  const form = element('form', 'seo-context');
+  for (const [name, label, multiline] of [
+    ['topic', 'Main topic', false], ['primaryKeyword', 'Primary keyword', false],
+    ['takeaways', 'Key moments or script', true], ['audience', 'Target audience', false],
+    ['videoType', 'Video type', false]
+  ]) {
+    const field = document.createElement(multiline ? 'textarea' : 'input');
+    field.name = name;
+    field.value = item.context?.[name] || '';
+    if (multiline) field.rows = 3;
+    form.append(element('label', '', label), field);
+  }
+  const markers = document.createElement('textarea');
+  markers.name = 'markers';
+  markers.rows = 4;
+  markers.value = JSON.stringify(item.context?.markers || [], null, 2);
+  markers.placeholder = '[{"kind":"chapter","startSeconds":0,"title":"Intro"},{"kind":"clip","startSeconds":120,"endSeconds":155,"title":"Clutch moment"}]';
+  form.append(element('label', '', 'Verified chapter and clip markers (JSON)'), markers,
+    element('p', 'draft-meta', 'Use seconds from the actual video. Chapters need at least three markers starting at 0, spaced 10 seconds apart.'));
+  const save = element('button', 'primary', 'Save context and regenerate');
+  save.type = 'submit';
+  form.append(save);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    save.disabled = true;
+    try {
+      const fields = Object.fromEntries(new FormData(form));
+      fields.markers = JSON.parse(fields.markers);
+      await api(`/api/seo/videos/${encodeURIComponent(item.videoId)}/context`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(fields)
+      });
+      showNotice('Context saved. A new package is queued.');
+      await loadSeo();
+    } catch (error) { showNotice(error.message, true); save.disabled = false; }
+  });
+  details.append(form);
+  const regenerate = element('button', 'ghost', 'Retry package without changing context');
+  regenerate.type = 'button';
+  regenerate.addEventListener('click', async () => {
+    regenerate.disabled = true;
+    try {
+      await api(`/api/seo/videos/${encodeURIComponent(item.videoId)}/regenerate`, { method: 'POST' });
+      showNotice('SEO package queued again.');
+      await loadSeo();
+    } catch (error) { showNotice(error.message, true); regenerate.disabled = false; }
+  });
+  details.append(regenerate);
+  card.append(details);
+  return card;
+}
+
+async function loadSeo() {
+  try {
+    const [status, videos] = await Promise.all([
+      api('/api/seo/status'), api(`/api/seo/videos?offset=${seoOffset}`)
+    ]);
+    seoEnabled = status.enabled !== false;
+    const counts = status.statuses || {};
+    const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
+    seoStatus.textContent = [
+      status.channelTitle ? `Connected channel: ${status.channelTitle}` : 'Waiting for channel connection',
+      `${total} videos found; ${counts.ready || 0} ready, ${counts.needs_review || 0} need review, ${counts.queued || 0} queued`,
+      status.completed ? 'Catalog scan complete' : 'Catalog scan in progress',
+      status.providerConfigured ? `${status.attemptedToday}/${status.dailyLimit} AI attempts today (UTC)`
+        : 'Configure SEO_AI_API_KEY and SEO_AI_MODEL to create packages',
+      seoEnabled ? 'SEO jobs active' : 'SEO jobs paused'
+    ].join(' · ');
+    seoToggle.textContent = seoEnabled ? 'Pause SEO jobs' : 'Resume SEO jobs';
+    seoList.replaceChildren(...(videos.length ? videos.map(renderSeoVideo) :
+      [element('div', 'empty-state', 'No channel videos in this page yet. Refresh after the next catalog scan.')]));
+    seoPage.textContent = `${total ? seoOffset + 1 : 0}–${Math.min(total, seoOffset + videos.length)} of ${total}`;
+    seoPrevious.disabled = seoOffset === 0;
+    seoNext.disabled = seoOffset + videos.length >= total;
+  } catch (error) {
+    if (error.status === 401) return showLogin();
+    seoStatus.textContent = error.message;
+  }
+}
+
 async function loadDrafts() {
   try {
     const drafts = await api('/api/drafts');
@@ -355,6 +493,7 @@ async function refreshDashboard() {
   try {
     await Promise.all([refreshConnection(), refreshTwitchConnection(), refreshTikTokConnection()]);
     await loadDrafts();
+    await loadSeo();
   } catch (error) {
     if (error.status === 401) return showLogin();
     showNotice(error.message, true);
@@ -407,6 +546,25 @@ connectButton.addEventListener('click', () => window.location.assign('/auth/goog
 twitchConnectButton.addEventListener('click', () => window.location.assign('/auth/twitch'));
 tiktokConnectButton.addEventListener('click', () => window.location.assign('/auth/tiktok'));
 document.querySelector('#refreshButton').addEventListener('click', refreshDashboard);
+document.querySelector('#seoRefresh').addEventListener('click', loadSeo);
+seoToggle.addEventListener('click', async () => {
+  seoToggle.disabled = true;
+  try {
+    await api('/api/seo/backfill', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: !seoEnabled }) });
+    await loadSeo();
+  } catch (error) { showNotice(error.message, true); } finally { seoToggle.disabled = false; }
+});
+document.querySelector('#seoRescan').addEventListener('click', async () => {
+  try {
+    await api('/api/seo/backfill', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: true, restart: true }) });
+    showNotice('Channel rescan started; existing packages are preserved.');
+    await loadSeo();
+  } catch (error) { showNotice(error.message, true); }
+});
+seoPrevious.addEventListener('click', () => { seoOffset = Math.max(0, seoOffset - 50); loadSeo(); });
+seoNext.addEventListener('click', () => { seoOffset += 50; loadSeo(); });
 document.querySelector('#logoutButton').addEventListener('click', async () => {
   try { await api('/api/admin/logout', { method: 'POST' }); } catch {}
   showLogin();
