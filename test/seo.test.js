@@ -154,6 +154,27 @@ test('recovers on a second native model after transient Gemini 503s', async () =
   assert.equal(pkg.titles.search.length, 3);
 });
 
+test('uses the current stable Gemini model after older models return 503', async () => {
+  const requests = [];
+  const pkg = await generatePackage(source, context, {
+    apiKey: 'unit-test-key', model: 'gemini-3.6-flash', fallbackModel: 'gemini-3.5-flash-lite',
+    secondaryNativeModel: 'gemini-3.1-flash-lite', finalNativeModel: 'gemini-3.8-flash',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    sleep: async () => {},
+    fetchImpl: async (url) => {
+      requests.push(String(url));
+      return requests.length < 7 ? { ok: false, status: 503 } : {
+        ok: true, json: async () => ({ candidates: [{ content: { parts: [
+          { text: JSON.stringify(generated) }
+        ] } }] })
+      };
+    }
+  });
+  assert.equal(requests[6],
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent');
+  assert.equal(pkg.titles.search.length, 3);
+});
+
 test('catalog scan pages through the uploads playlist and preserves a resume cursor', async () => {
   let state = { cursor: null, completed: false, enabled: true };
   const stored = new Map();
@@ -294,7 +315,44 @@ test('keeps a video retryable and pauses the queue after a transient Gemini 503'
     assert.match(state.providerError, /HTTP 503/);
     await worker.run();
     assert.equal(claims, 1);
-    assert.equal(requests, 6);
+    assert.equal(requests, 7);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('a new fallback gets one probe during cooldown, then respects the pause', async () => {
+  let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
+    completed: true, enabled: true,
+    providerBlockedUntil: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    providerProbeTag: 'final:gemini-3.1-flash-lite' };
+  let claims = 0;
+  const fakeStore = {
+    getSeoSyncState: async () => state,
+    saveSeoSyncState: async (next) => { state = next; },
+    seoCounts: async () => ({ attemptedToday: 0 }),
+    claimSeoVideo: async () => {
+      claims += 1;
+      return { videoId: 'video-1', claimToken: 'claim-1', source, context: {}, attempts: 3 };
+    },
+    finishSeoVideo: async () => {}
+  };
+  const fakeYoutube = {
+    isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner', uploads: 'uploads-1' })
+  };
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: false, status: 503 });
+  try {
+    const worker = createSeoWorker({ store: fakeStore, youtube: fakeYoutube,
+      env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'gemini-3.6-flash',
+        SEO_AI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai' },
+      sleep: async () => {}, logger: { error() {} } });
+    await worker.run();
+    assert.equal(state.providerProbeTag, 'final:gemini-3.8-flash');
+    assert.equal(claims, 1);
+    await worker.run();
+    assert.equal(claims, 1);
   } finally {
     global.fetch = originalFetch;
   }
