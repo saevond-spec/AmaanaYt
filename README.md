@@ -41,13 +41,13 @@ In Supabase:
 3. Select the **Session pooler** connection string. This is generally the safest choice for an IPv4 hosting service.
 4. Copy the URI connection string.
 5. Replace the password placeholder with the database password.
-6. Save the complete URI as `DATABASE_URL` in Render.
+6. Append `?sslmode=verify-full` to the URI (or `&sslmode=verify-full` if it already has query parameters). Replace any existing `sslmode` value. Save the complete URI as `DATABASE_URL` in Render.
 
 It resembles:
 
-`postgresql://postgres.PROJECT:PASSWORD@POOLER-HOST:5432/postgres`
+`postgresql://postgres.PROJECT:PASSWORD@POOLER-HOST:5432/postgres?sslmode=verify-full`
 
-Treat this URL as a secret. Never commit or post it publicly. AmaanaYt creates its required tables automatically.
+Treat this URL as a secret. Never commit or post it publicly. TLS certificate and hostname verification is enabled in production. Older deployed `sslmode=require` URLs are interpreted as `verify-full` at runtime to avoid the pg compatibility warning; update the actual Render variable too. If the server uses a self-signed certificate, install its trusted CA rather than disabling verification. AmaanaYt creates its required tables automatically.
 
 ## 2. Deploy the Render Blueprint
 
@@ -62,7 +62,7 @@ Treat this URL as a secret. Never commit or post it publicly. AmaanaYt creates i
 Required values:
 
 - `BASE_URL`: exact Render HTTPS origin, with no trailing slash
-- `DATABASE_URL`: external PostgreSQL session-pooler URI
+- `DATABASE_URL`: external PostgreSQL session-pooler URI with `sslmode=verify-full`
 - `GOOGLE_CLIENT_ID`: Google OAuth web client ID
 - `GOOGLE_CLIENT_SECRET`: Google OAuth client secret
 - `TWITCH_CLIENT_ID`: client ID for a dedicated Twitch application
@@ -73,9 +73,13 @@ Required values:
 
 Render generates `SESSION_SECRET`.
 
+Optional `REDIS_URL` enables Redis-backed sessions (`redis://` or `rediss://`). With no URL, or if Redis cannot connect during startup, sessions use the existing PostgreSQL pool and an automatically created `amaana_sessions` table. This avoids the production MemoryStore warning. Switching stores requires signing in again; keep `SESSION_SECRET` stable across redeploys.
+
 For TikTok inbox delivery, also configure `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, and the URL verification values described below.
 
-For Gemini SEO package generation, set `SEO_AI_API_KEY` to a Gemini API key in Render, `SEO_AI_MODEL` to `gemini-3.6-flash`, and `SEO_AI_BASE_URL` to `https://generativelanguage.googleapis.com/v1beta/openai`. Set all three values together and deploy; replacing the key alone does not switch providers. The generator uses Google's OpenAI-compatible chat completion endpoint and requests structured JSON. `SEO_DAILY_LIMIT` defaults to 20 generation attempts per UTC day (maximum 100). Each request sends the video's title, description, tags, and owner-entered notes to the configured provider. Without a key or model, Amaana scans the catalog and queues packages without generating them. After deployment, check the owner-only SEO status, resume backfill if paused, and review the first completed package before publication. Keep the API key out of the repository and public pages.
+For SEO package generation with OpenAI, set `SEO_AI_API_KEY` to a project API key in Render, `SEO_AI_MODEL` to `gpt-5-mini`, and `SEO_AI_BASE_URL` to `https://api.openai.com/v1`. The code defaults to that OpenAI URL when the base URL is unset. `SEO_AI_TIMEOUT_MS` defaults to 120000 milliseconds per model request. `SEO_DAILY_LIMIT` defaults to 200 generation attempts per UTC day; one run can use the full remaining budget. Package generation sends each video's title, description, tags, and any owner-entered notes to the OpenAI API; API usage has its own billing. Without the key or model Amaana scans the catalog and queues packages but makes no model requests. Do not paste an API key into the repository, a chat message, or a public page.
+
+On HTTP 503, alternate models are tried with 1, 5, and 15 second delays plus up to 1 second of jitter; three consecutive 503s open that model's in-process circuit for 30 minutes. The queue pauses for 30, 60, then 120 minutes on successive 503 failures (maximum 120 minutes). On HTTP 429 it uses a valid `Retry-After` header for the queue pause, or pauses for 60 minutes when the header is absent or invalid. The request layer exposes a 60 second default retry interval to other callers when no valid header is present.
 
 Generate independent secrets with:
 
@@ -174,7 +178,7 @@ Do not give OpenClaw `ADMIN_KEY`.
 
 After deployment, Amaana reads the authenticated channel's uploads playlist in pages of up to 50 videos, then fetches the video metadata in batches. It keeps a database cursor, rescans the newest page for future uploads, and resumes the older catalog after restarts. The hourly `/healthz` wake-up also advances this work; on Render Free, sleep and delayed GitHub Actions runs can extend the schedule. The dashboard shows discovery progress, generated packages, and items needing footage review. You can pause or restart the scan from the owner dashboard; rescanning preserves existing package drafts. If the connected YouTube channel changes, the scan pauses rather than mixing two channels in one catalog.
 
-If the AI provider reports insufficient balance (HTTP 402), Amaana keeps the affected video eligible for retry and pauses generation for two hours while catalog scanning continues. The dashboard shows the provider error and retry time. After restoring the provider balance, pause and resume SEO jobs from the dashboard to retry sooner.
+If the provider reports insufficient balance (HTTP 402), or OpenAI returns a 429 with a credit, spend, or usage-limit code, Amaana keeps the affected video eligible for retry and pauses generation for two hours while catalog scanning continues. The dashboard shows the provider error and retry time. After restoring credits or resolving the limit, pause and resume SEO jobs from the dashboard to retry sooner. An ordinary 429 rate limit is handled separately from credit exhaustion.
 
 Each package contains three search titles, three curiosity titles, three hybrid titles (each under 60 characters), three thumbnail briefs, a 125–150 character keyword hook, description paragraphs, chapters where validated times exist, resource placeholders, three hashtags, 10–15 tags, a pinned comment draft, a community post teaser, and 2–3 clip recommendations when enough source moments exist. This is draft copy for owner review and testing; no SEO result or AI summary appearance is guaranteed. YouTube says tags have a limited role in discovery, so titles, thumbnails, and useful descriptions deserve the most attention.
 
