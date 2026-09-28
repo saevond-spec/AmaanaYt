@@ -60,7 +60,8 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console }
           const generated = await generatePackage(job.source, context, {
             apiKey: env.SEO_AI_API_KEY, model: env.SEO_AI_MODEL,
             baseUrl, fallbackModel,
-            onFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying fallback model ${fallback}`)
+            onFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying fallback model ${fallback}`),
+            onNativeFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying native route with ${fallback}`)
           });
           await store.finishSeoVideo(job.videoId, job.claimToken, generated, null);
           logger.info?.(`SEO package ${job.videoId} generated: ${generated.missingEvidence.length ? 'needs_review' : 'ready'}`);
@@ -70,7 +71,8 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console }
             await store.saveSeoSyncState(state);
           }
         } catch (error) {
-          logger.error(`SEO package ${job.videoId} failed:`, error.message);
+          logger.error(`SEO package ${job.videoId} failed:`, error.message,
+            error.status ? `route=${error.route || 'unknown'} contentType=${error.contentType || 'unknown'}` : '');
           const balanceBlocked = error.status === 402;
           const transientProviderError = [408, 429, 500, 502, 503, 504].includes(error.status);
           await store.finishSeoVideo(job.videoId, job.claimToken, null, {
