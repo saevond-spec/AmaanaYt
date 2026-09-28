@@ -249,7 +249,8 @@ DATA: ${JSON.stringify(payload)}`;
     throw error;
   }
   const body = await response.json();
-  const content = native ? body.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('') :
+  const content = native ? body.candidates?.[0]?.content?.parts?.filter((part) => !part.thought)
+    .map((part) => part.text || '').join('') :
     body.choices?.[0]?.message?.content;
   if (!content || content.length > 30000) throw new Error('SEO provider returned an empty or oversized response');
   return validatePackage(JSON.parse(content), source, context);
