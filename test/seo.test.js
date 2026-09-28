@@ -94,6 +94,21 @@ test('sends factual input to a configured model and validates the response', asy
   }, source, context), /start with the primary keyword/);
 });
 
+test('uses the Gemini fallback model only after a primary HTTP 503', async () => {
+  const models = [];
+  const pkg = await generatePackage(source, context, {
+    apiKey: 'unit-test-key', model: 'gemini-3.6-flash', fallbackModel: 'gemini-3.5-flash-lite',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    fetchImpl: async (_url, options) => {
+      models.push(JSON.parse(options.body).model);
+      return models.length === 1 ? { ok: false, status: 503 } :
+        { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) };
+    }
+  });
+  assert.deepEqual(models, ['gemini-3.6-flash', 'gemini-3.5-flash-lite']);
+  assert.equal(pkg.titles.search.length, 3);
+});
+
 test('catalog scan pages through the uploads playlist and preserves a resume cursor', async () => {
   let state = { cursor: null, completed: false, enabled: true };
   const stored = new Map();
@@ -233,7 +248,7 @@ test('keeps a video retryable and pauses the queue after a transient Gemini 503'
     assert.match(state.providerError, /HTTP 503/);
     await worker.run();
     assert.equal(claims, 1);
-    assert.equal(requests, 1);
+    assert.equal(requests, 2);
   } finally {
     global.fetch = originalFetch;
   }
