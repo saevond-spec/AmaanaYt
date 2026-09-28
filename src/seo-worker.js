@@ -65,14 +65,20 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console }
           }
         } catch (error) {
           logger.error(`SEO package ${job.videoId} failed:`, error.message);
-          const balanceBlocked = error.status === 402;
+          const quotaCodes = new Set([
+            'credit_balance_exhausted', 'organization_spend_limit_exceeded',
+            'project_spend_limit_exceeded', 'organization_usage_limit_exceeded'
+          ]);
+          const balanceBlocked = error.status === 402 || error.status === 429 && quotaCodes.has(error.code);
           await store.finishSeoVideo(job.videoId, job.claimToken, null, {
             message: String(error.message).slice(0, 300), attempts: job.attempts,
             retry: balanceBlocked || job.attempts < 3
           });
           if (balanceBlocked) {
             state.providerBlockedUntil = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
-            state.providerError = 'AI provider balance is insufficient (HTTP 402)';
+            state.providerError = error.status === 402
+              ? 'AI provider balance is insufficient (HTTP 402)'
+              : `OpenAI API credits or usage limit reached (${error.code})`;
             await store.saveSeoSyncState(state);
             break;
           }
