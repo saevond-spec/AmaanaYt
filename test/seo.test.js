@@ -197,3 +197,46 @@ test('pauses provider requests on insufficient balance without failing the video
     global.fetch = originalFetch;
   }
 });
+
+test('pauses OpenAI credit errors while keeping the video retryable', async () => {
+  let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
+    completed: true, enabled: true };
+  let claims = 0;
+  let requests = 0;
+  let finishError;
+  const fakeStore = {
+    getSeoSyncState: async () => state,
+    saveSeoSyncState: async (next) => { state = next; },
+    seoCounts: async () => ({ attemptedToday: 0 }),
+    claimSeoVideo: async () => {
+      claims += 1;
+      return { videoId: 'video-1', claimToken: 'claim-1', source, context: {}, attempts: 3 };
+    },
+    finishSeoVideo: async (_videoId, _token, _pkg, error) => { finishError = error; }
+  };
+  const fakeYoutube = {
+    isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner', uploads: 'uploads-1' })
+  };
+  const originalFetch = global.fetch;
+  global.fetch = async () => {
+    requests += 1;
+    return { ok: false, status: 429,
+      json: async () => ({ error: { code: 'credit_balance_exhausted' } }) };
+  };
+  try {
+    const worker = createSeoWorker({ store: fakeStore, youtube: fakeYoutube,
+      env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'gpt-5-mini' },
+      logger: { error() {} } });
+    await worker.run();
+    assert.equal(finishError.retry, true);
+    assert.match(finishError.message, /HTTP 429/);
+    assert.ok(Date.parse(state.providerBlockedUntil) > Date.now());
+    assert.match(state.providerError, /credit_balance_exhausted/);
+    await worker.run();
+    assert.equal(claims, 1);
+    assert.equal(requests, 1);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
