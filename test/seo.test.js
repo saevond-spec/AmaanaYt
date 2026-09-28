@@ -122,3 +122,39 @@ test('catalog scan pages through the uploads playlist and preserves a resume cur
   await worker.run();
   assert.deepEqual(pages, ['recent', 'older']);
 });
+
+test('generates for catalog videos whose stored context is empty JSON', async () => {
+  let claimed = false;
+  let finished;
+  let requested = false;
+  const fakeStore = {
+    getSeoSyncState: async () => ({ channelId: 'channel-1', recentAt: new Date().toISOString(),
+      completed: true, enabled: true }),
+    seoCounts: async () => ({ attemptedToday: 0 }),
+    claimSeoVideo: async () => {
+      if (claimed) return null;
+      claimed = true;
+      return { videoId: 'video-1', claimToken: 'claim-1', source, context: {}, attempts: 1 };
+    },
+    finishSeoVideo: async (_videoId, _token, pkg, error) => { finished = { pkg, error }; }
+  };
+  const fakeYoutube = {
+    isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner', uploads: 'uploads-1' })
+  };
+  const originalFetch = global.fetch;
+  global.fetch = async () => {
+    requested = true;
+    return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) };
+  };
+  try {
+    const worker = createSeoWorker({ store: fakeStore, youtube: fakeYoutube,
+      env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'test-model', SEO_DAILY_LIMIT: '1' } });
+    await worker.run();
+  } finally {
+    global.fetch = originalFetch;
+  }
+  assert.equal(requested, true);
+  assert.equal(finished.error, null);
+  assert.ok(finished.pkg.missingEvidence.length > 0);
+});
