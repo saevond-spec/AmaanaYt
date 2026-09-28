@@ -44,6 +44,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console }
         await store.saveSeoSyncState(state);
       }
       if (!env.SEO_AI_API_KEY || !env.SEO_AI_MODEL || state.enabled === false) return;
+      if (Date.parse(state.providerBlockedUntil) > Date.now()) return;
       const counts = await store.seoCounts();
       const remaining = Math.min(2, dailyLimit - counts.attemptedToday);
       for (let index = 0; index < remaining; index += 1) {
@@ -57,11 +58,24 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console }
             baseUrl: env.SEO_AI_BASE_URL || 'https://api.openai.com/v1'
           });
           await store.finishSeoVideo(job.videoId, job.claimToken, generated, null);
+          if (state.providerBlockedUntil) {
+            state.providerBlockedUntil = null;
+            state.providerError = null;
+            await store.saveSeoSyncState(state);
+          }
         } catch (error) {
           logger.error(`SEO package ${job.videoId} failed:`, error.message);
+          const balanceBlocked = error.status === 402;
           await store.finishSeoVideo(job.videoId, job.claimToken, null, {
-            message: String(error.message).slice(0, 300), attempts: job.attempts, retry: job.attempts < 3
+            message: String(error.message).slice(0, 300), attempts: job.attempts,
+            retry: balanceBlocked || job.attempts < 3
           });
+          if (balanceBlocked) {
+            state.providerBlockedUntil = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+            state.providerError = 'AI provider balance is insufficient (HTTP 402)';
+            await store.saveSeoSyncState(state);
+            break;
+          }
         }
       }
     } finally {
@@ -111,6 +125,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console }
     const state = await store.getSeoSyncState();
     const updated = { ...state, enabled };
     if (restart) { updated.cursor = null; updated.completed = false; updated.recentAt = null; }
+    if (enabled) { updated.providerBlockedUntil = null; updated.providerError = null; }
     await store.saveSeoSyncState(updated);
     if (enabled) schedule(true);
     return updated;

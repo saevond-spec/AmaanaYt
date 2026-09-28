@@ -212,7 +212,11 @@ DATA: ${JSON.stringify(payload)}`;
     ] }),
     signal: AbortSignal.timeout(60000)
   });
-  if (!response.ok) throw new Error(`SEO provider returned HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(`SEO provider returned HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
   const body = await response.json();
   const content = body.choices?.[0]?.message?.content;
   if (!content || content.length > 30000) throw new Error('SEO provider returned an empty or oversized response');

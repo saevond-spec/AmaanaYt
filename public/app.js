@@ -460,8 +460,9 @@ async function loadSeo() {
       status.completed ? 'Catalog scan complete' : 'Catalog scan in progress',
       status.providerConfigured ? `${status.attemptedToday}/${status.dailyLimit} AI attempts today (UTC)`
         : 'Configure SEO_AI_API_KEY and SEO_AI_MODEL to create packages',
+      status.providerError ? `${status.providerError}; next retry after ${new Date(status.providerBlockedUntil).toLocaleString()}` : null,
       seoEnabled ? 'SEO jobs active' : 'SEO jobs paused'
-    ].join(' · ');
+    ].filter(Boolean).join(' · ');
     seoToggle.textContent = seoEnabled ? 'Pause SEO jobs' : 'Resume SEO jobs';
     seoList.replaceChildren(...(videos.length ? videos.map(renderSeoVideo) :
       [element('div', 'empty-state', 'No channel videos in this page yet. Refresh after the next catalog scan.')]));
