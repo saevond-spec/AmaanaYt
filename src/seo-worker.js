@@ -46,7 +46,16 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       if (!env.SEO_AI_API_KEY || !env.SEO_AI_MODEL || state.enabled === false) return;
       const counts = await store.seoCounts();
       logger.info?.(`SEO queue statuses: ${JSON.stringify(counts.statuses || {})}; attemptedToday=${counts.attemptedToday}`);
-      if (Date.parse(state.providerBlockedUntil) > Date.now()) return;
+      const gemini = (env.SEO_AI_BASE_URL || '').startsWith('https://generativelanguage.googleapis.com/');
+      const probeTag = gemini ? `final:${env.SEO_AI_FINAL_MODEL || 'gemini-3.8-flash'}` : null;
+      if (Date.parse(state.providerBlockedUntil) > Date.now()) {
+        // A newly configured model gets one probe; subsequent starts respect the pause.
+        if (!probeTag || state.providerProbeTag === probeTag) return;
+      }
+      if (probeTag && state.providerProbeTag !== probeTag) {
+        state.providerProbeTag = probeTag;
+        await store.saveSeoSyncState(state);
+      }
       // Scheduled wake-ups can be delayed; use the daily cap even when fewer wakes arrive.
       const remaining = Math.min(5, dailyLimit - counts.attemptedToday);
       for (let index = 0; index < remaining; index += 1) {
@@ -60,13 +69,16 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
             ? env.SEO_AI_FALLBACK_MODEL || 'gemini-3.5-flash-lite' : null;
           const secondaryNativeModel = fallbackModel
             ? env.SEO_AI_SECONDARY_MODEL || 'gemini-3.1-flash-lite' : null;
+          const finalNativeModel = fallbackModel
+            ? env.SEO_AI_FINAL_MODEL || 'gemini-3.8-flash' : null;
           const generated = await generatePackage(job.source, context, {
             apiKey: env.SEO_AI_API_KEY, model: env.SEO_AI_MODEL,
-            baseUrl, fallbackModel, secondaryNativeModel,
+            baseUrl, fallbackModel, secondaryNativeModel, finalNativeModel,
             ...(sleep ? { sleep } : {}),
             onFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying fallback model ${fallback}`),
             onNativeFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying native route with ${fallback}`),
-            onSecondNativeFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying second native model ${fallback}`)
+            onSecondNativeFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying second native model ${fallback}`),
+            onFinalNativeFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying final native model ${fallback}`)
           });
           await store.finishSeoVideo(job.videoId, job.claimToken, generated, null);
           logger.info?.(`SEO package ${job.videoId} generated: ${generated.missingEvidence.length ? 'needs_review' : 'ready'}`);
