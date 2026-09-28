@@ -394,6 +394,24 @@ function renderSeoVideo(item) {
     });
     details.append(copy);
   }
+  if (item.analysis) {
+    const analysis = item.analysis;
+    details.append(seoHeading('Video analysis (AI suggestions; review before using)', [
+      analysis.summary,
+      analysis.spokenSummary ? `Audio: ${analysis.spokenSummary}` : 'No clear speech summary',
+      analysis.visualContext ? `Visuals: ${analysis.visualContext}` : '',
+      analysis.topics?.length ? `Topics: ${analysis.topics.join(', ')}` : '',
+      analysis.speakerTone ? `Tone: ${analysis.speakerTone}` : '',
+      analysis.audience ? `Suggested audience: ${analysis.audience}` : '',
+      analysis.entities?.length ? `Entities: ${analysis.entities.join(', ')}` : '',
+      analysis.primaryKeyword ? `Suggested keyword: ${analysis.primaryKeyword}` : '',
+      analysis.secondaryKeywords?.length ? `Related phrases: ${analysis.secondaryKeywords.join(', ')}` : '',
+      analysis.category ? `Suggested category: ${analysis.category}` : '',
+      analysis.tags?.length ? `Suggested tags: ${analysis.tags.join(', ')}` : '',
+      analysis.moments?.length ? `Approximate moments (not chapters): ${analysis.moments.map((moment) =>
+        `${moment.time} ${moment.detail}`).join('; ')}` : ''
+    ].filter(Boolean).join('\n')));
+  }
 
   const form = element('form', 'seo-context');
   for (const [name, label, multiline] of [
@@ -460,6 +478,7 @@ async function loadSeo() {
       status.completed ? 'Catalog scan complete' : 'Catalog scan in progress',
       status.providerConfigured ? `${status.attemptedToday}/${status.dailyLimit} AI attempts today (UTC)`
         : 'Configure SEO_AI_API_KEY and SEO_AI_MODEL to create packages',
+      status.videoAnalysisEnabled ? 'Video analysis on for public videos' : 'Video analysis off',
       status.providerError ? `${status.providerError}; next retry after ${new Date(status.providerBlockedUntil).toLocaleString()}` : null,
       seoEnabled ? 'SEO jobs active' : 'SEO jobs paused'
     ].filter(Boolean).join(' · ');
