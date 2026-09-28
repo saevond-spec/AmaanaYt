@@ -82,9 +82,10 @@ test('sends factual input to a configured model and validates the response', asy
   assert.equal(pkg.titles.search.length, 3);
   assert.equal(pkg.shorts.length, 2);
   await generatePackage(source, context, {
-    apiKey: 'unit-test-key', model: 'deepseek-flash', baseUrl: 'https://api.deepseek.com',
+    apiKey: 'unit-test-key', model: 'gemini-3.6-flash',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     fetchImpl: async (url) => {
-      assert.equal(url.toString(), 'https://api.deepseek.com/chat/completions');
+      assert.equal(url.toString(), 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions');
       return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) };
     }
   });
@@ -190,6 +191,46 @@ test('pauses provider requests on insufficient balance without failing the video
     assert.match(finishError.message, /HTTP 402/);
     assert.ok(Date.parse(state.providerBlockedUntil) > Date.now());
     assert.match(state.providerError, /insufficient/);
+    await worker.run();
+    assert.equal(claims, 1);
+    assert.equal(requests, 1);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('keeps a video retryable and pauses the queue after a transient Gemini 503', async () => {
+  let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
+    completed: true, enabled: true };
+  let claims = 0;
+  let requests = 0;
+  let finishError;
+  const fakeStore = {
+    getSeoSyncState: async () => state,
+    saveSeoSyncState: async (next) => { state = next; },
+    seoCounts: async () => ({ attemptedToday: 0 }),
+    claimSeoVideo: async () => {
+      claims += 1;
+      return { videoId: 'video-1', claimToken: 'claim-1', source, context: {}, attempts: 3 };
+    },
+    finishSeoVideo: async (_videoId, _token, _pkg, error) => { finishError = error; }
+  };
+  const fakeYoutube = {
+    isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner', uploads: 'uploads-1' })
+  };
+  const originalFetch = global.fetch;
+  global.fetch = async () => { requests += 1; return { ok: false, status: 503 }; };
+  try {
+    const worker = createSeoWorker({ store: fakeStore, youtube: fakeYoutube,
+      env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'gemini-3.6-flash',
+        SEO_AI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai' },
+      logger: { error() {} } });
+    await worker.run();
+    assert.equal(finishError.retry, true);
+    assert.match(finishError.message, /HTTP 503/);
+    assert.ok(Date.parse(state.providerBlockedUntil) > Date.now());
+    assert.match(state.providerError, /HTTP 503/);
     await worker.run();
     assert.equal(claims, 1);
     assert.equal(requests, 1);

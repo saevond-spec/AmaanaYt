@@ -58,6 +58,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console }
             baseUrl: env.SEO_AI_BASE_URL || 'https://api.openai.com/v1'
           });
           await store.finishSeoVideo(job.videoId, job.claimToken, generated, null);
+          logger.info?.(`SEO package ${job.videoId} generated: ${generated.missingEvidence.length ? 'needs_review' : 'ready'}`);
           if (state.providerBlockedUntil) {
             state.providerBlockedUntil = null;
             state.providerError = null;
@@ -66,13 +67,16 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console }
         } catch (error) {
           logger.error(`SEO package ${job.videoId} failed:`, error.message);
           const balanceBlocked = error.status === 402;
+          const transientProviderError = [408, 429, 500, 502, 503, 504].includes(error.status);
           await store.finishSeoVideo(job.videoId, job.claimToken, null, {
             message: String(error.message).slice(0, 300), attempts: job.attempts,
-            retry: balanceBlocked || job.attempts < 3
+            retry: balanceBlocked || transientProviderError || job.attempts < 3
           });
-          if (balanceBlocked) {
-            state.providerBlockedUntil = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
-            state.providerError = 'AI provider balance is insufficient (HTTP 402)';
+          if (balanceBlocked || transientProviderError) {
+            const pauseMinutes = balanceBlocked ? 120 : error.status === 429 ? 60 : 15;
+            state.providerBlockedUntil = new Date(Date.now() + pauseMinutes * 60 * 1000).toISOString();
+            state.providerError = balanceBlocked ? 'AI provider balance is insufficient (HTTP 402)' :
+              `AI provider temporarily unavailable (HTTP ${error.status}); queued videos will retry`;
             await store.saveSeoSyncState(state);
             break;
           }
