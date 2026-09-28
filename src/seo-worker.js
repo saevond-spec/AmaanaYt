@@ -1,11 +1,13 @@
-const { normalizeSource, normalizeContext, generatePackage } = require('./seo-package');
+const { normalizeSource, normalizeContext, generatePackage, createModelCircuitBreaker } = require('./seo-package');
 
 function createSeoWorker({ store, youtube, env = process.env, logger = console, sleep }) {
   let running = false;
   let scheduled = false;
   let rerunRequested = false;
   let lastRun = 0;
-  const dailyLimit = Math.min(100, Math.max(1, Number(env.SEO_DAILY_LIMIT) || 20));
+  const configuredLimit = Number(env.SEO_DAILY_LIMIT);
+  const dailyLimit = Number.isSafeInteger(configuredLimit) && configuredLimit >= 1 ? configuredLimit : 200;
+  const circuitBreaker = createModelCircuitBreaker();
 
   async function catalogPage(channel, cursor) {
     const page = await youtube.uploadsPage(channel.uploads, cursor);
@@ -56,8 +58,8 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
         state.providerProbeTag = probeTag;
         await store.saveSeoSyncState(state);
       }
-      // Scheduled wake-ups can be delayed; use the daily cap even when fewer wakes arrive.
-      const remaining = Math.min(5, dailyLimit - counts.attemptedToday);
+      // Process the available daily budget even if scheduled wake-ups were delayed.
+      const remaining = Math.max(0, dailyLimit - counts.attemptedToday);
       for (let index = 0; index < remaining; index += 1) {
         const job = await store.claimSeoVideo();
         if (!job) break;
@@ -74,6 +76,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           const generated = await generatePackage(job.source, context, {
             apiKey: env.SEO_AI_API_KEY, model: env.SEO_AI_MODEL,
             baseUrl, fallbackModel, secondaryNativeModel, finalNativeModel,
+            timeoutMs: env.SEO_AI_TIMEOUT_MS, circuitBreaker,
             ...(sleep ? { sleep } : {}),
             onFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying fallback model ${fallback}`),
             onNativeFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying native route with ${fallback}`),
@@ -82,9 +85,10 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           });
           await store.finishSeoVideo(job.videoId, job.claimToken, generated, null);
           logger.info?.(`SEO package ${job.videoId} generated: ${generated.missingEvidence.length ? 'needs_review' : 'ready'}`);
-          if (state.providerBlockedUntil) {
+          if (state.providerBlockedUntil || state.consecutive503s) {
             state.providerBlockedUntil = null;
             state.providerError = null;
+            state.consecutive503s = 0;
             await store.saveSeoSyncState(state);
           }
         } catch (error) {
@@ -97,12 +101,20 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
             retry: balanceBlocked || transientProviderError || job.attempts < 3
           });
           if (balanceBlocked || transientProviderError) {
-            const pauseMinutes = balanceBlocked ? 120 : error.status === 429 ? 60 : 15;
-            state.providerBlockedUntil = new Date(Date.now() + pauseMinutes * 60 * 1000).toISOString();
+            state.consecutive503s = error.status === 503 ? (state.consecutive503s || 0) + 1 : 0;
+            const pauseMs = balanceBlocked ? 120 * 60 * 1000 : error.status === 429
+              ? error.retryAfterPresent ? error.retryAfterMs : 60 * 60 * 1000
+              : error.status === 503 ? Math.min(120, 15 * 2 ** state.consecutive503s) * 60 * 1000
+                : 15 * 60 * 1000;
+            state.providerBlockedUntil = new Date(Date.now() + pauseMs).toISOString();
             state.providerError = balanceBlocked ? 'AI provider balance is insufficient (HTTP 402)' :
               `AI provider temporarily unavailable (HTTP ${error.status}); queued videos will retry`;
             await store.saveSeoSyncState(state);
             break;
+          }
+          if (state.consecutive503s) {
+            state.consecutive503s = 0;
+            await store.saveSeoSyncState(state);
           }
         }
       }
