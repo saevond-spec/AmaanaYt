@@ -75,7 +75,7 @@ Render generates `SESSION_SECRET`.
 
 For TikTok inbox delivery, also configure `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, and the URL verification values described below.
 
-For SEO package generation, set `SEO_AI_API_KEY` and `SEO_AI_MODEL` for a JSON-capable OpenAI-compatible chat completion provider. The default `SEO_AI_BASE_URL` is `https://api.openai.com/v1`; for DeepSeek use `https://api.deepseek.com` and a currently supported model such as `deepseek-flash`. `SEO_DAILY_LIMIT` defaults to 20 generation attempts per UTC day (maximum 100). Package generation sends each video's title, description, tags, and any owner-entered notes to that provider; choose the provider and budget accordingly. Without these variables Amaana scans the catalog and queues packages but makes no model requests.
+For Gemini SEO package generation, set `SEO_AI_API_KEY` to a Gemini API key in Render, `SEO_AI_MODEL` to `gemini-3.6-flash`, and `SEO_AI_BASE_URL` to `https://generativelanguage.googleapis.com/v1beta/openai`. Set all three values together and deploy; replacing the key alone does not switch providers. The generator uses Google's OpenAI-compatible chat completion endpoint and requests structured JSON. `SEO_DAILY_LIMIT` defaults to 20 generation attempts per UTC day (maximum 100). Each request sends the video's title, description, tags, and owner-entered notes to the configured provider. Without a key or model, Amaana scans the catalog and queues packages without generating them. After deployment, check the owner-only SEO status, resume backfill if paused, and review the first completed package before publication. Keep the API key out of the repository and public pages.
 
 Generate independent secrets with:
 
