@@ -1,4 +1,5 @@
 const { spawn } = require('child_process');
+const fs = require('fs');
 const ffmpegPath = require('ffmpeg-static');
 
 function convertLandscapeToShort(inputPath, outputPath) {
@@ -91,4 +92,59 @@ async function shortFromHighlight(highlightPath, start, duration, outputPath) {
     '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-movflags', '+faststart', outputPath]);
 }
 
-module.exports = { convertLandscapeToShort, assembleHighlights, shortFromHighlight };
+
+function thumbnailHeadline(title) {
+  const words = String(title || '').normalize('NFKC').toLocaleUpperCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ').trim().split(/\s+/).filter(Boolean);
+  const selected = [];
+  for (const word of words) {
+    if (selected.length >= 4) break;
+    const candidate = selected.concat(word).join(' ');
+    if (candidate.length > 24) {
+      if (!selected.length) selected.push(Array.from(word).slice(0, 24).join(''));
+      break;
+    }
+    selected.push(word);
+  }
+  return selected.length ? selected.join(' ') : 'SAEVOND HIGHLIGHT';
+}
+
+function escapeFilterText(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/:/g, '\\:')
+    .replace(/'/g, "\\'").replace(/,/g, '\\,').replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]').replace(/;/g, '\\;').replace(/%/g, '\\%');
+}
+
+function thumbnailFilter(headline, fontPath) {
+  const font = fontPath
+    ? "fontfile='" + escapeFilterText(fontPath) + "'"
+    : "font='DejaVu Sans'";
+  const text = escapeFilterText(thumbnailHeadline(headline));
+  return [
+    'scale=1280:720:force_original_aspect_ratio=increase',
+    'crop=1280:720',
+    'drawbox=x=0:y=500:w=iw:h=220:color=black@0.72:t=fill',
+    'drawbox=x=0:y=500:w=18:h=220:color=yellow@0.98:t=fill',
+    'drawtext=' + font + ":text='" + text +
+      "':fontcolor=white:fontsize=64:borderw=5:bordercolor=black:x=(w-text_w)/2:y=h-text_h-58:fix_bounds=1",
+    'format=yuv420p'
+  ].join(',');
+}
+
+async function createThumbnail(inputPath, outputPath, {
+  timestampSeconds = 0, headline, fontPath = process.env.THUMBNAIL_FONT_PATH
+} = {}) {
+  if (!inputPath || !outputPath) throw new Error('A source video and thumbnail output path are required');
+  const seek = Number(timestampSeconds);
+  if (!Number.isFinite(seek) || seek < 0) throw new Error('Thumbnail timestamp must be non-negative');
+  const selectedFont = fontPath && fs.existsSync(fontPath) ? fontPath : null;
+  await runFfmpeg([
+    '-y', '-ss', String(seek), '-i', inputPath,
+    '-map', '0:v:0', '-frames:v', '1',
+    '-vf', thumbnailFilter(headline, selectedFont),
+    '-q:v', '2', outputPath
+  ], 2 * 60 * 1000);
+}
+
+module.exports = { convertLandscapeToShort, assembleHighlights, shortFromHighlight,
+  createThumbnail, thumbnailHeadline, thumbnailFilter };
