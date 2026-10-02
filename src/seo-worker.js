@@ -2,11 +2,13 @@ const { normalizeSource, normalizeContext, generatePackage, createModelCircuitBr
 const { analyzeVideo } = require('./video-analysis');
 const { createSeoPublisher } = require('./seo-publish');
 
-function createSeoWorker({ store, youtube, env = process.env, logger = console, sleep }) {
+function createSeoWorker({ store, youtube, env = process.env, logger = console, sleep,
+  generate = generatePackage, analyze = analyzeVideo }) {
   let running = false;
   let scheduled = false;
   let rerunRequested = false;
   let lastRun = 0;
+  let lastDiagnostic = null;
   const configuredLimit = Number(env.SEO_DAILY_LIMIT);
   const dailyLimit = Number.isSafeInteger(configuredLimit) && configuredLimit >= 1 ? configuredLimit : 200;
   const circuitBreaker = createModelCircuitBreaker();
@@ -41,7 +43,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       }
       const model = env.VIDEO_ANALYSIS_MODEL || (gemini ? env.SEO_AI_MODEL : 'gemini-3.8-flash');
       logger.info?.(`analysis_started ${id}`);
-      const analysis = await analyzeVideo(`https://www.youtube.com/watch?v=${id}`, {
+      const analysis = await analyze(`https://www.youtube.com/watch?v=${id}`, {
         apiKey, model, durationSeconds: job.source.durationSeconds,
         fallbackModels: [env.SEO_AI_FALLBACK_MODEL || 'gemini-3.5-flash-lite',
           env.SEO_AI_SECONDARY_MODEL || 'gemini-3.1-flash-lite',
@@ -85,13 +87,28 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     running = true;
     lastRun = Date.now();
     try {
-      if (!await youtube.isConnected()) return;
+      if (!await youtube.isConnected()) {
+        if (lastDiagnostic !== 'youtube_disconnected') {
+          logger.info?.('SEO worker idle: YouTube is not connected');
+          lastDiagnostic = 'youtube_disconnected';
+        }
+        return;
+      }
       const channel = await youtube.ownedChannel();
       let state = await store.getSeoSyncState();
       if (state.channelId && state.channelId !== channel.id) {
         throw new Error('YouTube channel changed; SEO backfill is paused to avoid mixing channels');
       }
       state = { ...state, channelId: channel.id, channelTitle: channel.title };
+      const diagnostic = JSON.stringify({ channelId: channel.id, backfillEnabled: state.enabled !== false,
+        autoPublishEnabled, providerConfigured: Boolean(env.SEO_AI_API_KEY && env.SEO_AI_MODEL),
+        videoAnalysisEnabled: analysisEnabled,
+        analysisProviderConfigured: Boolean(env.VIDEO_ANALYSIS_API_KEY ||
+          (env.SEO_AI_BASE_URL || '').startsWith('https://generativelanguage.googleapis.com/') && env.SEO_AI_API_KEY) });
+      if (diagnostic !== lastDiagnostic) {
+        logger.info?.(`SEO worker configuration: ${diagnostic}`);
+        lastDiagnostic = diagnostic;
+      }
       if (!state.recentAt || Date.now() - Date.parse(state.recentAt) >= 60 * 60 * 1000) {
         const recent = await catalogPage(channel, null);
         state.recentAt = new Date().toISOString();
@@ -150,7 +167,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           const finalNativeModel = fallbackModel
             ? env.SEO_AI_FINAL_MODEL || 'gemini-3.8-flash' : null;
           const analysis = await videoAnalysis(job, state);
-          const generated = await generatePackage(job.source, context, {
+          const generated = await generate(job.source, context, {
             apiKey: env.SEO_AI_API_KEY, model: env.SEO_AI_MODEL,
             baseUrl, fallbackModel, secondaryNativeModel, finalNativeModel,
             analysis, timeoutMs: env.SEO_AI_TIMEOUT_MS, circuitBreaker,

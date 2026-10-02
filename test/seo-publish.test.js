@@ -294,3 +294,109 @@ test('automatic publishing requires the explicit owner-approved setting', async 
     assert.equal((await worker.status()).autoPublishEnabled, expected);
   }
 });
+
+test('worker analyzes a public upload, publishes its SEO, and updates channel keywords once', async () => {
+  const visibility = ['public', 'private', 'unlisted'];
+  const original = new Map(visibility.map((privacyStatus, index) => {
+    const id = `video-${index}`;
+    return [id, {
+      id, snippet: { title: `ARC Raiders match ${index}`, description: 'Original links: https://example.com',
+        tags: ['ARC Raiders'], channelId: 'channel-1', categoryId: '20',
+        publishedAt: '2026-10-01T10:00:00.000Z', liveBroadcastContent: 'none' },
+      status: { privacyStatus }, contentDetails: { duration: 'PT3M' }, etag: `etag-${index}`
+    }];
+  }));
+  const rows = new Map();
+  const events = [];
+  let sync = { enabled: true, completed: false, cursor: null };
+  let channelKeywords = 'gaming';
+  const store = {
+    upsertSeoVideo: async (id, source) => {
+      rows.set(id, { ...(rows.get(id) || { videoId: id, status: 'queued', context: {} }), source });
+    },
+    getSeoSyncState: async () => sync,
+    saveSeoSyncState: async (state) => { sync = state; },
+    listSeoAutoCandidates: async () => [...rows.values()].filter((row) =>
+      row.package && row.source.privacyStatus === 'public' && !row.autoResult),
+    listSeoVideos: async () => [...rows.values()],
+    getSeoVideo: async (id) => rows.get(id),
+    getVideoAnalysis: async () => null,
+    saveVideoAnalysis: async (id, analysis) => { rows.get(id).analysis = analysis; },
+    seoCounts: async () => ({ statuses: {}, attemptedToday: 0 }),
+    claimSeoVideo: async () => {
+      const row = [...rows.values()].find((candidate) =>
+        candidate.status === 'queued' && candidate.source.privacyStatus === 'public');
+      if (!row) return null;
+      row.status = 'generating';
+      return { ...row, claimToken: 'claim-1', attempts: 1 };
+    },
+    finishSeoVideo: async (id, _token, generated) => {
+      Object.assign(rows.get(id), { package: generated, status: 'ready',
+        generatedAt: '2026-10-02T00:00:00.000Z' });
+    },
+    markSeoApplied: async (id, applied) => { rows.get(id).applied = applied; },
+    markSeoAutoResult: async (id, result) => { rows.get(id).autoResult = result; },
+    seoUpdatesToday: async () => 0
+  };
+  const youtube = {
+    isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Saevond', uploads: 'uploads-1' }),
+    uploadsPage: async () => ({ ids: [...original.keys()], nextPageToken: null }),
+    videoMetadata: async (ids) => ids.map((id) => original.get(id)),
+    getVideo: async (id) => original.get(id),
+    assertTargetChannel: async (id) => { assert.equal(id, 'channel-1'); },
+    channelSeo: async () => ({ id: 'channel-1', title: 'Saevond',
+      description: 'Original channel description', keywords: channelKeywords }),
+    updateVideoSeo: async (id, video, edit) => {
+      assert.equal(video.status.privacyStatus, 'public');
+      assert.equal(Object.hasOwn(edit, 'status'), false);
+      events.push(['video', id]);
+      Object.assign(video.snippet, edit);
+    },
+    updateChannelSeo: async (_channel, edit) => {
+      events.push(['channel', edit]);
+      channelKeywords = edit.keywords;
+    }
+  };
+  const diagnostics = [];
+  const worker = createSeoWorker({ store, youtube, env: {
+    SEO_AUTO_PUBLISH: 'true', ENABLE_VIDEO_ANALYSIS: 'true',
+    SEO_AI_API_KEY: 'fixture-key', SEO_AI_MODEL: 'fixture-model',
+    VIDEO_ANALYSIS_API_KEY: 'fixture-key', SEO_DAILY_LIMIT: '3'
+  }, logger: {
+    info: (message) => diagnostics.push(message), warn: (message) => diagnostics.push(message),
+    error: (message) => diagnostics.push(message)
+  }, analyze: async (url) => {
+    assert.match(url, /video-0$/);
+    events.push(['analysis', 'video-0']);
+    return { summary: 'An ARC Raiders match' };
+  }, generate: async (source, _context, options) => {
+    assert.equal(source.privacyStatus, 'public');
+    assert.equal(options.analysis.summary, 'An ARC Raiders match');
+    events.push(['package', 'video-0']);
+    return { ...item().package, missingEvidence: [] };
+  } });
+  await worker.run();
+  assert.deepEqual(events.map(([kind]) => kind), ['analysis', 'package', 'video', 'channel']);
+  assert.equal(rows.get('video-0').autoResult.state, 'applied');
+  assert.equal(rows.get('video-0').applied.privacyStatus, 'public');
+  assert.equal(rows.get('video-1').package, undefined);
+  assert.equal(rows.get('video-2').package, undefined);
+  assert.equal(original.get('video-1').snippet.title, 'ARC Raiders match 1');
+  assert.equal(original.get('video-2').snippet.title, 'ARC Raiders match 2');
+  assert.equal(channelKeywords, 'gaming "ARC Raiders"');
+  assert.ok(diagnostics.some((line) => line.includes('providerConfigured":true')));
+  await worker.run();
+  assert.equal(events.length, 4);
+});
+
+test('worker reports missing YouTube connection once without accessing the catalog', async () => {
+  const logs = [];
+  const worker = createSeoWorker({ store: {}, youtube: {
+    isConnected: async () => false,
+    ownedChannel: async () => { throw new Error('Should not scan'); }
+  }, logger: { info: (line) => logs.push(line) } });
+  await worker.run();
+  await worker.run();
+  assert.deepEqual(logs, ['SEO worker idle: YouTube is not connected']);
+});
