@@ -162,6 +162,7 @@ function createSeoPublisher({ store, youtube, logger = console }) {
     }
     await store.markSeoAutoResult(videoId, { ...result, at: new Date().toISOString(),
       packageGeneratedAt: generation });
+    return result;
   }
 
   async function publishPending(limit = 20) {
@@ -172,7 +173,9 @@ function createSeoPublisher({ store, youtube, logger = console }) {
 
   async function updateChannel() {
     const [channel, state, videos] = await Promise.all([
-      youtube.channelSeo(), store.getSeoSyncState(), store.listSeoVideos(100)
+      youtube.channelSeo(), store.getSeoSyncState(),
+      typeof store.listSeoChannelCandidates === 'function'
+        ? store.listSeoChannelCandidates(100) : store.listSeoVideos(100)
     ]);
     if (state.channelId !== channel.id) return;
     await youtube.assertTargetChannel(channel.id);
