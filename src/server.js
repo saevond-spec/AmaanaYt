@@ -13,6 +13,8 @@ const video = require('./video');
 const tiktok = require('./tiktok');
 const { createShortViewMonitor, TIKTOK_VIEW_THRESHOLD } = require('./short-views');
 const { createSeoWorker } = require('./seo-worker');
+const { createMonetizationWorker } = require('./monetization-worker');
+const { createSeoMarket, detectGame } = require('./seo-market');
 const { normalizeContext } = require('./seo-package');
 const { auditVideo, channelSuggestions, problem } = require('./seo-publish');
 const { createSessionStore } = require('./session-store');
@@ -59,7 +61,10 @@ const clipQueue = [];
 const queuedClipIds = new Set();
 let clipWorkerRunning = false;
 const tiktokJobs = new Set();
-const seo = createSeoWorker({ store, youtube });
+const market = createSeoMarket({ store, youtube });
+const seo = createSeoWorker({ store, youtube, market });
+const monetization = createMonetizationWorker({ youtube });
+setInterval(() => monetization.schedule(), 5 * 60 * 1000).unref();
 const SHORT_VIEW_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 let lastShortViewCheck = 0;
 let shortViewCheckRunning = false;
@@ -467,6 +472,8 @@ app.get('/healthz', async (_req, res) => {
     await store.ping();
     scheduleShortViewCheck();
     seo.schedule();
+    monetization.schedule();
+    market.schedule();
     res.json({ ok: true, database: 'connected' });
   } catch {
     res.status(503).json({ ok: false, database: 'unavailable' });
@@ -534,6 +541,20 @@ app.get('/api/youtube/status', admin, async (_req, res, next) => {
 app.get('/api/seo/status', admin, async (_req, res, next) => {
   try { res.set('Cache-Control', 'no-store'); res.json(await seo.status()); }
   catch (error) { next(error); }
+});
+
+app.get('/api/monetization/status', admin, (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json(monetization.status());
+});
+
+app.get('/api/seo/market', admin, async (req, res, next) => {
+  try {
+    const game = detectGame({ title: String(req.query.game || '') });
+    if (!game) return res.status(400).json({ error: 'Recognized game is required' });
+    res.set('Cache-Control', 'no-store');
+    res.json({ game, snapshot: await store.getSeoMarketSnapshot(game) });
+  } catch (error) { next(error); }
 });
 
 app.get('/api/seo/videos', admin, async (req, res, next) => {
@@ -942,6 +963,8 @@ store.init()
       console.log(`AmaanaYt listening on port ${port}`);
       scheduleShortViewCheck();
       seo.schedule();
+      monetization.schedule();
+      market.schedule();
       try {
         const drafts = await store.listDrafts();
         const resumable = new Set([
