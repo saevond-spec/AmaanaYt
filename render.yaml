@@ -43,6 +43,10 @@ services:
         value: '200'
       - key: SEO_AUTO_PUBLISH
         value: 'true'
+      - key: SEO_MARKET_RESEARCH
+        value: 'true'
+      - key: YOUTUBE_PUBLIC_LIVE_MONETIZATION
+        value: 'true'
       - key: SEO_AUTO_DAILY_LIMIT
         value: '50'
       - key: ENABLE_VIDEO_ANALYSIS
