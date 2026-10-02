@@ -99,6 +99,14 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       if (state.channelId && state.channelId !== channel.id) {
         throw new Error('YouTube channel changed; SEO backfill is paused to avoid mixing channels');
       }
+      // A new owner approval can resume a paused catalog exactly once. Persist the marker
+      // so a later pause in the dashboard is respected on every subsequent run.
+      const approvalId = env.SEO_OWNER_APPROVAL_ID?.trim();
+      if (autoPublishEnabled && approvalId && state.ownerApprovalId !== approvalId) {
+        state = { ...state, enabled: true, ownerApprovalId: approvalId };
+        await store.saveSeoSyncState(state);
+        logger.info?.('SEO backfill resumed by one-time owner approval');
+      }
       state = { ...state, channelId: channel.id, channelTitle: channel.title };
       const diagnostic = JSON.stringify({ channelId: channel.id, backfillEnabled: state.enabled !== false,
         autoPublishEnabled, providerConfigured: Boolean(env.SEO_AI_API_KEY && env.SEO_AI_MODEL),
