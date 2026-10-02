@@ -100,7 +100,7 @@ function nonempty(value, name, max = 1000) {
   return value.trim();
 }
 
-function validatePackage(raw, source, context, analysis = null) {
+function validatePackage(raw, source, context, analysis = null, marketEvidence = null) {
   const keyword = nonempty(raw.primaryKeyword, 'primary keyword', 100);
   if (keyword.length > 59) throw new Error('Primary keyword must be under 60 characters');
   if (context.primaryKeyword && keyword.toLocaleLowerCase() !== context.primaryKeyword.toLocaleLowerCase()) {
@@ -125,20 +125,17 @@ function validatePackage(raw, source, context, analysis = null) {
     return { visual: nonempty(item.visual, 'thumbnail visual', 500), overlay,
       palette: nonempty(item.palette, 'thumbnail palette', 150), hook: nonempty(item.hook, 'thumbnail hook', 250) };
   });
-  const hook = nonempty(raw.hook, 'description hook', 150);
-  if (hook.length < 125 || !hook.toLocaleLowerCase().includes(keyword.toLocaleLowerCase())) {
-    throw new Error('The hook must be 125–150 characters and include the primary keyword');
+  const hook = nonempty(raw.hook, 'description hook', 160);
+  if (hook.length < 50 || !hook.toLocaleLowerCase().includes(keyword.toLocaleLowerCase())) {
+    throw new Error('The hook must be 50–160 characters and include the primary keyword');
   }
   if (!Array.isArray(raw.paragraphs) || raw.paragraphs.length < 2 || raw.paragraphs.length > 3) {
     throw new Error('Expected two or three description paragraphs');
   }
   const paragraphs = raw.paragraphs.map((item) => nonempty(item, 'description paragraph', 1200));
-  if (!Array.isArray(raw.tags) || raw.tags.length < 10 || raw.tags.length > 15) throw new Error('Expected 10–15 tags');
+  if (!Array.isArray(raw.tags) || raw.tags.length < 3 || raw.tags.length > 15) throw new Error('Expected 3–15 relevant tags');
   const tags = raw.tags.map((item) => nonempty(item, 'tag', 60));
   if (tags.join(',').length > 450) throw new Error('Tags exceed the recommended combined length');
-  if (!tags.some((tag) => tag.toLocaleLowerCase() === keyword.toLocaleLowerCase())) {
-    throw new Error('Tags must include the exact primary keyword');
-  }
   if (!Array.isArray(raw.hashtags) || raw.hashtags.length !== 3 ||
       raw.hashtags.some((tag) => !/^#[\p{L}\p{N}_]+$/u.test(tag))) throw new Error('Expected three relevant hashtags');
   const { chapters: markers, clips: clipMarkers } = evidenceFor(source, context);
@@ -174,7 +171,9 @@ function validatePackage(raw, source, context, analysis = null) {
     communityPost: nonempty(raw.communityPost, 'community post', 600),
     shorts, missingEvidence,
     evidence: { chapterSource: markers[0]?.provenance || null, clipSource: clipMarkers[0]?.provenance || null,
-      videoAnalysis: Boolean(analysis) },
+      videoAnalysis: Boolean(analysis),
+      marketObservedAt: marketEvidence?.observedAt || null,
+      marketSampleSize: marketEvidence?.samples?.length || 0 },
     generatedAt: new Date().toISOString()
   };
 }
@@ -213,7 +212,7 @@ const defaultCircuitBreaker = createModelCircuitBreaker();
 
 async function generatePackage(source, context, { apiKey, model, baseUrl, fallbackModel,
   secondaryNativeModel, finalNativeModel, onFallback, onNativeFallback, onSecondNativeFallback,
-  onFinalNativeFallback, analysis = null, timeoutMs = process.env.SEO_AI_TIMEOUT_MS,
+  onFinalNativeFallback, analysis = null, marketEvidence = null, timeoutMs = process.env.SEO_AI_TIMEOUT_MS,
   circuitBreaker = defaultCircuitBreaker, random = Math.random,
   fetchImpl = fetch, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   if (!apiKey || !model) throw new Error('Configure SEO_AI_API_KEY and SEO_AI_MODEL to generate packages');
@@ -223,6 +222,11 @@ async function generatePackage(source, context, { apiKey, model, baseUrl, fallba
       tags: source.tags, durationSeconds: source.durationSeconds },
     ownerInput: context,
     videoAnalysis: analysis,
+    marketEvidence: marketEvidence ? {
+      game: marketEvidence.game, query: marketEvidence.query,
+      observedAt: marketEvidence.observedAt, windowDays: marketEvidence.windowDays,
+      samples: marketEvidence.samples?.slice(0, 5)
+    } : null,
     groundedChapters: evidence.chapters.map((item) => ({ time: clock(item.startSeconds), title: item.title })),
     groundedClips: evidence.clips.map((item) => ({ start: clock(item.startSeconds), end: clock(item.endSeconds), title: item.title }))
   };
@@ -232,9 +236,10 @@ primaryKeyword (use ownerInput.primaryKeyword verbatim if supplied), titles: {se
 thumbnails:[{visual,overlay,palette,hook} x3], hook, paragraphs:[2 or 3], tags:[10 to 15 strings],
 hashtags:[3 strings beginning #], pinnedComment, communityPost, clipHooks:[one per groundedClips, same order].
 All titles must be under 60 characters. Every search title starts with the primary keyword.
-The hook is 125 to 150 characters and includes the primary keyword naturally. The description paragraphs must say who, what, and why.
+The hook is 50 to 160 characters and includes the primary keyword naturally. The description paragraphs must say who, what, and why.
 Each thumbnail overlay has at most four words, complements its title, and has clear contrast in light and dark feeds.
-Include broad, phrase, and exact keyword tags relevant to the actual video, with total tag text under 450 characters. Avoid claims about search volume or guaranteed performance.
+Use 3 to 15 specific, relevant tags, with total tag text under 450 characters. Prioritize a truthful title, hook, description, and thumbnail over tag quantity. Avoid claims about search volume or guaranteed performance.
+Market examples are recent public videos, not search demand estimates or proof of this video's content. Never copy another creator's title or imply that an event, weapon, outcome, or update appears here unless the owner input or video analysis confirms it.
 Do not invent games, outcomes, quotes, products, events, or steps absent from the evidence.
 Do not turn approximate video analysis moments into verified timestamps. Chapter and clip times are assembled separately from grounded markers. Provide clipHooks only for the supplied clip markers.
 Write in the video's language. No Markdown fencing. JSON only.
@@ -331,7 +336,7 @@ DATA: ${JSON.stringify(payload)}`;
     .map((part) => part.text || '').join('') :
     body.choices?.[0]?.message?.content;
   if (!content || content.length > 30000) throw new Error('SEO provider returned an empty or oversized response');
-  return validatePackage(JSON.parse(content), source, context, analysis);
+  return validatePackage(JSON.parse(content), source, context, analysis, marketEvidence);
 }
 
 module.exports = { clean, clock, secondsFromIso, normalizeSource, normalizeContext,

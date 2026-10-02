@@ -3,7 +3,7 @@ const { analyzeVideo } = require('./video-analysis');
 const { createSeoPublisher } = require('./seo-publish');
 
 function createSeoWorker({ store, youtube, env = process.env, logger = console, sleep,
-  generate = generatePackage, analyze = analyzeVideo }) {
+  generate = generatePackage, analyze = analyzeVideo, market = null }) {
   let running = false;
   let scheduled = false;
   let rerunRequested = false;
@@ -176,10 +176,12 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           const finalNativeModel = fallbackModel
             ? env.SEO_AI_FINAL_MODEL || 'gemini-3.8-flash' : null;
           const analysis = await videoAnalysis(job, state);
+          const marketEvidence = await market?.research(job.source)
+            .catch((error) => { logger.warn?.(`SEO market lookup ${job.videoId} failed: ${error.message}`); }) || null;
           const generated = await generate(job.source, context, {
             apiKey: env.SEO_AI_API_KEY, model: env.SEO_AI_MODEL,
             baseUrl, fallbackModel, secondaryNativeModel, finalNativeModel,
-            analysis, timeoutMs: env.SEO_AI_TIMEOUT_MS, circuitBreaker,
+            analysis, marketEvidence, timeoutMs: env.SEO_AI_TIMEOUT_MS, circuitBreaker,
             ...(sleep ? { sleep } : {}),
             onFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying fallback model ${fallback}`),
             onNativeFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying native route with ${fallback}`),
