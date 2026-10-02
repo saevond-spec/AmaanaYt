@@ -23,6 +23,7 @@ const seoToggle = document.querySelector('#seoToggle');
 const seoPrevious = document.querySelector('#seoPrevious');
 const seoNext = document.querySelector('#seoNext');
 const seoPage = document.querySelector('#seoPage');
+const seoChannel = document.querySelector('#seoChannel');
 let seoOffset = 0;
 let seoEnabled = true;
 let draftPoll = null;
@@ -362,10 +363,18 @@ function renderSeoVideo(item) {
   link.rel = 'noopener noreferrer';
   card.append(link);
   if (item.error) card.append(element('p', 'draft-error', item.error));
+  card.append(element('p', 'draft-meta', `YouTube visibility: ${item.source.privacyStatus || 'unknown'}`));
+  if (item.applied) card.append(element('p', 'draft-meta',
+    `SEO applied to this video on ${new Date(item.applied.at).toLocaleString()}.`));
+  if (item.autoResult?.state === 'skipped') card.append(element('p', 'draft-meta',
+    `Automatic SEO skipped: ${item.autoResult.reason}`));
+  if (item.autoResult?.state === 'retry') card.append(element('p', 'draft-meta',
+    `Automatic SEO will retry: ${item.autoResult.reason}`));
+  if (item.audit?.length) card.append(seoHeading('Current SEO findings', item.audit.join('\n')));
 
   const details = document.createElement('details');
   details.className = 'seo-details';
-  details.append(element('summary', '', item.package ? 'Review package and edit context' : 'Add video context'));
+  details.append(element('summary', '', item.package ? 'Inspect package or add context' : 'Add video context'));
   if (item.package) {
     const pkg = item.package;
     details.append(seoHeading('Primary keyword', pkg.primaryKeyword));
@@ -384,7 +393,7 @@ function renderSeoVideo(item) {
     details.append(seoHeading('Shorts clips', (pkg.shorts || []).map((clip) =>
       `${clip.start}–${clip.end}: ${clip.title} — ${clip.hook}`).join('\n') || 'Add verified clip windows.'));
     if (pkg.missingEvidence?.length) {
-      details.append(seoHeading('Review needed', pkg.missingEvidence.join('\n')));
+      details.append(seoHeading('Evidence gaps', pkg.missingEvidence.join('\n')));
     }
     const copy = element('button', 'ghost', 'Copy complete package');
     copy.type = 'button';
@@ -474,12 +483,14 @@ async function loadSeo() {
     const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
     seoStatus.textContent = [
       status.channelTitle ? `Connected channel: ${status.channelTitle}` : 'Waiting for channel connection',
-      `${total} videos found; ${counts.ready || 0} ready, ${counts.needs_review || 0} need review, ${counts.queued || 0} queued`,
+      `${total} videos found; ${counts.ready || 0} ready, ${counts.needs_review || 0} have evidence gaps, ${counts.queued || 0} queued`,
+      `${status.appliedTotal || 0} public videos updated by Amaana`,
       status.completed ? 'Catalog scan complete' : 'Catalog scan in progress',
       status.providerConfigured ? `${status.attemptedToday}/${status.dailyLimit} AI attempts today (UTC)`
         : 'Configure SEO_AI_API_KEY and SEO_AI_MODEL to create packages',
       status.videoAnalysisEnabled ? 'Video analysis on for public videos' : 'Video analysis off',
       status.providerError ? `${status.providerError}; next retry after ${new Date(status.providerBlockedUntil).toLocaleString()}` : null,
+      status.autoPublishEnabled ? 'Automatic public video SEO on' : 'Automatic publishing disabled',
       seoEnabled ? 'SEO jobs active' : 'SEO jobs paused'
     ].filter(Boolean).join(' · ');
     seoToggle.textContent = seoEnabled ? 'Pause SEO jobs' : 'Resume SEO jobs';
@@ -491,6 +502,23 @@ async function loadSeo() {
   } catch (error) {
     if (error.status === 401) return showLogin();
     seoStatus.textContent = error.message;
+  }
+}
+
+async function loadChannelSeo() {
+  try {
+    const channel = await api('/api/seo/channel');
+    seoChannel.replaceChildren(
+      element('p', 'draft-meta', `${channel.title} · ${channel.id}`),
+      element('p', '', `Description: ${channel.description || '(empty)'}`),
+      element('p', '', `Keywords: ${channel.keywords || '(empty)'}`),
+      element('p', 'draft-meta', channel.audit?.length
+        ? `Findings: ${channel.audit.join(' ')}`
+        : 'Channel description and keywords are present.')
+    );
+  } catch (error) {
+    if (error.status === 401) return showLogin();
+    seoChannel.textContent = error.message;
   }
 }
 
@@ -514,6 +542,7 @@ async function refreshDashboard() {
     await Promise.all([refreshConnection(), refreshTwitchConnection(), refreshTikTokConnection()]);
     await loadDrafts();
     await loadSeo();
+    await loadChannelSeo();
   } catch (error) {
     if (error.status === 401) return showLogin();
     showNotice(error.message, true);
@@ -566,7 +595,9 @@ connectButton.addEventListener('click', () => window.location.assign('/auth/goog
 twitchConnectButton.addEventListener('click', () => window.location.assign('/auth/twitch'));
 tiktokConnectButton.addEventListener('click', () => window.location.assign('/auth/tiktok'));
 document.querySelector('#refreshButton').addEventListener('click', refreshDashboard);
-document.querySelector('#seoRefresh').addEventListener('click', loadSeo);
+document.querySelector('#seoRefresh').addEventListener('click', () => {
+  loadSeo(); loadChannelSeo();
+});
 seoToggle.addEventListener('click', async () => {
   seoToggle.disabled = true;
   try {
