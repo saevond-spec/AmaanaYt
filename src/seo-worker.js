@@ -1,5 +1,6 @@
 const { normalizeSource, normalizeContext, generatePackage, createModelCircuitBreaker } = require('./seo-package');
 const { analyzeVideo } = require('./video-analysis');
+const { createSeoPublisher } = require('./seo-publish');
 
 function createSeoWorker({ store, youtube, env = process.env, logger = console, sleep }) {
   let running = false;
@@ -11,6 +12,9 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   const circuitBreaker = createModelCircuitBreaker();
   const analysisCircuitBreaker = createModelCircuitBreaker();
   const analysisEnabled = env.ENABLE_VIDEO_ANALYSIS === 'true';
+  const autoPublishEnabled = env.SEO_AUTO_PUBLISH !== 'false' &&
+    typeof store.listSeoAutoCandidates === 'function' && typeof youtube.updateVideoSeo === 'function';
+  const publisher = autoPublishEnabled ? createSeoPublisher({ store, youtube, logger }) : null;
 
   async function videoAnalysis(job, state) {
     if (!analysisEnabled) return null;
@@ -103,6 +107,10 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
         if (!state.cursor) state.completed = true;
         await store.saveSeoSyncState(state);
       }
+      if (publisher && state.enabled !== false) {
+        await publisher.publishPending().catch((error) => logger.warn?.('SEO auto publish scan failed:', error.message));
+        await publisher.updateChannel().catch((error) => logger.warn?.('SEO channel update failed:', error.message));
+      }
       if (!env.SEO_AI_API_KEY || !env.SEO_AI_MODEL || state.enabled === false) return;
       const counts = await store.seoCounts();
       logger.info?.(`SEO queue statuses: ${JSON.stringify(counts.statuses || {})}; attemptedToday=${counts.attemptedToday}`);
@@ -144,6 +152,8 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           });
           await store.finishSeoVideo(job.videoId, job.claimToken, generated, null);
           logger.info?.(`SEO package ${job.videoId} generated: ${generated.missingEvidence.length ? 'needs_review' : 'ready'}`);
+          if (publisher) await publisher.publishVideo(job.videoId)
+            .catch((error) => logger.warn?.(`SEO auto publish ${job.videoId} failed:`, error.message));
           if (state.providerBlockedUntil || state.consecutive503s) {
             state.providerBlockedUntil = null;
             state.providerError = null;
@@ -177,6 +187,8 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           }
         }
       }
+      if (publisher) await publisher.updateChannel()
+        .catch((error) => logger.warn?.('SEO channel update failed:', error.message));
     } finally {
       running = false;
       if (rerunRequested) {
@@ -217,7 +229,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   async function status() {
     const [state, counts] = await Promise.all([store.getSeoSyncState(), store.seoCounts()]);
     return { ...state, ...counts, dailyLimit, videoAnalysisEnabled: analysisEnabled,
-      providerConfigured: Boolean(env.SEO_AI_API_KEY && env.SEO_AI_MODEL),
+      providerConfigured: Boolean(env.SEO_AI_API_KEY && env.SEO_AI_MODEL), autoPublishEnabled,
       running };
   }
 

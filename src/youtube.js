@@ -95,6 +95,72 @@ async function getVideo(videoId) {
   return response.data.items?.[0] || null;
 }
 
+async function updateVideoSeo(videoId, video, edit) {
+  const youtube = await service();
+  // A snippet update replaces its mutable fields; keep the category and language.
+  const snippet = {
+    title: edit.title, description: edit.description, tags: edit.tags,
+    categoryId: video.snippet.categoryId
+  };
+  if (video.snippet.defaultLanguage) snippet.defaultLanguage = video.snippet.defaultLanguage;
+  const response = await youtube.videos.update({
+    part: ['snippet'], requestBody: { id: videoId, snippet }
+  }, video.etag ? { headers: { 'If-Match': video.etag } } : {});
+  return response.data;
+}
+
+async function channelSeo() {
+  const youtube = await service();
+  const response = await youtube.channels.list({
+    part: ['snippet', 'brandingSettings', 'contentDetails'], mine: true
+  });
+  const channel = response.data.items?.[0];
+  if (!channel?.id) throw new Error('The connected YouTube account has no channel');
+  return {
+    id: channel.id, etag: channel.etag, title: channel.snippet?.title || '',
+    description: channel.brandingSettings?.channel?.description ?? channel.snippet?.description ?? '',
+    keywords: channel.brandingSettings?.channel?.keywords || '',
+    uploads: channel.contentDetails?.relatedPlaylists?.uploads || null,
+    brandingChannel: channel.brandingSettings?.channel || {}
+  };
+}
+
+async function assertTargetChannel(channelId) {
+  const handle = process.env.YOUTUBE_CHANNEL_HANDLE || '@saevond';
+  const youtube = await service();
+  const response = await youtube.channels.list({
+    part: ['snippet'], forHandle: handle, fields: 'items(id)'
+  });
+  if (!response.data.items?.some((channel) => channel.id === channelId)) {
+    const error = new Error(`Connected YouTube channel does not match ${handle}`);
+    error.status = 403;
+    throw error;
+  }
+}
+
+async function updateChannelSeo(expected, edit) {
+  const current = await channelSeo();
+  if (current.id !== expected.id || current.description !== expected.description ||
+      current.keywords !== expected.keywords) {
+    const error = new Error('Channel settings changed; refresh before saving');
+    error.status = 409;
+    throw error;
+  }
+  const allowed = ['title', 'description', 'keywords', 'trackingAnalyticsAccountId',
+    'unsubscribedTrailer', 'defaultLanguage', 'country'];
+  const channel = Object.fromEntries(allowed.filter((name) => current.brandingChannel[name] !== undefined)
+    .map((name) => [name, current.brandingChannel[name]]));
+  channel.title = current.title;
+  channel.description = edit.description;
+  channel.keywords = edit.keywords;
+  const youtube = await service();
+  await youtube.channels.update({
+    part: ['brandingSettings'],
+    requestBody: { id: current.id, brandingSettings: { channel } }
+  }, current.etag ? { headers: { 'If-Match': current.etag } } : {});
+  return { id: current.id, title: current.title, ...edit };
+}
+
 async function ownedChannel() {
   const youtube = await service();
   const response = await youtube.channels.list({ part: ['snippet', 'contentDetails'], mine: true,
@@ -140,4 +206,5 @@ async function getVideoViews(videoIds) {
 }
 
 module.exports = { isConnected, canApprove, authorizationUrl, exchangeCode, uploadPrivate, publish,
-  getVideo, getVideoViews, ownedChannel, uploadsPage, videoMetadata };
+  getVideo, updateVideoSeo, channelSeo, updateChannelSeo, assertTargetChannel,
+  getVideoViews, ownedChannel, uploadsPage, videoMetadata };

@@ -14,6 +14,7 @@ const tiktok = require('./tiktok');
 const { createShortViewMonitor, TIKTOK_VIEW_THRESHOLD } = require('./short-views');
 const { createSeoWorker } = require('./seo-worker');
 const { normalizeContext } = require('./seo-package');
+const { auditVideo, channelSuggestions, problem } = require('./seo-publish');
 const { createSessionStore } = require('./session-store');
 
 for (const name of ['BASE_URL', 'DATABASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SESSION_SECRET', 'TOKEN_ENCRYPTION_KEY', 'AGENT_KEY', 'ADMIN_KEY']) {
@@ -540,7 +541,31 @@ app.get('/api/seo/videos', admin, async (req, res, next) => {
     const offset = Math.max(0, Number.parseInt(req.query.offset, 10) || 0);
     if (!Number.isSafeInteger(offset)) return res.status(400).json({ error: 'Invalid offset' });
     res.set('Cache-Control', 'no-store');
-    res.json(await store.listSeoVideos(50, offset));
+    res.json((await store.listSeoVideos(50, offset)).map((item) => ({
+      ...item, audit: auditVideo(item)
+    })));
+  } catch (error) { next(error); }
+});
+
+app.get('/api/seo/channel', admin, async (_req, res, next) => {
+  try {
+    const [channel, state, videos] = await Promise.all([
+      youtube.channelSeo(), store.getSeoSyncState(), store.listSeoVideos(100)
+    ]);
+    if (state.channelId && state.channelId !== channel.id) {
+      throw problem('Connected channel differs from the SEO catalog. Rescan before editing.', 409);
+    }
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      id: channel.id, title: channel.title, description: channel.description,
+      keywords: channel.keywords,
+      suggestions: channelSuggestions(videos.filter((video) => video.source?.channelId === channel.id)),
+      audit: [
+        ...(!channel.description.trim() ? ['Channel description is empty.'] :
+          channel.description.trim().length < 80 ? ['Channel description is brief; review its topic and audience.'] : []),
+        ...(!channel.keywords.trim() ? ['No channel keywords are set.'] : [])
+      ]
+    });
   } catch (error) { next(error); }
 });
 
