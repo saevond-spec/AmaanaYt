@@ -250,7 +250,9 @@ async function enablePublicBroadcastAds(broadcast) {
       broadcast.monetizationDetails?.eligibleForAdsMonetization !== true ||
       !['created', 'ready', 'testing', 'live'].includes(broadcast.status?.lifeCycleStatus) ||
       !broadcast.snippet?.title || !broadcast.snippet?.scheduledStartTime ||
-      !broadcast.snippet?.categoryId || !broadcast.contentDetails?.monitorStream) {
+      !broadcast.snippet?.categoryId ||
+      typeof broadcast.contentDetails?.monitorStream?.enableMonitorStream !== 'boolean' ||
+      !Number.isSafeInteger(broadcast.contentDetails?.monitorStream?.broadcastStreamDelayMs)) {
     throw new Error('Broadcast is not versioned, eligible, public, active, or has incomplete required metadata');
   }
   if (broadcast.monetizationDetails.adsMonetizationStatus === 'on') return broadcast;
@@ -273,15 +275,21 @@ async function enablePublicBroadcastAds(broadcast) {
     scheduledStartTime: broadcast.snippet.scheduledStartTime
   };
   if (broadcast.snippet.scheduledEndTime) snippet.scheduledEndTime = broadcast.snippet.scheduledEndTime;
+  const sourceDetails = broadcast.contentDetails;
+  const contentDetails = { monitorStream: {
+    enableMonitorStream: sourceDetails.monitorStream.enableMonitorStream,
+    broadcastStreamDelayMs: sourceDetails.monitorStream.broadcastStreamDelayMs
+  } };
+  for (const key of ['enableAutoStart', 'enableAutoStop', 'enableClosedCaptions',
+    'enableDvr', 'enableEmbed', 'recordFromStart', 'availabilityConfig']) {
+    if (sourceDetails[key] != null) contentDetails[key] = sourceDetails[key];
+  }
   const response = await youtube.liveBroadcasts.update({
-    part: ['snippet', 'monetizationDetails'],
+    part: ['snippet', 'contentDetails', 'monetizationDetails'],
     requestBody: {
       id: broadcast.id,
       snippet,
-      contentDetails: { monitorStream: {
-        enableMonitorStream: broadcast.contentDetails?.monitorStream?.enableMonitorStream ?? false,
-        broadcastStreamDelayMs: broadcast.contentDetails?.monitorStream?.broadcastStreamDelayMs ?? 0
-      } },
+      contentDetails,
       monetizationDetails
     }
   }, { headers: { 'If-Match': broadcast.etag } });
