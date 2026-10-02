@@ -12,7 +12,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   const circuitBreaker = createModelCircuitBreaker();
   const analysisCircuitBreaker = createModelCircuitBreaker();
   const analysisEnabled = env.ENABLE_VIDEO_ANALYSIS === 'true';
-  const autoPublishEnabled = env.SEO_AUTO_PUBLISH !== 'false' &&
+  const autoPublishEnabled = env.SEO_AUTO_PUBLISH === 'true' &&
     typeof store.listSeoAutoCandidates === 'function' && typeof youtube.updateVideoSeo === 'function';
   const publisher = autoPublishEnabled ? createSeoPublisher({ store, youtube, logger }) : null;
 
