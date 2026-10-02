@@ -52,6 +52,35 @@ test('uses only supplied markers for chapters and clips', () => {
   assert.ok(pkg.description.startsWith(hook));
 });
 
+test('shorter truthful hooks and focused tags pass, and market provenance is recorded', () => {
+  const pkg = validatePackage({ ...generated,
+    hook: 'NARAKA BLADEPOINT guide with a final fight from this match.',
+    tags: ['NARAKA', 'BLADEPOINT gameplay', 'final fight']
+  }, source, context, { summary: 'Observed match' }, {
+    observedAt: '2026-10-02T12:00:00Z', samples: [{ id: 'public-1' }]
+  });
+  assert.equal(pkg.evidence.marketSampleSize, 1);
+  assert.equal(pkg.evidence.marketObservedAt, '2026-10-02T12:00:00Z');
+  assert.equal(pkg.tags.length, 3);
+});
+
+test('live market evidence reaches the prompt as observations without replacing video facts', async () => {
+  let prompt;
+  await generatePackage(source, context, {
+    apiKey: 'unit-test-key', model: 'test-model',
+    marketEvidence: { game: 'NARAKA: BLADEPOINT', query: 'NARAKA: BLADEPOINT gameplay',
+      observedAt: '2026-10-02T12:00:00Z', windowDays: 7,
+      samples: [{ id: 'sample-1', title: 'NARAKA parry', publishedAt: '2026-10-01T00:00:00Z', viewCount: 400 }] },
+    fetchImpl: async (_url, options) => {
+      prompt = JSON.parse(options.body).messages[1].content;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) };
+    }
+  });
+  assert.match(prompt, /Market examples are recent public videos, not search demand estimates/);
+  assert.match(prompt, /NARAKA parry/);
+  assert.match(prompt, /Opening, first round, final fight/);
+});
+
 test('missing footage evidence creates review flags and no invented timestamps', () => {
   const pkg = validatePackage({ ...generated, clipHooks: [] }, source, normalizeContext({}, 190));
   assert.deepEqual(pkg.chapters, []);
