@@ -167,6 +167,24 @@ function renderDraft(draft) {
     }
   }
   if (isHighlight) card.append(element('p', 'draft-meta', `Twitch VOD ${draft.vodId} · ${(draft.highlights || []).length} selected moments · highlight video`));
+  if (isHighlight && draft.chapterStatus) {
+    const moments = draft.chapters?.length ? draft.chapters : (draft.chapterTimestamps || []);
+    const label = draft.chapterStatus === 'chapters_added'
+      ? 'Chapter timestamps in private description'
+      : 'Moment timestamps in private description';
+    if (moments.length) {
+      card.append(element('p', 'draft-meta', label + ': ' +
+        moments.map((item) => item.time + ' ' + item.title).join(' · ')));
+    }
+  }
+  if (isHighlight && draft.thumbnailStatus) {
+    const thumbnailMessage = draft.thumbnailStatus === 'applied'
+      ? 'High-contrast gameplay thumbnail generated and added to the private highlight.'
+      : draft.thumbnailStatus === 'failed'
+        ? 'Thumbnail was not applied: ' + (draft.thumbnailError || 'generation or YouTube upload failed')
+        : 'Gameplay thumbnail: ' + String(draft.thumbnailStatus).replaceAll('_', ' ');
+    card.append(element('p', draft.thumbnailStatus === 'failed' ? 'draft-error' : 'draft-meta', thumbnailMessage));
+  }
   if (draft.sourceType === 'twitch_highlight_short') card.append(element('p', 'draft-meta', 'Short made from a highlight video'));
 
   if (draft.error) card.append(element('p', 'draft-error', draft.error));

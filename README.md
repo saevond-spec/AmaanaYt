@@ -4,6 +4,8 @@ Approval-based YouTube Shorts, TikTok inbox, and video SEO drafting service for 
 
 AmaanaYt connects to YouTube and Twitch with OAuth. After SweatyClanker detects moments in an ended Twitch stream, Amaana assembles them into a landscape highlight video, then cuts vertical Shorts from that assembled video. The highlight and each Short become separate private YouTube drafts; an owner key is required to publish or schedule each one.
 
+For new Twitch highlight batches, Amaana derives moment timestamps from FFmpeg-measured clip durations. When there are at least three segments and each is at least 10 seconds, it adds YouTube chapter timestamps starting at 0:00; otherwise it adds clickable timestamps without calling them chapters. Amaana also creates a 16:9, high-contrast thumbnail from an actual highlight frame and applies it to the private landscape video. Shorts and all uploads remain private until owner approval.
+
 Generated Shorts can also be sent to the creator's TikTok inbox **one at a time after the creator previews and consents to each transfer**. The creator edits and completes each post in the TikTok app. TikTok delivery does not happen automatically at stream end.
 
 ## Security model
