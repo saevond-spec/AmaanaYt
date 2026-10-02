@@ -937,6 +937,7 @@ app.post('/api/twitch/vod-clips', vodWebhookOrAgentOrAdmin, async (req, res, nex
       batch = await store.addDraft({ id: crypto.randomUUID(), sourceType: 'twitch_highlight_batch',
         sourceChannel: channel, vodId, highlights, streamTitle: cleanText(req.body?.streamTitle, 80),
         title: cleanText(`${req.body?.streamTitle || 'Saevond livestream'} | Best moments`, 100),
+        pipelineVersion: 2, thumbnailStatus: 'pending',
         status: 'clip_queued', createdAt: new Date().toISOString() });
       enqueueHighlightBatch(batch.id);
     }
