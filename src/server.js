@@ -16,6 +16,7 @@ const { createSeoWorker } = require('./seo-worker');
 const { createMonetizationWorker } = require('./monetization-worker');
 const { createSeoMarket, detectGame } = require('./seo-market');
 const { normalizeContext } = require('./seo-package');
+const { buildHighlightTimeline, buildHighlightDescription } = require('./highlight-metadata');
 const { auditVideo, channelSuggestions, problem } = require('./seo-publish');
 const { createSessionStore } = require('./session-store');
 
@@ -381,13 +382,72 @@ async function processHighlightBatch(id) {
     const montage = path.join(directory, 'highlight.mp4');
     await store.updateDraft(id, { status: 'assembling_highlight_video' });
     const durations = await video.assembleHighlights(sources, montage, directory);
+    const timeline = buildHighlightTimeline(batch.highlights, durations);
+    const description = batch.pipelineVersion >= 2
+      ? buildHighlightDescription(batch.vodId, timeline)
+      : 'Highlights from https://www.twitch.tv/videos/' + batch.vodId;
+    const highlightTitle = cleanText((batch.streamTitle || 'Saevond livestream') + ' | Best moments', 100);
+    const highlightTags = ['Saevond', 'gaming', 'livestream highlights'];
+    const thumbnailPath = path.join(directory, 'highlight-thumbnail.jpg');
+    let thumbnailStatus = batch.thumbnailStatus || 'pending';
+    let thumbnailError = null;
+    let thumbnailHeadline = batch.thumbnailHeadline || '';
+    let thumbnailReady = false;
+    if (batch.pipelineVersion >= 2 && thumbnailStatus !== 'applied') {
+      const selectedIndex = batch.highlights.reduce((best, item, index, all) =>
+        (Number(item.score) || 0) > (Number(all[best]?.score) || 0) ? index : best, 0);
+      const selected = batch.highlights[selectedIndex];
+      const startOffset = durations.slice(0, selectedIndex).reduce((total, value) => total + value, 0);
+      const frameOffset = startOffset + Math.min(durations[selectedIndex] / 2,
+        Math.max(0.25, durations[selectedIndex] - 0.25));
+      thumbnailHeadline = video.thumbnailHeadline(selected.title || highlightTitle);
+      try {
+        await video.createThumbnail(montage, thumbnailPath, {
+          timestampSeconds: frameOffset,
+          headline: thumbnailHeadline
+        });
+        thumbnailReady = true;
+        thumbnailStatus = 'generated';
+      } catch (error) {
+        thumbnailStatus = 'failed';
+        thumbnailError = cleanText(error.message, 300);
+        console.warn('Thumbnail generation ' + id + ' failed:', error.message);
+      }
+    }
     const highlight = batch.youtubeVideoId ? { id: batch.youtubeVideoId } : await youtube.uploadPrivate({
       filePath: montage,
-      title: cleanText(`${batch.streamTitle || 'Saevond livestream'} | Best moments`, 100),
-      description: `Highlights from https://www.twitch.tv/videos/${batch.vodId}\n#Saevond #Gaming`,
-      tags: ['Saevond', 'gaming', 'livestream highlights']
+      title: highlightTitle,
+      description,
+      tags: highlightTags
     });
-    await store.updateDraft(id, { status: 'creating_shorts', youtubeVideoId: highlight.id, duration: durations.reduce((a, b) => a + b, 0) });
+    const highlightPatch = {
+      status: 'creating_shorts',
+      youtubeVideoId: highlight.id,
+      duration: timeline.durationSeconds
+    };
+    if (batch.pipelineVersion >= 2) {
+      Object.assign(highlightPatch, {
+        chapterTimestamps: timeline.timestamps.map(({ time, title }) => ({ time, title })),
+        chapters: timeline.chapters.map(({ time, title }) => ({ time, title })),
+        chapterStatus: timeline.chapters.length >= 3 ? 'chapters_added' : 'timestamps_only',
+        thumbnailStatus,
+        thumbnailError,
+        thumbnailHeadline
+      });
+    }
+    await store.updateDraft(id, highlightPatch);
+    if (batch.pipelineVersion >= 2 && thumbnailReady) {
+      try {
+        await youtube.setThumbnail(highlight.id, thumbnailPath);
+        thumbnailStatus = 'applied';
+        thumbnailError = null;
+      } catch (error) {
+        thumbnailStatus = 'failed';
+        thumbnailError = cleanText(error.message, 300);
+        console.warn('Thumbnail upload ' + id + ' failed:', error.message);
+      }
+      await store.updateDraft(id, { thumbnailStatus, thumbnailError, thumbnailHeadline });
+    }
     let markerOffset = 0;
     const markers = batch.highlights.flatMap((moment, index) => {
       const length = durations[index];
@@ -398,14 +458,15 @@ async function processHighlightBatch(id) {
       return [chapter, clip];
     });
     await seo.registerUpload(highlight.id, {
-      title: cleanText(`${batch.streamTitle || 'Saevond livestream'} | Best moments`, 100),
-      description: `Highlights from https://www.twitch.tv/videos/${batch.vodId}`,
-      tags: ['Saevond', 'gaming', 'livestream highlights'],
+      title: highlightTitle,
+      description,
+      tags: highlightTags,
       durationSeconds: markerOffset,
       context: { topic: batch.streamTitle || '', takeaways: batch.highlights.map((moment) =>
-        `${moment.title}: ${moment.reason}`).join('\n'), videoType: 'Gameplay' },
+        moment.title + ': ' + moment.reason).join('\n'), videoType: 'Gameplay' },
       markers
     }).catch((error) => console.error('Highlight SEO registration failed:', error.message));
+
     const existingShorts = (await store.listDrafts()).filter((draft) => draft.parentId === id);
     let offset = 0;
     const failures = [];
