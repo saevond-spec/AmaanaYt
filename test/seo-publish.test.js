@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { auditVideo, automaticVideoEdit, channelSuggestions, channelEdit,
-  createSeoPublisher } = require('../src/seo-publish');
+  retryablePublishError, createSeoPublisher } = require('../src/seo-publish');
 const { createSeoWorker } = require('../src/seo-worker');
 
 function item(overrides = {}) {
@@ -164,7 +164,7 @@ test('publisher rejects a wrong channel, changed metadata, and exhausted daily b
   const row = item();
   const cases = [
     { channelId: 'another-channel', title: row.source.title, budget: 0,
-      reason: /not on the connected channel/, state: 'retry' },
+      reason: /not on the connected channel/, state: 'skipped' },
     { channelId: 'channel-1', title: 'Owner edited this video', budget: 0,
       reason: /metadata changed/, state: 'skipped' },
     { channelId: 'channel-1', title: row.source.title, budget: 50,
@@ -433,4 +433,13 @@ test('one-time owner approval resumes a paused catalog, then respects a later ma
   await worker.run();
   assert.equal(state.enabled, false);
   assert.equal(logs.filter((line) => line === 'SEO backfill resumed by one-time owner approval').length, 1);
+});
+
+test('permanent permission errors are skipped but quota and transient errors retry', () => {
+  assert.equal(retryablePublishError({ status: 403, message: 'Video is not on the connected channel' }), false);
+  assert.equal(retryablePublishError({ status: 403, response: { data: { error: {
+    errors: [{ reason: 'quotaExceeded' }] } } } }), true);
+  assert.equal(retryablePublishError({ status: 503, message: 'Temporary YouTube outage' }), true);
+  assert.equal(retryablePublishError({ code: 'ECONNRESET' }), true);
+  assert.equal(retryablePublishError({ status: 409, message: 'Metadata changed' }), false);
 });
