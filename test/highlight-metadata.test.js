@@ -15,6 +15,7 @@ test('measured segment lengths produce verified chapter timestamps from zero', (
   ], [12.24, 18.8, 11.1]);
 
   assert.deepEqual(timeline.timestamps.map((item) => item.time), ['0:00', '0:12', '0:31']);
+  assert.equal(formatTimestamp(3661), '1:01:01');
   assert.deepEqual(timeline.chapters.map((item) => item.time), ['0:00', '0:12', '0:31']);
   assert.match(buildHighlightDescription('123456', timeline), /Chapters\n0:00 - Opening duel/);
 });
