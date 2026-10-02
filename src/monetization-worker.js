@@ -37,8 +37,13 @@ function createMonetizationWorker({ youtube, env = process.env, logger = console
           result.enabledNow += 1;
           logger.info?.(`Ads enabled for eligible public YouTube broadcast ${broadcast.id}`);
         } catch (error) {
-          result.errors.push(`${broadcast.id}: ${String(error.message).slice(0, 180)}`);
-          logger.warn?.(`Public broadcast monetization ${broadcast.id} failed: ${error.message}`);
+          const apiError = error.response?.data?.error;
+          const reason = apiError?.errors?.[0]?.reason;
+          const detail = `${error.response?.status || error.code || ''} ${reason || ''} ${apiError?.message || error.message}`.trim();
+          result.errors.push(`${broadcast.id}: ${detail.slice(0, 180)}`);
+          logger.warn?.(`Public broadcast monetization ${broadcast.id} failed: ${detail.slice(0, 300)}; ` +
+            `scheduledStart=${Boolean(broadcast.snippet?.scheduledStartTime)}, ` +
+            `monitor=${Boolean(broadcast.contentDetails?.monitorStream)}`);
         }
       }
       logger.info?.(`Public live monetization scan: ${result.publicBroadcasts} public, ` +
