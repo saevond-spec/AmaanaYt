@@ -400,3 +400,34 @@ test('worker reports missing YouTube connection once without accessing the catal
   await worker.run();
   assert.deepEqual(logs, ['SEO worker idle: YouTube is not connected']);
 });
+
+test('one-time owner approval resumes a paused catalog, then respects a later manual pause', async () => {
+  let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
+    completed: true, enabled: false };
+  const logs = [];
+  const store = {
+    getSeoSyncState: async () => state,
+    saveSeoSyncState: async (updated) => { state = updated; },
+    listSeoAutoCandidates: async () => [],
+    listSeoVideos: async () => []
+  };
+  const youtube = {
+    isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Saevond', uploads: 'uploads-1' }),
+    updateVideoSeo: async () => { throw new Error('No eligible video'); },
+    channelSeo: async () => ({ id: 'channel-1', title: 'Saevond',
+      description: 'Original channel description', keywords: '' }),
+    assertTargetChannel: async () => {}
+  };
+  const worker = createSeoWorker({ store, youtube, env: {
+    SEO_AUTO_PUBLISH: 'true', SEO_OWNER_APPROVAL_ID: 'public-seo-rollout-2026-10-02'
+  }, logger: { info: (line) => logs.push(line), warn: (line) => logs.push(line) } });
+  await worker.run();
+  assert.equal(state.enabled, true);
+  assert.equal(state.ownerApprovalId, 'public-seo-rollout-2026-10-02');
+  assert.ok(logs.includes('SEO backfill resumed by one-time owner approval'));
+  state = { ...state, enabled: false };
+  await worker.run();
+  assert.equal(state.enabled, false);
+  assert.equal(logs.filter((line) => line === 'SEO backfill resumed by one-time owner approval').length, 1);
+});

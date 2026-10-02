@@ -203,6 +203,8 @@ Add the topic, primary keyword, script or key takeaways, audience, and video typ
 
 Saving context queues a replacement package. SEO status and catalog APIs require the owner session or `x-admin-key`: `GET /api/seo/status`, `GET /api/seo/channel`, `GET /api/seo/videos?offset=0`, `PUT /api/seo/videos/{videoId}/context`, `POST /api/seo/videos/{videoId}/regenerate`, and `POST /api/seo/backfill` with `{"enabled":true}` or `{"enabled":true,"restart":true}`. Pausing with `{"enabled":false}` pauses generation and automatic publication. Automatic publishing requires the explicit owner-approved `SEO_AUTO_PUBLISH=true` setting in `render.yaml`; removing it or setting it to `false` stops automatic metadata writes. `SEO_AUTO_DAILY_LIMIT` caps metadata updates at 50 per UTC day by default. New private uploads from the dashboard and Twitch jobs enter the SEO queue, but this workflow never edits or publishes private, unlisted, or unpublished videos. Active or upcoming public broadcasts wait until they end before an SEO write is attempted again.
 
+For a one-time owner-approved resume of a paused SEO catalog, set a new nonempty `SEO_OWNER_APPROVAL_ID` on the service. The worker stores that marker and enables the catalog once. A later dashboard pause stays paused, even while the setting remains present.
+
 ### Queue AI-selected Twitch VOD moments
 
 ```bash
