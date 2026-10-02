@@ -110,7 +110,8 @@ test('public broadcast ads update preserves existing metadata and schedule with 
     snippet: { channelId: 'channel-1', title: 'Current stream', description: 'Description',
       categoryId: '20', scheduledStartTime: '2026-10-02T12:00:00Z' },
     status: { privacyStatus: 'public', lifeCycleStatus: 'live' },
-    contentDetails: { monitorStream: { enableMonitorStream: false, broadcastStreamDelayMs: 0 } },
+    contentDetails: { monitorStream: { enableMonitorStream: false, broadcastStreamDelayMs: 0 },
+      enableDvr: true, recordFromStart: true },
     monetizationDetails: { adsMonetizationStatus: 'off', eligibleForAdsMonetization: true,
       cuepointSchedule: { enabled: true, ytOptimizedCuepointConfig: 'MEDIUM' } }
   };
@@ -118,12 +119,13 @@ test('public broadcast ads update preserves existing metadata and schedule with 
     status: { privacyStatus: 'private', lifeCycleStatus: 'live' } }), /eligible/);
   assert.equal(request, undefined);
   await youtube.enablePublicBroadcastAds(current);
-  assert.deepEqual(request.params.part, ['snippet', 'monetizationDetails']);
+  assert.deepEqual(request.params.part, ['snippet', 'contentDetails', 'monetizationDetails']);
   assert.equal(Object.hasOwn(request.params.requestBody, 'status'), false);
   assert.deepEqual(request.params.requestBody.snippet, {
     title: 'Current stream', description: 'Description', categoryId: '20',
     scheduledStartTime: '2026-10-02T12:00:00Z'
   });
+  assert.deepEqual(request.params.requestBody.contentDetails, current.contentDetails);
   assert.deepEqual(request.params.requestBody.monetizationDetails, {
     adsMonetizationStatus: 'on',
     cuepointSchedule: { enabled: true, ytOptimizedCuepointConfig: 'MEDIUM' }
