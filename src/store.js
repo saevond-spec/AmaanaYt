@@ -47,6 +47,8 @@ function init() {
         claimed_at TIMESTAMPTZ,
         last_attempt_at TIMESTAMPTZ,
         generated_at TIMESTAMPTZ,
+        applied JSONB,
+        auto_result JSONB,
         next_attempt_at TIMESTAMPTZ,
         error TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -54,6 +56,8 @@ function init() {
       );
       CREATE INDEX IF NOT EXISTS amaana_seo_packages_status_idx
         ON amaana_seo_packages (status, next_attempt_at, created_at);
+      ALTER TABLE amaana_seo_packages ADD COLUMN IF NOT EXISTS applied JSONB;
+      ALTER TABLE amaana_seo_packages ADD COLUMN IF NOT EXISTS auto_result JSONB;
       CREATE TABLE IF NOT EXISTS amaana_video_analysis (
         video_id TEXT PRIMARY KEY REFERENCES amaana_seo_packages(video_id) ON DELETE CASCADE,
         analysis JSONB NOT NULL,
@@ -224,7 +228,8 @@ async function upsertSeoVideo(videoId, source) {
 async function getSeoVideo(videoId) {
   await init();
   const result = await pool.query(`SELECT p.video_id AS "videoId", p.source, p.context, p.package, p.status, p.attempts,
-    p.error, p.generated_at AS "generatedAt", p.updated_at AS "updatedAt",
+    p.error, p.applied, p.auto_result AS "autoResult",
+    p.generated_at AS "generatedAt", p.updated_at AS "updatedAt",
     a.analysis, a.model AS "analysisModel", a.analyzed_at AS "analyzedAt"
     FROM amaana_seo_packages p LEFT JOIN amaana_video_analysis a ON a.video_id = p.video_id
     WHERE p.video_id = $1`, [videoId]);
@@ -234,7 +239,8 @@ async function getSeoVideo(videoId) {
 async function listSeoVideos(limit = 50, offset = 0) {
   await init();
   const result = await pool.query(`SELECT p.video_id AS "videoId", p.source, p.context, p.package, p.status, p.attempts,
-    p.error, p.generated_at AS "generatedAt", p.updated_at AS "updatedAt",
+    p.error, p.applied, p.auto_result AS "autoResult",
+    p.generated_at AS "generatedAt", p.updated_at AS "updatedAt",
     a.analysis, a.model AS "analysisModel", a.analyzed_at AS "analyzedAt"
     FROM amaana_seo_packages p LEFT JOIN amaana_video_analysis a ON a.video_id = p.video_id
     ORDER BY (p.source->>'publishedAt') DESC NULLS LAST, p.created_at DESC
@@ -260,11 +266,13 @@ async function seoCounts() {
   await init();
   const results = await Promise.all([
     pool.query('SELECT status, COUNT(*)::integer AS count FROM amaana_seo_packages GROUP BY status'),
-    pool.query("SELECT COUNT(*)::integer AS count FROM amaana_seo_packages WHERE last_attempt_at >= (date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')")
+    pool.query("SELECT COUNT(*)::integer AS count FROM amaana_seo_packages WHERE last_attempt_at >= (date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')"),
+    pool.query('SELECT COUNT(*)::integer AS count FROM amaana_seo_packages WHERE applied IS NOT NULL')
   ]);
   return {
     statuses: Object.fromEntries(results[0].rows.map(({ status, count }) => [status, count])),
-    attemptedToday: results[1].rows[0].count
+    attemptedToday: results[1].rows[0].count,
+    appliedTotal: results[2].rows[0].count
   };
 }
 
@@ -306,6 +314,37 @@ async function finishSeoVideo(videoId, claimToken, generated, error) {
   [videoId, claimToken, generated ? JSON.stringify(generated) : null, status, next, error?.message || null]);
 }
 
+async function markSeoApplied(videoId, applied) {
+  await init();
+  await pool.query(`UPDATE amaana_seo_packages SET applied = $2::jsonb, updated_at = NOW()
+    WHERE video_id = $1`, [videoId, JSON.stringify(applied)]);
+}
+
+async function markSeoAutoResult(videoId, result) {
+  await init();
+  await pool.query(`UPDATE amaana_seo_packages SET auto_result = $2::jsonb, updated_at = NOW()
+    WHERE video_id = $1`, [videoId, JSON.stringify(result)]);
+}
+
+async function listSeoAutoCandidates(limit = 20) {
+  await init();
+  const result = await pool.query(`SELECT video_id AS "videoId" FROM amaana_seo_packages
+    WHERE status IN ('ready', 'needs_review') AND source->>'privacyStatus' = 'public'
+      AND generated_at IS NOT NULL
+      AND (auto_result IS NULL
+        OR (auto_result->>'packageGeneratedAt')::timestamptz IS DISTINCT FROM generated_at
+        OR (auto_result->>'state' = 'retry' AND (auto_result->>'at')::timestamptz < NOW() - INTERVAL '1 hour'))
+    ORDER BY generated_at ASC LIMIT $1`, [Math.max(1, Math.min(50, limit))]);
+  return result.rows;
+}
+
+async function seoUpdatesToday() {
+  await init();
+  const result = await pool.query(`SELECT COUNT(*)::integer AS count FROM amaana_seo_packages
+    WHERE (applied->>'at')::timestamptz >= date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`);
+  return result.rows[0].count;
+}
+
 module.exports = {
   pool,
   databaseConnectionString,
@@ -332,5 +371,9 @@ module.exports = {
   seoCounts,
   updateSeoContext,
   claimSeoVideo,
-  finishSeoVideo
+  finishSeoVideo,
+  markSeoApplied,
+  markSeoAutoResult,
+  listSeoAutoCandidates,
+  seoUpdatesToday
 };
