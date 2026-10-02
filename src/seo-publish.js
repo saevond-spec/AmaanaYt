@@ -6,6 +6,17 @@ function problem(message, status = 400) {
   return error;
 }
 
+function retryablePublishError(error) {
+  const code = Number(error.status || error.response?.status || error.code);
+  if ([401, 408, 425, 429, 500, 502, 503, 504].includes(code)) return true;
+  if (code !== 403) return ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED', 'EPIPE'].includes(error.code);
+  const apiError = error.response?.data?.error || {};
+  const reasons = [apiError.status, apiError.message, ...(apiError.errors || []).map((entry) => entry.reason),
+    error.message].filter(Boolean).join(' ').toLowerCase();
+  return ['quotaexceeded', 'ratelimitexceeded', 'userratelimitexceeded', 'backenderror']
+    .some((reason) => reasons.includes(reason));
+}
+
 function sameTags(left, right) {
   return JSON.stringify(left || []) === JSON.stringify(right || []);
 }
@@ -155,8 +166,7 @@ function createSeoPublisher({ store, youtube, logger = console }) {
       result = { state: 'applied' };
       logger.info?.(`SEO metadata applied to public video ${videoId}`);
     } catch (error) {
-      const code = Number(error.status || error.code);
-      result = { state: [401, 403, 408, 425, 429, 500, 502, 503, 504].includes(code) ? 'retry' : 'skipped',
+      result = { state: retryablePublishError(error) ? 'retry' : 'skipped',
         reason: String(error.message).slice(0, 300) };
       logger.warn?.(`SEO auto publish ${videoId}: ${result.reason}`);
     }
@@ -193,4 +203,4 @@ function createSeoPublisher({ store, youtube, logger = console }) {
 }
 
 module.exports = { problem, auditVideo, assertVideoMatchesCatalog, automaticVideoEdit,
-  channelSuggestions, channelEdit, createSeoPublisher };
+  channelSuggestions, channelEdit, retryablePublishError, createSeoPublisher };
