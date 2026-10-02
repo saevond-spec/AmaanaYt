@@ -384,8 +384,11 @@ async function seoUpdatesToday() {
   return result.rows[0].count;
 }
 
-async function nextSeoNeedsAnalysis() {
+async function listSeoNeedsAnalysis(limit = 20) {
   await init();
+  const requestedLimit = Number(limit);
+  const safeLimit = Number.isSafeInteger(requestedLimit)
+    ? Math.max(1, Math.min(50, requestedLimit)) : 20;
   const result = await pool.query(`SELECT p.video_id AS "videoId", p.context
     FROM amaana_seo_packages p
     LEFT JOIN amaana_video_analysis a ON a.video_id = p.video_id
@@ -394,8 +397,13 @@ async function nextSeoNeedsAnalysis() {
       AND a.video_id IS NULL
       AND COALESCE(p.context->>'takeaways', '') = ''
       AND p.generated_at < NOW() - INTERVAL '6 hours'
-    ORDER BY p.generated_at ASC LIMIT 1`);
-  return result.rows[0] || null;
+    ORDER BY p.generated_at ASC LIMIT $1`, [safeLimit]);
+  return result.rows;
+}
+
+async function nextSeoNeedsAnalysis() {
+  const candidates = await listSeoNeedsAnalysis(1);
+  return candidates[0] || null;
 }
 
 module.exports = {
@@ -434,5 +442,6 @@ module.exports = {
   markSeoAutoResult,
   listSeoAutoCandidates,
   seoUpdatesToday,
+  listSeoNeedsAnalysis,
   nextSeoNeedsAnalysis
 };
