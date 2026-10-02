@@ -17,6 +17,8 @@ services:
         sync: false
       - key: GOOGLE_CLIENT_SECRET
         sync: false
+      - key: YOUTUBE_CHANNEL_HANDLE
+        value: '@saevond'
       - key: TWITCH_CLIENT_ID
         sync: false
       - key: TWITCH_CLIENT_SECRET
@@ -39,8 +41,14 @@ services:
         value: '120000'
       - key: SEO_DAILY_LIMIT
         value: '200'
+      - key: SEO_AUTO_PUBLISH
+        value: 'true'
+      - key: SEO_AUTO_DAILY_LIMIT
+        value: '50'
       - key: ENABLE_VIDEO_ANALYSIS
-        value: 'false'
+        value: 'true'
+      - key: VIDEO_ANALYSIS_API_KEY
+        sync: false
       - key: VIDEO_ANALYSIS_TIMEOUT_MS
         value: '180000'
       - key: UPLOAD_DIR
