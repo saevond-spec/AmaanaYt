@@ -263,7 +263,7 @@ test('worker requeues one older public package for footage analysis when Gemini 
   const store = {
     getSeoSyncState: async () => state,
     saveSeoSyncState: async () => {},
-    nextSeoNeedsAnalysis: async () => ({ videoId: 'abcdefghijk', context: {} }),
+    listSeoNeedsAnalysis: async () => [{ videoId: 'abcdefghijk', context: {} }],
     updateSeoContext: async () => { queued += 1; },
     seoCounts: async () => ({ attemptedToday: 1 })
   };
