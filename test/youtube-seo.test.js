@@ -93,7 +93,7 @@ test('channel update retains supported branding fields and rejects a stale chann
   assert.equal(request.options.headers['If-Match'], '"channel-etag"');
 });
 
-test('public broadcast ads update only monetization details with the current version', async (t) => {
+test('public broadcast ads update preserves existing metadata and schedule with the current version', async (t) => {
   const oldYoutube = google.youtube;
   const oldTokens = store.getTokens;
   const oldBaseUrl = process.env.BASE_URL;
@@ -107,23 +107,32 @@ test('public broadcast ads update only monetization details with the current ver
     return { data: { monetizationDetails: { adsMonetizationStatus: 'on' } } };
   } } });
   const current = { id: 'live-1', etag: '"broadcast-etag"',
-    snippet: { channelId: 'channel-1', scheduledStartTime: '2026-10-02T12:00:00Z' },
+    snippet: { channelId: 'channel-1', title: 'Current stream', description: 'Description',
+      categoryId: '20', scheduledStartTime: '2026-10-02T12:00:00Z' },
     status: { privacyStatus: 'public', lifeCycleStatus: 'live' },
     contentDetails: { monitorStream: { enableMonitorStream: false, broadcastStreamDelayMs: 0 } },
     monetizationDetails: { adsMonetizationStatus: 'off', eligibleForAdsMonetization: true,
       cuepointSchedule: { enabled: true, ytOptimizedCuepointConfig: 'MEDIUM' } }
   };
   await assert.rejects(youtube.enablePublicBroadcastAds({ ...current,
-    status: { privacyStatus: 'private', lifeCycleStatus: 'live' } }), /eligible public/);
+    status: { privacyStatus: 'private', lifeCycleStatus: 'live' } }), /eligible/);
   assert.equal(request, undefined);
   await youtube.enablePublicBroadcastAds(current);
-  assert.deepEqual(request.params.part, ['monetizationDetails']);
+  assert.deepEqual(request.params.part, ['snippet', 'monetizationDetails']);
   assert.equal(Object.hasOwn(request.params.requestBody, 'status'), false);
+  assert.deepEqual(request.params.requestBody.snippet, {
+    title: 'Current stream', description: 'Description', categoryId: '20',
+    scheduledStartTime: '2026-10-02T12:00:00Z'
+  });
   assert.deepEqual(request.params.requestBody.monetizationDetails, {
     adsMonetizationStatus: 'on',
     cuepointSchedule: { enabled: true, ytOptimizedCuepointConfig: 'MEDIUM' }
   });
   assert.equal(request.options.headers['If-Match'], current.etag);
+  await youtube.enablePublicBroadcastAds({ ...current, monetizationDetails: {
+    adsMonetizationStatus: 'off', eligibleForAdsMonetization: true
+  } });
+  assert.deepEqual(request.params.requestBody.monetizationDetails.cuepointSchedule, { enabled: false });
 });
 
 test('market search keeps only recently published public videos and their observed views', async (t) => {
