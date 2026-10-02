@@ -111,10 +111,20 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
         await publisher.publishPending().catch((error) => logger.warn?.('SEO auto publish scan failed:', error.message));
         await publisher.updateChannel().catch((error) => logger.warn?.('SEO channel update failed:', error.message));
       }
+      const gemini = (env.SEO_AI_BASE_URL || '').startsWith('https://generativelanguage.googleapis.com/');
+      if (state.enabled !== false && analysisEnabled && env.SEO_AI_API_KEY && env.SEO_AI_MODEL &&
+          (env.VIDEO_ANALYSIS_API_KEY || gemini) &&
+          !(Date.parse(state.videoAnalysisBlockedUntil) > Date.now()) &&
+          typeof store.nextSeoNeedsAnalysis === 'function') {
+        const candidate = await store.nextSeoNeedsAnalysis();
+        if (candidate) {
+          await store.updateSeoContext(candidate.videoId, candidate.context);
+          logger.info?.(`Requeued public video ${candidate.videoId} for footage analysis`);
+        }
+      }
       if (!env.SEO_AI_API_KEY || !env.SEO_AI_MODEL || state.enabled === false) return;
       const counts = await store.seoCounts();
       logger.info?.(`SEO queue statuses: ${JSON.stringify(counts.statuses || {})}; attemptedToday=${counts.attemptedToday}`);
-      const gemini = (env.SEO_AI_BASE_URL || '').startsWith('https://generativelanguage.googleapis.com/');
       const probeTag = gemini ? `final:${env.SEO_AI_FINAL_MODEL || 'gemini-3.8-flash'}` : null;
       if (Date.parse(state.providerBlockedUntil) > Date.now()) {
         // A newly configured model gets one probe; subsequent starts respect the pause.

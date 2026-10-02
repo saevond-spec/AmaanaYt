@@ -345,6 +345,20 @@ async function seoUpdatesToday() {
   return result.rows[0].count;
 }
 
+async function nextSeoNeedsAnalysis() {
+  await init();
+  const result = await pool.query(`SELECT p.video_id AS "videoId", p.context
+    FROM amaana_seo_packages p
+    LEFT JOIN amaana_video_analysis a ON a.video_id = p.video_id
+    WHERE p.status IN ('ready', 'needs_review')
+      AND p.source->>'privacyStatus' = 'public'
+      AND a.video_id IS NULL
+      AND COALESCE(p.context->>'takeaways', '') = ''
+      AND p.generated_at < NOW() - INTERVAL '6 hours'
+    ORDER BY p.generated_at ASC LIMIT 1`);
+  return result.rows[0] || null;
+}
+
 module.exports = {
   pool,
   databaseConnectionString,
@@ -375,5 +389,6 @@ module.exports = {
   markSeoApplied,
   markSeoAutoResult,
   listSeoAutoCandidates,
-  seoUpdatesToday
+  seoUpdatesToday,
+  nextSeoNeedsAnalysis
 };
