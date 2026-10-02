@@ -1,8 +1,8 @@
-name: Check Short views and SEO catalog
+name: Check Short views
 
 on:
   schedule:
-    - cron: '17 * * * *'
+    - cron: '7,22,37,52 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -12,5 +12,5 @@ jobs:
   wake:
     runs-on: ubuntu-latest
     steps:
-      - name: Wake Amaana for view checks and SEO backfill
+      - name: Wake Amaana for YouTube views, SEO, and live ads
         run: curl --fail --silent --show-error --retry 2 --retry-delay 20 --retry-all-errors --max-time 150 https://amaana-yt.onrender.com/healthz
