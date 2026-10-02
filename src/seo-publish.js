@@ -68,8 +68,13 @@ function automaticVideoEdit(item) {
     throw problem('Generated copy contains unfinished placeholders');
   }
   // Keep existing links, disclosures, and verified timestamps verbatim.
-  const description = [summary, original, hashtags].filter(Boolean).join('\n\n');
-  if (description.length > 5000) throw problem('Combined description exceeds 5,000 characters');
+  let description = [summary, original, hashtags].filter(Boolean).join('\n\n');
+  // A full existing description can still receive a better title and tags.
+  // Keep its text intact instead of dropping links or disclosures to make room.
+  if (Buffer.byteLength(description, 'utf8') > 5000) description = original;
+  if (!description || Buffer.byteLength(description, 'utf8') > 5000) {
+    throw problem('Description exceeds 5,000 bytes');
+  }
   const tags = [];
   const originalTags = prior && sameTags(source.tags, prior.tags) ? prior.originalTags : source.tags;
   for (const tag of [...(originalTags || []), ...(pkg.tags || [])]) {
@@ -130,6 +135,9 @@ function createSeoPublisher({ store, youtube, logger = console }) {
       if (state.channelId !== channel.id) throw problem('Connected channel differs from the SEO catalog', 409);
       await youtube.assertTargetChannel(channel.id);
       if (video?.status?.privacyStatus !== 'public') throw problem('Video is no longer public');
+      if (video.snippet?.liveBroadcastContent && video.snippet.liveBroadcastContent !== 'none') {
+        throw problem('Livestream has not ended; SEO will retry later', 425);
+      }
       assertVideoMatchesCatalog(video, channel.id, item);
       if (typeof store.seoUpdatesToday === 'function' && await store.seoUpdatesToday() >= dailyLimit) {
         throw problem('Daily automatic SEO update budget reached', 429);
@@ -148,7 +156,7 @@ function createSeoPublisher({ store, youtube, logger = console }) {
       logger.info?.(`SEO metadata applied to public video ${videoId}`);
     } catch (error) {
       const code = Number(error.status || error.code);
-      result = { state: [401, 403, 408, 429, 500, 502, 503, 504].includes(code) ? 'retry' : 'skipped',
+      result = { state: [401, 403, 408, 425, 429, 500, 502, 503, 504].includes(code) ? 'retry' : 'skipped',
         reason: String(error.message).slice(0, 300) };
       logger.warn?.(`SEO auto publish ${videoId}: ${result.reason}`);
     }

@@ -61,6 +61,23 @@ test('regeneration replaces prior generated copy without duplicating it', () => 
   assert.deepEqual(repeated.tags, edit.tags);
 });
 
+test('a full existing description still permits title and tag improvements without losing its text', () => {
+  const longDescription = 'Original links and disclosures. '.repeat(155).trim();
+  const row = item({ source: { ...item().source, description: longDescription } });
+  const edit = automaticVideoEdit(row);
+  assert.equal(edit.description, longDescription);
+  assert.equal(edit.title, 'ARC Raiders Gameplay Highlights');
+  assert.deepEqual(edit.tags, ['ARC Raiders', 'gaming highlights']);
+});
+
+test('description length uses YouTube UTF-8 byte limit', () => {
+  const original = `Gameplay notes: ${'🎮'.repeat(1230)}`;
+  assert.ok(Buffer.byteLength(original, 'utf8') < 5000);
+  const edit = automaticVideoEdit(item({ source: { ...item().source, description: original } }));
+  assert.ok(edit.description === original);
+  assert.ok(Buffer.byteLength(edit.description, 'utf8') <= 5000);
+});
+
 test('publisher updates only a matching public video, with no visibility update', async () => {
   const row = item();
   const events = [];
@@ -117,6 +134,101 @@ test('publisher does not edit private or newly unlisted videos', async () => {
   assert.equal(updates, 0);
 });
 
+test('publisher does not change an active public livestream', async () => {
+  const row = item();
+  let updated = false;
+  let outcome;
+  const publisher = createSeoPublisher({
+    store: {
+      getSeoVideo: async () => row,
+      getSeoSyncState: async () => ({ channelId: 'channel-1' }),
+      markSeoAutoResult: async (_id, result) => { outcome = result; }
+    },
+    youtube: {
+      ownedChannel: async () => ({ id: 'channel-1' }),
+      assertTargetChannel: async () => {},
+      getVideo: async () => ({
+        snippet: { ...row.source, categoryId: '20', liveBroadcastContent: 'live' },
+        status: { privacyStatus: 'public' }
+      }),
+      updateVideoSeo: async () => { updated = true; }
+    },
+    logger: { warn() {}, info() {} }
+  });
+  await publisher.publishVideo(row.videoId);
+  assert.equal(updated, false);
+  assert.equal(outcome.state, 'retry');
+});
+
+test('publisher rejects a wrong channel, changed metadata, and exhausted daily budget', async () => {
+  const row = item();
+  const cases = [
+    { channelId: 'another-channel', title: row.source.title, budget: 0,
+      reason: /not on the connected channel/, state: 'retry' },
+    { channelId: 'channel-1', title: 'Owner edited this video', budget: 0,
+      reason: /metadata changed/, state: 'skipped' },
+    { channelId: 'channel-1', title: row.source.title, budget: 50,
+      reason: /budget reached/, state: 'retry' }
+  ];
+  for (const value of cases) {
+    let outcome;
+    let updated = false;
+    const publisher = createSeoPublisher({
+      store: {
+        getSeoVideo: async () => row,
+        getSeoSyncState: async () => ({ channelId: 'channel-1' }),
+        seoUpdatesToday: async () => value.budget,
+        markSeoAutoResult: async (_id, result) => { outcome = result; }
+      },
+      youtube: {
+        ownedChannel: async () => ({ id: 'channel-1' }),
+        assertTargetChannel: async () => {},
+        getVideo: async () => ({
+          snippet: { ...row.source, channelId: value.channelId, title: value.title,
+            categoryId: '20', liveBroadcastContent: 'none' },
+          status: { privacyStatus: 'public' }
+        }),
+        updateVideoSeo: async () => { updated = true; }
+      },
+      logger: { warn() {}, info() {} }
+    });
+    await publisher.publishVideo(row.videoId);
+    assert.equal(updated, false);
+    assert.match(outcome.reason, value.reason);
+    assert.equal(outcome.state, value.state);
+  }
+});
+
+test('publisher respects an already applied package and retries temporary API failures', async () => {
+  const row = item();
+  let calls = 0;
+  let result;
+  const store = {
+    getSeoVideo: async () => row,
+    getSeoSyncState: async () => ({ channelId: 'channel-1' }),
+    markSeoAutoResult: async (_id, value) => { result = value; }
+  };
+  const youtube = {
+    ownedChannel: async () => ({ id: 'channel-1' }),
+    assertTargetChannel: async () => {},
+    getVideo: async () => ({ snippet: { ...row.source, categoryId: '20' },
+      status: { privacyStatus: 'public' } }),
+    updateVideoSeo: async () => {
+      calls += 1;
+      const error = new Error('YouTube temporarily unavailable');
+      error.status = 503;
+      throw error;
+    }
+  };
+  const publisher = createSeoPublisher({ store, youtube, logger: { warn() {}, info() {} } });
+  await publisher.publishVideo(row.videoId);
+  assert.equal(result.state, 'retry');
+  assert.equal(calls, 1);
+  row.autoResult = { state: 'applied', packageGeneratedAt: row.generatedAt };
+  await publisher.publishVideo(row.videoId);
+  assert.equal(calls, 1);
+});
+
 test('channel keywords derive from analyzed public videos and retain existing description', async () => {
   const publicRow = item();
   const privateRow = item({ source: { ...item().source, privacyStatus: 'private' },
@@ -168,4 +280,17 @@ test('worker requeues one older public package for footage analysis when Gemini 
   state.videoAnalysisBlockedUntil = new Date(Date.now() + 3600000).toISOString();
   await worker.run();
   assert.equal(queued, 1);
+});
+
+test('automatic publishing requires the explicit owner-approved setting', async () => {
+  const store = {
+    listSeoAutoCandidates: async () => [],
+    getSeoSyncState: async () => ({ enabled: true }),
+    seoCounts: async () => ({ statuses: {}, attemptedToday: 0 })
+  };
+  const youtube = { updateVideoSeo: async () => {} };
+  for (const [setting, expected] of [[undefined, false], ['false', false], ['true', true]]) {
+    const worker = createSeoWorker({ store, youtube, env: { SEO_AUTO_PUBLISH: setting } });
+    assert.equal((await worker.status()).autoPublishEnabled, expected);
+  }
 });
