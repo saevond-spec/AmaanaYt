@@ -161,6 +161,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       }
       // Process the available daily budget even if scheduled wake-ups were delayed.
       const remaining = Math.max(0, dailyLimit - counts.attemptedToday);
+      let channelUpdatedAfterPublish = false;
       for (let index = 0; index < remaining; index += 1) {
         const job = await store.claimSeoVideo();
         if (!job) break;
@@ -187,8 +188,15 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           });
           await store.finishSeoVideo(job.videoId, job.claimToken, generated, null);
           logger.info?.(`SEO package ${job.videoId} generated: ${generated.missingEvidence.length ? 'needs_review' : 'ready'}`);
-          if (publisher) await publisher.publishVideo(job.videoId)
-            .catch((error) => logger.warn?.(`SEO auto publish ${job.videoId} failed:`, error.message));
+          if (publisher) {
+            const outcome = await publisher.publishVideo(job.videoId)
+              .catch((error) => { logger.warn?.(`SEO auto publish ${job.videoId} failed:`, error.message); });
+            if (outcome?.state === 'applied' && !channelUpdatedAfterPublish) {
+              await publisher.updateChannel()
+                .catch((error) => logger.warn?.('SEO channel update failed:', error.message));
+              channelUpdatedAfterPublish = true;
+            }
+          }
           if (state.providerBlockedUntil || state.consecutive503s) {
             state.providerBlockedUntil = null;
             state.providerError = null;

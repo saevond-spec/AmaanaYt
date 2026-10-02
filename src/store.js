@@ -248,6 +248,16 @@ async function listSeoVideos(limit = 50, offset = 0) {
   return result.rows;
 }
 
+async function listSeoChannelCandidates(limit = 100) {
+  await init();
+  const result = await pool.query(`SELECT p.video_id AS "videoId", p.source, p.context, p.package,
+    a.analysis FROM amaana_seo_packages p
+    LEFT JOIN amaana_video_analysis a ON a.video_id = p.video_id
+    WHERE p.source->>'privacyStatus' = 'public' AND p.package IS NOT NULL
+    ORDER BY p.generated_at DESC NULLS LAST LIMIT $1`, [Math.min(100, Math.max(1, limit))]);
+  return result.rows;
+}
+
 async function getVideoAnalysis(videoId) {
   await init();
   const result = await pool.query(`SELECT analysis, model, analyzed_at AS "analyzedAt"
@@ -381,6 +391,7 @@ module.exports = {
   upsertSeoVideo,
   getSeoVideo,
   listSeoVideos,
+  listSeoChannelCandidates,
   getVideoAnalysis,
   saveVideoAnalysis,
   seoCounts,
