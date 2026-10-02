@@ -290,7 +290,8 @@ async function claimSeoVideo() {
   const token = crypto.randomUUID();
   const result = await pool.query(`WITH candidate AS (
       SELECT video_id FROM amaana_seo_packages
-      WHERE ((status IN ('queued', 'retry') AND (next_attempt_at IS NULL OR next_attempt_at <= NOW()))
+      WHERE source->>'privacyStatus' = 'public'
+        AND ((status IN ('queued', 'retry') AND (next_attempt_at IS NULL OR next_attempt_at <= NOW()))
         OR (status = 'generating' AND claimed_at < NOW() - INTERVAL '20 minutes'))
       ORDER BY (source->>'publishedAt') DESC NULLS LAST, created_at ASC
       LIMIT 1 FOR UPDATE SKIP LOCKED
