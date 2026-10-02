@@ -217,6 +217,34 @@ async function getSeoSyncState() {
   return result.rows[0]?.value || { cursor: null, completed: false, enabled: true };
 }
 
+async function getSeoMarketSnapshot(game) {
+  await init();
+  const result = await pool.query('SELECT value FROM amaana_state WHERE key = $1',
+    [`seo_market_${game.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`]);
+  return result.rows[0]?.value || null;
+}
+
+async function saveSeoMarketSnapshot(game, snapshot) {
+  await init();
+  await pool.query(`INSERT INTO amaana_state (key, value, updated_at) VALUES ($1, $2::jsonb, NOW())
+    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+  [`seo_market_${game.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`, JSON.stringify(snapshot)]);
+}
+
+async function getSeoMarketBudget() {
+  await init();
+  const result = await pool.query("SELECT value FROM amaana_state WHERE key = 'seo_market_budget'");
+  return result.rows[0]?.value || null;
+}
+
+async function saveSeoMarketBudget(budget) {
+  await init();
+  await pool.query(`INSERT INTO amaana_state (key, value, updated_at)
+    VALUES ('seo_market_budget', $1::jsonb, NOW())
+    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+  [JSON.stringify(budget)]);
+}
+
 async function upsertSeoVideo(videoId, source) {
   await init();
   // Catalog rescans refresh metadata, while preserving any owner context or completed package.
@@ -388,6 +416,10 @@ module.exports = {
   claimTikTokDelivery,
   saveSeoSyncState,
   getSeoSyncState,
+  getSeoMarketSnapshot,
+  saveSeoMarketSnapshot,
+  getSeoMarketBudget,
+  saveSeoMarketBudget,
   upsertSeoVideo,
   getSeoVideo,
   listSeoVideos,
