@@ -248,19 +248,36 @@ async function recentGameVideos(game, { now = Date.now() } = {}) {
 async function enablePublicBroadcastAds(broadcast) {
   if (!broadcast?.etag || broadcast.status?.privacyStatus !== 'public' ||
       broadcast.monetizationDetails?.eligibleForAdsMonetization !== true ||
-      !['created', 'ready', 'testing', 'live'].includes(broadcast.status?.lifeCycleStatus)) {
-    throw new Error('Broadcast is not a versioned, eligible public upcoming or live event');
+      !['created', 'ready', 'testing', 'live'].includes(broadcast.status?.lifeCycleStatus) ||
+      !broadcast.snippet?.title || !broadcast.snippet?.scheduledStartTime ||
+      !broadcast.snippet?.categoryId || !broadcast.contentDetails?.monitorStream) {
+    throw new Error('Broadcast is not versioned, eligible, public, active, or has incomplete required metadata');
   }
   if (broadcast.monetizationDetails.adsMonetizationStatus === 'on') return broadcast;
   const youtube = await service();
   const schedule = broadcast.monetizationDetails.cuepointSchedule;
-  const monetizationDetails = { adsMonetizationStatus: 'on' };
-  if (schedule) monetizationDetails.cuepointSchedule = schedule;
+  const monetizationDetails = { adsMonetizationStatus: 'on',
+    cuepointSchedule: schedule ? {
+      enabled: schedule.enabled === true,
+      ...(schedule.enabled === true && schedule.ytOptimizedCuepointConfig != null ?
+        { ytOptimizedCuepointConfig: schedule.ytOptimizedCuepointConfig } : {}),
+      ...(schedule.enabled === true && schedule.creatorCuepointConfig ?
+        { creatorCuepointConfig: schedule.creatorCuepointConfig } : {}),
+      ...(schedule.enabled === true && schedule.pauseAdsUntil ?
+        { pauseAdsUntil: schedule.pauseAdsUntil } : {})
+    } : { enabled: false } };
+  const snippet = {
+    title: broadcast.snippet.title,
+    description: broadcast.snippet.description || '',
+    categoryId: broadcast.snippet.categoryId,
+    scheduledStartTime: broadcast.snippet.scheduledStartTime
+  };
+  if (broadcast.snippet.scheduledEndTime) snippet.scheduledEndTime = broadcast.snippet.scheduledEndTime;
   const response = await youtube.liveBroadcasts.update({
-    part: ['monetizationDetails'],
+    part: ['snippet', 'monetizationDetails'],
     requestBody: {
       id: broadcast.id,
-      snippet: { scheduledStartTime: broadcast.snippet.scheduledStartTime },
+      snippet,
       contentDetails: { monitorStream: {
         enableMonitorStream: broadcast.contentDetails?.monitorStream?.enableMonitorStream ?? false,
         broadcastStreamDelayMs: broadcast.contentDetails?.monitorStream?.broadcastStreamDelayMs ?? 0
