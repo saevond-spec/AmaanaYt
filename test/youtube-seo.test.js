@@ -92,3 +92,67 @@ test('channel update retains supported branding fields and rejects a stale chann
   });
   assert.equal(request.options.headers['If-Match'], '"channel-etag"');
 });
+
+test('public broadcast ads update only monetization details with the current version', async (t) => {
+  const oldYoutube = google.youtube;
+  const oldTokens = store.getTokens;
+  const oldBaseUrl = process.env.BASE_URL;
+  t.after(() => { google.youtube = oldYoutube; store.getTokens = oldTokens;
+    process.env.BASE_URL = oldBaseUrl; });
+  process.env.BASE_URL = 'https://amaana.example.test';
+  store.getTokens = async () => ({ access_token: 'unit-test', expiry_date: Date.now() + 3600000 });
+  let request;
+  google.youtube = () => ({ liveBroadcasts: { update: async (params, options) => {
+    request = { params, options };
+    return { data: { monetizationDetails: { adsMonetizationStatus: 'on' } } };
+  } } });
+  const current = { id: 'live-1', etag: '"broadcast-etag"',
+    snippet: { channelId: 'channel-1', scheduledStartTime: '2026-10-02T12:00:00Z' },
+    status: { privacyStatus: 'public', lifeCycleStatus: 'live' },
+    contentDetails: { monitorStream: { enableMonitorStream: false, broadcastStreamDelayMs: 0 } },
+    monetizationDetails: { adsMonetizationStatus: 'off', eligibleForAdsMonetization: true,
+      cuepointSchedule: { enabled: true, ytOptimizedCuepointConfig: 'MEDIUM' } }
+  };
+  await assert.rejects(youtube.enablePublicBroadcastAds({ ...current,
+    status: { privacyStatus: 'private', lifeCycleStatus: 'live' } }), /eligible public/);
+  assert.equal(request, undefined);
+  await youtube.enablePublicBroadcastAds(current);
+  assert.deepEqual(request.params.part, ['monetizationDetails']);
+  assert.equal(Object.hasOwn(request.params.requestBody, 'status'), false);
+  assert.deepEqual(request.params.requestBody.monetizationDetails, {
+    adsMonetizationStatus: 'on',
+    cuepointSchedule: { enabled: true, ytOptimizedCuepointConfig: 'MEDIUM' }
+  });
+  assert.equal(request.options.headers['If-Match'], current.etag);
+});
+
+test('market search keeps only recently published public videos and their observed views', async (t) => {
+  const oldYoutube = google.youtube;
+  const oldTokens = store.getTokens;
+  const oldBaseUrl = process.env.BASE_URL;
+  t.after(() => { google.youtube = oldYoutube; store.getTokens = oldTokens;
+    process.env.BASE_URL = oldBaseUrl; });
+  process.env.BASE_URL = 'https://amaana.example.test';
+  store.getTokens = async () => ({ access_token: 'unit-test', expiry_date: Date.now() + 3600000 });
+  let query;
+  google.youtube = () => ({
+    search: { list: async (params) => {
+      query = params;
+      return { data: { items: [{ id: { videoId: 'public-1' } },
+        { id: { videoId: 'private-1' } }, { id: { videoId: 'public-2' } }] } };
+    } },
+    videos: { list: async () => ({ data: { items: [
+      { id: 'public-1', snippet: { title: 'Gameplay A', publishedAt: '2026-10-01T00:00:00Z', channelId: 'other' },
+        statistics: { viewCount: '100' }, status: { privacyStatus: 'public' } },
+      { id: 'private-1', snippet: { title: 'Hidden', publishedAt: '2026-10-01T00:00:00Z' },
+        statistics: { viewCount: '9999' }, status: { privacyStatus: 'private' } },
+      { id: 'public-2', snippet: { title: 'Gameplay B', publishedAt: '2026-10-01T00:00:00Z', channelId: 'other' },
+        statistics: { viewCount: '500' }, status: { privacyStatus: 'public' } }
+    ] } }) }
+  });
+  const items = await youtube.recentGameVideos('ARC Raiders', { now: Date.parse('2026-10-02T12:00:00Z') });
+  assert.equal(query.q, 'ARC Raiders gameplay');
+  assert.equal(query.type, 'video');
+  assert.equal(query.publishedAfter, '2026-09-25T12:00:00.000Z');
+  assert.deepEqual(items.map((item) => item.id), ['public-2', 'public-1']);
+});
