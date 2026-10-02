@@ -96,6 +96,11 @@ async function getVideo(videoId) {
 }
 
 async function updateVideoSeo(videoId, video, edit) {
+  if (!video.etag) {
+    const error = new Error('YouTube did not return a video version; refresh before saving');
+    error.status = 409;
+    throw error;
+  }
   const youtube = await service();
   // A snippet update replaces its mutable fields; keep the category and language.
   const snippet = {
@@ -105,7 +110,7 @@ async function updateVideoSeo(videoId, video, edit) {
   if (video.snippet.defaultLanguage) snippet.defaultLanguage = video.snippet.defaultLanguage;
   const response = await youtube.videos.update({
     part: ['snippet'], requestBody: { id: videoId, snippet }
-  }, video.etag ? { headers: { 'If-Match': video.etag } } : {});
+  }, { headers: { 'If-Match': video.etag } });
   return response.data;
 }
 
@@ -146,6 +151,11 @@ async function updateChannelSeo(expected, edit) {
     error.status = 409;
     throw error;
   }
+  if (!current.etag) {
+    const error = new Error('YouTube did not return a channel version; refresh before saving');
+    error.status = 409;
+    throw error;
+  }
   const allowed = ['title', 'description', 'keywords', 'trackingAnalyticsAccountId',
     'unsubscribedTrailer', 'defaultLanguage', 'country'];
   const channel = Object.fromEntries(allowed.filter((name) => current.brandingChannel[name] !== undefined)
@@ -157,7 +167,7 @@ async function updateChannelSeo(expected, edit) {
   await youtube.channels.update({
     part: ['brandingSettings'],
     requestBody: { id: current.id, brandingSettings: { channel } }
-  }, current.etag ? { headers: { 'If-Match': current.etag } } : {});
+  }, { headers: { 'If-Match': current.etag } });
   return { id: current.id, title: current.title, ...edit };
 }
 
