@@ -166,6 +166,7 @@ function createSeoPublisher({ store, youtube, logger = console }) {
 
   async function publishPending(limit = 20) {
     const candidates = await store.listSeoAutoCandidates(limit);
+    logger.info?.(`SEO public publish candidates: ${candidates.length}`);
     for (const candidate of candidates) await publishVideo(candidate.videoId);
   }
 
@@ -180,6 +181,8 @@ function createSeoPublisher({ store, youtube, logger = console }) {
     if (edit) {
       await youtube.updateChannelSeo(channel, edit);
       logger.info?.(`SEO channel keywords updated for ${channel.id}`);
+    } else {
+      logger.info?.(`SEO channel unchanged for ${channel.id}: no new grounded keywords`);
     }
   }
 
