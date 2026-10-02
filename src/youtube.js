@@ -86,6 +86,18 @@ async function publish(videoId, publishAt) {
   return response.data;
 }
 
+async function setThumbnail(videoId, filePath) {
+  if (!/^[A-Za-z0-9_-]{11}$/.test(String(videoId || ''))) {
+    throw new Error('A valid YouTube video ID is required to set its thumbnail');
+  }
+  const youtube = await service();
+  const response = await youtube.thumbnails.set({
+    videoId,
+    media: { mimeType: 'image/jpeg', body: fs.createReadStream(filePath) }
+  });
+  return response.data;
+}
+
 async function getVideo(videoId) {
   const youtube = await service();
   const response = await youtube.videos.list({
@@ -299,7 +311,7 @@ async function enablePublicBroadcastAds(broadcast) {
   return response.data;
 }
 
-module.exports = { isConnected, canApprove, authorizationUrl, exchangeCode, uploadPrivate, publish,
+module.exports = { isConnected, canApprove, authorizationUrl, exchangeCode, uploadPrivate, setThumbnail, publish,
   getVideo, updateVideoSeo, channelSeo, updateChannelSeo, assertTargetChannel,
   getVideoViews, ownedChannel, uploadsPage, videoMetadata,
   listOwnedBroadcasts, enablePublicBroadcastAds, recentGameVideos };
