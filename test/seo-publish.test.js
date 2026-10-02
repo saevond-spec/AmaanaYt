@@ -241,7 +241,8 @@ test('channel keywords derive from analyzed public videos and retain existing de
   const publisher = createSeoPublisher({
     store: {
       getSeoSyncState: async () => ({ channelId: 'channel-1' }),
-      listSeoVideos: async () => [publicRow, privateRow]
+      listSeoChannelCandidates: async () => [publicRow, privateRow],
+      listSeoVideos: async () => { throw new Error('Channel should use public package candidates'); }
     },
     youtube: {
       channelSeo: async () => ({ title: 'Saevond', description: 'Existing channel identity.',
@@ -318,7 +319,9 @@ test('worker analyzes a public upload, publishes its SEO, and updates channel ke
     saveSeoSyncState: async (state) => { sync = state; },
     listSeoAutoCandidates: async () => [...rows.values()].filter((row) =>
       row.package && row.source.privacyStatus === 'public' && !row.autoResult),
-    listSeoVideos: async () => [...rows.values()],
+    listSeoChannelCandidates: async () => [...rows.values()].filter((row) =>
+      row.source.privacyStatus === 'public' && row.package),
+    listSeoVideos: async () => { throw new Error('Channel should use public package candidates'); },
     getSeoVideo: async (id) => rows.get(id),
     getVideoAnalysis: async () => null,
     saveVideoAnalysis: async (id, analysis) => { rows.get(id).analysis = analysis; },
