@@ -5,8 +5,7 @@ const {
   buildHighlightTimeline,
   buildHighlightDescription
 } = require('../src/highlight-metadata');
-const { thumbnailHeadline, thumbnailFilter } = require('../src/video');
-const { createThumbnail } = require('../src/video');
+const { thumbnailHeadline, thumbnailOverlay, createThumbnail } = require('../src/video');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
@@ -47,12 +46,11 @@ test('invalid clip durations or VOD identifiers are rejected', () => {
 });
 
 test('thumbnail headline is brief and safe for a high-contrast overlay', () => {
-  assert.equal(thumbnailHeadline('💀 Insane parries! In Songbird Arena'), 'INSANE PARRIES IN SONGBIRD');
+  assert.equal(thumbnailHeadline('💀 Insane parry! Final exchange'), 'INSANE PARRY FINAL');
   assert.equal(thumbnailHeadline(''), 'SAEVOND HIGHLIGHT');
-  const filter = thumbnailFilter('CLUTCH: Final Exchange');
-  assert.match(filter, /scale=1280:720/);
-  assert.match(filter, /drawbox=.*drawtext=/);
-  assert.doesNotMatch(filter, /CLUTCH:/);
+  const overlay = thumbnailOverlay('CLUTCH: Final Exchange');
+  assert.equal(overlay.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+  assert.doesNotMatch(thumbnailHeadline('CLUTCH: Final Exchange'), /:/);
 });
 
 
