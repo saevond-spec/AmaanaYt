@@ -8,6 +8,12 @@ For new Twitch highlight batches, Amaana derives moment timestamps from FFmpeg-m
 
 Generated Shorts can also be sent to the creator's TikTok inbox **one at a time after the creator previews and consents to each transfer**. The creator edits and completes each post in the TikTok app. TikTok delivery does not happen automatically at stream end.
 
+## Five-year capacity simulation
+
+Run `npm run simulate:five-years` to estimate pipeline volume, SEO analysis backlog, safe write throughput, and YouTube API quota use over five years. The default scenario assumes one six-hour Twitch VOD per day, three selected moments per VOD, and a 1,000-video public-library stress cohort with 30% missing analysis. These are adjustable load-test assumptions, not channel measurements.
+
+The simulator forecasts operational capacity only; it does not predict views, revenue, or ranking. Set `SIM_START_DATE`, `SIM_STREAMS_PER_DAY`, `SIM_HOURS_PER_STREAM`, `SIM_MOMENTS_PER_STREAM`, `SIM_PUBLIC_VIDEO_COHORT`, and `SIM_MISSING_ANALYSIS_SHARE` to model another scenario. Quota inputs follow YouTube's published method costs and default daily allowance; actual project quota can differ.
+
 ## Security model
 
 - Google passwords are never collected.
