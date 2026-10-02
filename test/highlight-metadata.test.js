@@ -6,6 +6,12 @@ const {
   buildHighlightDescription
 } = require('../src/highlight-metadata');
 const { thumbnailHeadline, thumbnailFilter } = require('../src/video');
+const { createThumbnail } = require('../src/video');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
+const ffmpegPath = require('ffmpeg-static');
 
 test('measured segment lengths produce verified chapter timestamps from zero', () => {
   const timeline = buildHighlightTimeline([
@@ -47,4 +53,31 @@ test('thumbnail headline is brief and safe for a high-contrast overlay', () => {
   assert.match(filter, /scale=1280:720/);
   assert.match(filter, /drawbox=.*drawtext=/);
   assert.doesNotMatch(filter, /CLUTCH:/);
+});
+
+
+test('thumbnail generation renders a JPEG from an actual video frame', { timeout: 30000 }, async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'amaana-thumbnail-'));
+  const source = path.join(directory, 'source.mp4');
+  const output = path.join(directory, 'thumbnail.jpg');
+  try {
+    await new Promise((resolve, reject) => {
+      const child = spawn(ffmpegPath, [
+        '-y', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=25',
+        '-t', '1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', source
+      ], { stdio: ['ignore', 'ignore', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-2000); });
+      child.on('error', reject);
+      child.on('close', (code) => code === 0
+        ? resolve()
+        : reject(new Error('FFmpeg test fixture failed: ' + stderr)));
+    });
+    await createThumbnail(source, output, { timestampSeconds: 0.4, headline: 'FINAL CLUTCH' });
+    const image = await fs.readFile(output);
+    assert.equal(image.subarray(0, 2).toString('hex'), 'ffd8');
+    assert.ok(image.length > 1000);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 });
