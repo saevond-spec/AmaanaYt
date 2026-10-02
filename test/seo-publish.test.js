@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { auditVideo, automaticVideoEdit, channelSuggestions, channelEdit,
   createSeoPublisher } = require('../src/seo-publish');
+const { createSeoWorker } = require('../src/seo-worker');
 
 function item(overrides = {}) {
   return {
@@ -140,4 +141,31 @@ test('channel keywords derive from analyzed public videos and retain existing de
   });
   await publisher.updateChannel();
   assert.deepEqual(saved, edit);
+});
+
+test('worker requeues one older public package for footage analysis when Gemini is available', async () => {
+  let queued = 0;
+  const state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
+    completed: true, enabled: true };
+  const store = {
+    getSeoSyncState: async () => state,
+    saveSeoSyncState: async () => {},
+    nextSeoNeedsAnalysis: async () => ({ videoId: 'abcdefghijk', context: {} }),
+    updateSeoContext: async () => { queued += 1; },
+    seoCounts: async () => ({ attemptedToday: 1 })
+  };
+  const youtube = {
+    isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Saevond', uploads: 'uploads-1' })
+  };
+  const worker = createSeoWorker({ store, youtube, env: {
+    ENABLE_VIDEO_ANALYSIS: 'true', SEO_AI_API_KEY: 'test', SEO_AI_MODEL: 'gemini-model',
+    SEO_AI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    SEO_DAILY_LIMIT: '1'
+  }, logger: { info() {}, error() {} } });
+  await worker.run();
+  assert.equal(queued, 1);
+  state.videoAnalysisBlockedUntil = new Date(Date.now() + 3600000).toISOString();
+  await worker.run();
+  assert.equal(queued, 1);
 });
