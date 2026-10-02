@@ -11,6 +11,9 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   let lastDiagnostic = null;
   const configuredLimit = Number(env.SEO_DAILY_LIMIT);
   const dailyLimit = Number.isSafeInteger(configuredLimit) && configuredLimit >= 1 ? configuredLimit : 200;
+  const configuredAnalysisBatch = Number(env.SEO_ANALYSIS_BATCH_SIZE);
+  const analysisBatchSize = Number.isSafeInteger(configuredAnalysisBatch) && configuredAnalysisBatch >= 1
+    ? Math.min(50, configuredAnalysisBatch) : 20;
   const circuitBreaker = createModelCircuitBreaker();
   const analysisCircuitBreaker = createModelCircuitBreaker();
   const analysisEnabled = env.ENABLE_VIDEO_ANALYSIS === 'true';
@@ -140,12 +143,13 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       if (state.enabled !== false && analysisEnabled && env.SEO_AI_API_KEY && env.SEO_AI_MODEL &&
           (env.VIDEO_ANALYSIS_API_KEY || gemini) &&
           !(Date.parse(state.videoAnalysisBlockedUntil) > Date.now()) &&
-          typeof store.nextSeoNeedsAnalysis === 'function') {
-        const candidate = await store.nextSeoNeedsAnalysis();
-        if (candidate) {
-          await store.updateSeoContext(candidate.videoId, candidate.context);
-          logger.info?.(`Requeued public video ${candidate.videoId} for footage analysis`);
+          typeof store.listSeoNeedsAnalysis === 'function') {
+        const candidates = await store.listSeoNeedsAnalysis(analysisBatchSize);
+        let requeued = 0;
+        for (const candidate of candidates || []) {
+          if (await store.updateSeoContext(candidate.videoId, candidate.context)) requeued += 1;
         }
+        if (requeued) logger.info?.('Requeued ' + requeued + ' public videos for footage analysis');
       }
       if (!env.SEO_AI_API_KEY || !env.SEO_AI_MODEL || state.enabled === false) return;
       const counts = await store.seoCounts();
@@ -273,7 +277,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
 
   async function status() {
     const [state, counts] = await Promise.all([store.getSeoSyncState(), store.seoCounts()]);
-    return { ...state, ...counts, dailyLimit, videoAnalysisEnabled: analysisEnabled,
+    return { ...state, ...counts, dailyLimit, analysisBatchSize, videoAnalysisEnabled: analysisEnabled,
       providerConfigured: Boolean(env.SEO_AI_API_KEY && env.SEO_AI_MODEL), autoPublishEnabled,
       running };
   }
