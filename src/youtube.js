@@ -215,6 +215,66 @@ async function getVideoViews(videoIds) {
   return response.data.items || [];
 }
 
+async function listOwnedBroadcasts() {
+  const youtube = await service();
+  const response = await youtube.liveBroadcasts.list({
+    part: ['snippet', 'status', 'contentDetails', 'monetizationDetails'],
+    mine: true, broadcastType: 'all', maxResults: 50
+  });
+  return response.data.items || [];
+}
+
+async function recentGameVideos(game, { now = Date.now() } = {}) {
+  const youtube = await service();
+  const response = await youtube.search.list({
+    part: ['snippet'], type: 'video', q: `${game} gameplay`, order: 'viewCount',
+    publishedAfter: new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString(),
+    maxResults: 10
+  });
+  const ids = (response.data.items || []).map((item) => item.id?.videoId).filter(Boolean);
+  if (!ids.length) return [];
+  const details = await youtube.videos.list({
+    part: ['snippet', 'statistics', 'status'], id: ids,
+    fields: 'items(id,snippet(title,publishedAt,channelId),statistics(viewCount),status(privacyStatus))'
+  });
+  return (details.data.items || []).filter((item) => item.status?.privacyStatus === 'public' &&
+    item.snippet?.publishedAt && Number.isSafeInteger(Number(item.statistics?.viewCount)))
+    .map((item) => ({ id: item.id, title: String(item.snippet.title || '').slice(0, 150),
+      channelId: item.snippet.channelId, publishedAt: item.snippet.publishedAt,
+      viewCount: Number(item.statistics.viewCount) }))
+    .sort((left, right) => right.viewCount - left.viewCount);
+}
+
+async function enablePublicBroadcastAds(broadcast) {
+  if (!broadcast?.etag || broadcast.status?.privacyStatus !== 'public' ||
+      broadcast.monetizationDetails?.eligibleForAdsMonetization !== true ||
+      !['created', 'ready', 'testing', 'live'].includes(broadcast.status?.lifeCycleStatus)) {
+    throw new Error('Broadcast is not a versioned, eligible public upcoming or live event');
+  }
+  if (broadcast.monetizationDetails.adsMonetizationStatus === 'on') return broadcast;
+  const youtube = await service();
+  const schedule = broadcast.monetizationDetails.cuepointSchedule;
+  const monetizationDetails = { adsMonetizationStatus: 'on' };
+  if (schedule) monetizationDetails.cuepointSchedule = schedule;
+  const response = await youtube.liveBroadcasts.update({
+    part: ['monetizationDetails'],
+    requestBody: {
+      id: broadcast.id,
+      snippet: { scheduledStartTime: broadcast.snippet.scheduledStartTime },
+      contentDetails: { monitorStream: {
+        enableMonitorStream: broadcast.contentDetails?.monitorStream?.enableMonitorStream ?? false,
+        broadcastStreamDelayMs: broadcast.contentDetails?.monitorStream?.broadcastStreamDelayMs ?? 0
+      } },
+      monetizationDetails
+    }
+  }, { headers: { 'If-Match': broadcast.etag } });
+  if (response.data?.monetizationDetails?.adsMonetizationStatus !== 'on') {
+    throw new Error('YouTube did not confirm broadcast ads are on');
+  }
+  return response.data;
+}
+
 module.exports = { isConnected, canApprove, authorizationUrl, exchangeCode, uploadPrivate, publish,
   getVideo, updateVideoSeo, channelSeo, updateChannelSeo, assertTargetChannel,
-  getVideoViews, ownedChannel, uploadsPage, videoMetadata };
+  getVideoViews, ownedChannel, uploadsPage, videoMetadata,
+  listOwnedBroadcasts, enablePublicBroadcastAds, recentGameVideos };
