@@ -100,8 +100,8 @@ function thumbnailHeadline(title) {
   for (const word of words) {
     if (selected.length >= 4) break;
     const candidate = selected.concat(word).join(' ');
-    if (candidate.length > 24) {
-      if (!selected.length) selected.push(Array.from(word).slice(0, 24).join(''));
+    if (candidate.length > 28) {
+      if (!selected.length) selected.push(Array.from(word).slice(0, 28).join(''));
       break;
     }
     selected.push(word);
