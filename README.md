@@ -8,6 +8,14 @@ For new Twitch highlight batches, Amaana derives moment timestamps from FFmpeg-m
 
 Generated Shorts can also be sent to the creator's TikTok inbox **one at a time after the creator previews and consents to each transfer**. The creator edits and completes each post in the TikTok app. TikTok delivery does not happen automatically at stream end.
 
+Amaana can list and create the channel's YouTube playlists and add a video from a private draft or the public SEO catalog after an owner action. New playlists default to private. Private and unlisted videos can only be added to private playlists; adding an item never changes video visibility.
+
+## Five-year capacity simulation
+
+Run `npm run simulate:five-years` to estimate pipeline volume, SEO analysis backlog, safe write throughput, and YouTube API quota use over five years. The default scenario assumes one six-hour Twitch VOD per day, three selected moments per VOD, and a 1,000-video public-library stress cohort with 30% missing analysis. These are adjustable load-test assumptions, not channel measurements.
+
+The simulator forecasts operational capacity only; it does not predict views, revenue, or ranking. Set `SIM_START_DATE`, `SIM_STREAMS_PER_DAY`, `SIM_HOURS_PER_STREAM`, `SIM_MOMENTS_PER_STREAM`, `SIM_PUBLIC_VIDEO_COHORT`, and `SIM_MISSING_ANALYSIS_SHARE` to model another scenario. Quota inputs follow YouTube's published method costs and default daily allowance; actual project quota can differ.
+
 ## Security model
 
 - Google passwords are never collected.
@@ -178,6 +186,14 @@ Copy `skills/youtube-manager` into the OpenClaw skills directory and configure:
 Do not give OpenClaw `ADMIN_KEY`.
 
 ## API workflow
+
+### Automatic playlists
+
+Amaana compares each video's title, description, tags, and owner-entered topic fields with the titles and descriptions of playlists owned by the connected channel. A confident match is added automatically. If multiple playlists match equally or the metadata is too broad, the video stays unassigned. It does not create playlists automatically; create the right series playlists in the dashboard first.
+
+New private uploads and Twitch highlights are assigned only to private playlists while they remain drafts. Existing public catalog videos are processed from YouTube metadata; public videos prefer public playlists, with a matching private or unlisted playlist as a fallback. Existing private and unlisted videos are not scanned or changed. Playlist assignment never changes a video's visibility. Creating a new public playlist makes previously unmatched public catalog videos eligible for another pass.
+
+**YOUTUBE_AUTO_PLAYLISTS** defaults to true. **YOUTUBE_AUTO_PLAYLIST_DAILY_LIMIT** defaults to 20 assignment attempts per YouTube quota day (midnight Pacific) for public videos and 20 for private/unlisted videos; each group is capped at 20. **YOUTUBE_AUTO_PLAYLIST_BATCH_SIZE** defaults to 20 public videos per worker pass. Disable automatic placement with **YOUTUBE_AUTO_PLAYLISTS=false**. The five-year simulator includes one playlist-item duplicate check and all 20 possible owned-playlist pages for each assignment, plus the insert unit cost.
 
 ### SEO packages for every channel upload
 

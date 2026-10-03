@@ -1,6 +1,7 @@
 const fs = require('fs');
 const { google } = require('googleapis');
 const store = require('./store');
+const { createYouTubePlaylistClient } = require('./youtube-playlists');
 
 const SCOPES = [
   'https://www.googleapis.com/auth/youtube.upload',
@@ -59,6 +60,8 @@ async function service() {
   }
   return google.youtube({ version: 'v3', auth: client });
 }
+
+const playlistClient = createYouTubePlaylistClient(service);
 
 async function uploadPrivate({ filePath, title, description, tags, madeForKids = false }) {
   const youtube = await service();
@@ -314,4 +317,7 @@ async function enablePublicBroadcastAds(broadcast) {
 module.exports = { isConnected, canApprove, authorizationUrl, exchangeCode, uploadPrivate, setThumbnail, publish,
   getVideo, updateVideoSeo, channelSeo, updateChannelSeo, assertTargetChannel,
   getVideoViews, ownedChannel, uploadsPage, videoMetadata,
-  listOwnedBroadcasts, enablePublicBroadcastAds, recentGameVideos };
+  listOwnedBroadcasts, enablePublicBroadcastAds, recentGameVideos,
+  listOwnedPlaylists: playlistClient.listOwnedPlaylists,
+  createPlaylist: playlistClient.createPlaylist,
+  addVideoToPlaylist: playlistClient.addVideoToPlaylist };

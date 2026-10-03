@@ -555,3 +555,29 @@ test('a new fallback gets one probe during cooldown, then respects the pause', a
     global.fetch = originalFetch;
   }
 });
+
+test('analysis backfill queues a bounded batch of public videos in one run', async () => {
+  const candidates = Array.from({ length: 8 }, (_value, index) => ({
+    videoId: 'public-' + index, context: { takeaways: '' }
+  }));
+  const queued = [];
+  let requestedLimit = 0;
+  const store = {
+    getSeoSyncState: async () => ({ channelId: 'channel-1', recentAt: new Date().toISOString(),
+      completed: true, enabled: true }),
+    seoCounts: async () => ({ attemptedToday: 0 }),
+    listSeoNeedsAnalysis: async (limit) => { requestedLimit = limit; return candidates.slice(0, limit); },
+    updateSeoContext: async (id) => { queued.push(id); return true; },
+    claimSeoVideo: async () => null
+  };
+  const youtube = { isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner' }) };
+  const worker = createSeoWorker({ store, youtube, env: {
+    SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'batch-analysis',
+    ENABLE_VIDEO_ANALYSIS: 'true', VIDEO_ANALYSIS_API_KEY: 'test-video-key',
+    SEO_ANALYSIS_BATCH_SIZE: '5'
+  }, logger: { info() {}, error() {} } });
+  await worker.run();
+  assert.equal(requestedLimit, 5);
+  assert.deepEqual(queued, ['public-0', 'public-1', 'public-2', 'public-3', 'public-4']);
+});

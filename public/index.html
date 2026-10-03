@@ -53,6 +53,30 @@
         <button id="connectButton" class="youtube" type="button">Connect YouTube</button>
       </section>
 
+      <section class="card playlist-section">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">YOUTUBE PLAYLISTS</p>
+            <h2>Organize your videos</h2>
+          </div>
+        </div>
+        <p class="muted">Create playlists and add videos from your drafts or public SEO catalog. Amaana never changes video visibility. Private and unlisted videos can only be added to a private playlist.</p>
+        <div id="playlistList" class="playlist-list"><div class="empty-state">Loading playlists…</div></div>
+        <form id="playlistForm" class="playlist-form">
+          <label for="playlistTitle">New playlist title</label>
+          <input id="playlistTitle" name="title" maxlength="150" required placeholder="ARC Raiders highlights">
+          <label for="playlistDescription">Description (optional)</label>
+          <textarea id="playlistDescription" name="description" rows="3" maxlength="5000" placeholder="What this playlist contains"></textarea>
+          <label for="playlistPrivacy">Playlist visibility</label>
+          <select id="playlistPrivacy" name="privacyStatus">
+            <option value="private" selected>Private</option>
+            <option value="unlisted">Unlisted</option>
+            <option value="public">Public</option>
+          </select>
+          <button id="playlistCreateButton" class="primary full" type="submit">Create playlist</button>
+        </form>
+      </section>
+
       <section class="card connection-card">
         <div>
           <p class="eyebrow">TWITCH VOD CONNECTION</p>
