@@ -65,7 +65,7 @@ test('automatic playlist matching uses specific metadata and respects video priv
   ];
   const match = chooseAutoPlaylist({
     id: 'abcdefghijk', privacyStatus: 'private',
-    title: 'ARC Raiders Clutch Extraction', tags: ['gaming', 'Shorts'],
+    title: 'ARC Raiders Highlights: Clutch Extraction', tags: ['gaming', 'Highlights'],
     description: 'A highlight from this ARC Raiders match.'
   }, playlists);
   assert.equal(match.state, 'matched');
@@ -73,7 +73,7 @@ test('automatic playlist matching uses specific metadata and respects video priv
 
   const ambiguous = chooseAutoPlaylist({
     id: 'abcdefghijk', privacyStatus: 'private', title: 'ARC Raiders',
-    tags: ['gaming']
+    tags: ['gaming', 'Highlights', 'Shorts']
   }, [
     playlists[0],
     { id: 'PL-ARC-SHORTS', title: 'ARC Raiders Shorts', description: '', privacyStatus: 'private' }
