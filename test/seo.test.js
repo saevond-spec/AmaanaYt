@@ -33,7 +33,7 @@ const generated = {
   hook,
   paragraphs: ['A gameplay match with a clear opening and final fight for players.', 'Review the sequence and takeaways before your next match.'],
   tags: ['NARAKA', 'NARAKA BLADEPOINT', 'NARAKA BLADEPOINT guide', 'gameplay', 'match', 'fight',
-    'opening strategy', 'final fight', 'combat tips', 'video game'],
+    'opening strategy', 'final fight'],
   hashtags: ['#NARAKA', '#Gameplay', '#Gaming'],
   pinnedComment: 'Which round stood out to you most?',
   communityPost: 'Watch the final fight in my latest match.',
@@ -64,13 +64,19 @@ test('shorter truthful hooks and focused tags pass, and market provenance is rec
   assert.equal(pkg.tags.length, 3);
 });
 
+test('tag output is capped at eight focused values', () => {
+  assert.throws(() => validatePackage({ ...generated, tags: Array(9).fill('NARAKA') }, source, context),
+    /3–8 focused tags/);
+});
+
 test('live market evidence reaches the prompt as observations without replacing video facts', async () => {
   let prompt;
   await generatePackage(source, context, {
     apiKey: 'unit-test-key', model: 'test-model',
     marketEvidence: { game: 'NARAKA: BLADEPOINT', query: 'NARAKA: BLADEPOINT gameplay',
       observedAt: '2026-10-02T12:00:00Z', windowDays: 7,
-      samples: [{ id: 'sample-1', title: 'NARAKA parry', publishedAt: '2026-10-01T00:00:00Z', viewCount: 400 }] },
+      samples: [{ id: 'sample-1', title: 'NARAKA parry', publishedAt: '2026-10-01T00:00:00Z',
+        viewCount: 400, estimatedViewsPerDay: 400 }] },
     fetchImpl: async (_url, options) => {
       prompt = JSON.parse(options.body).messages[1].content;
       return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) };
@@ -78,6 +84,7 @@ test('live market evidence reaches the prompt as observations without replacing 
   });
   assert.match(prompt, /Market examples are recent public videos, not search demand estimates/);
   assert.match(prompt, /NARAKA parry/);
+  assert.match(prompt, /estimatedViewsPerDay/);
   assert.match(prompt, /Opening, first round, final fight/);
 });
 
