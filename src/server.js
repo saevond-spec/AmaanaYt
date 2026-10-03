@@ -20,6 +20,7 @@ const { buildHighlightTimeline, buildHighlightDescription } = require('./highlig
 const { auditVideo, channelSuggestions, problem } = require('./seo-publish');
 const { createSessionStore } = require('./session-store');
 const { canAddVideoToPlaylist } = require('./youtube-playlists');
+const { createPlaylistAutoAssigner } = require('./playlist-auto');
 
 for (const name of ['BASE_URL', 'DATABASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SESSION_SECRET', 'TOKEN_ENCRYPTION_KEY', 'AGENT_KEY', 'ADMIN_KEY']) {
   if (!process.env[name]) throw new Error(`Missing required environment variable: ${name}`);
@@ -64,8 +65,36 @@ const queuedClipIds = new Set();
 let clipWorkerRunning = false;
 const tiktokJobs = new Set();
 const market = createSeoMarket({ store, youtube });
-const seo = createSeoWorker({ store, youtube, market });
+const playlistAuto = createPlaylistAutoAssigner({ store, youtube });
+const seo = createSeoWorker({ store, youtube, market, playlistAuto });
 const monetization = createMonetizationWorker({ youtube });
+
+async function autoAssignPlaylist(metadata) {
+  try {
+    return await playlistAuto.assign(metadata);
+  } catch (error) {
+    console.error('Automatic playlist assignment failed:', error.message);
+    return { state: 'retry', reason: String(error.message || 'YouTube request failed').slice(0, 300) };
+  }
+}
+
+async function autoAssignPublishedPlaylist(videoId, draft) {
+  try {
+    const video = await youtube.getVideo(videoId);
+    if (!video?.snippet) return { state: 'retry', reason: 'Published video metadata is not available yet' };
+    return await autoAssignPlaylist({
+      id: videoId,
+      privacyStatus: video.status?.privacyStatus,
+      title: video.snippet.title || draft.title,
+      description: video.snippet.description || '',
+      tags: video.snippet.tags || [],
+      context: draft.context || {}
+    });
+  } catch (error) {
+    console.error('Published video playlist classification failed:', error.message);
+    return { state: 'retry', reason: String(error.message || 'Video metadata unavailable').slice(0, 300) };
+  }
+}
 setInterval(() => monetization.schedule(), 5 * 60 * 1000).unref();
 const SHORT_VIEW_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 let lastShortViewCheck = 0;
@@ -315,7 +344,13 @@ async function processTwitchClipDraft(id) {
       tags: ['Saevond', 'gaming', 'livestream highlights', 'Shorts'],
       madeForKids: false
     });
+    const playlistAssignment = await autoAssignPlaylist({
+      id: uploaded.id, privacyStatus: 'private', title: draft.title, description,
+      tags: ['Saevond', 'gaming', 'livestream highlights', 'Shorts'],
+      context: { topic: draft.reason || draft.title, takeaways: draft.reason || draft.title, videoType: 'Gameplay' }
+    });
     await store.updateDraft(id, {
+      playlistAssignment,
       youtubeVideoId: uploaded.id,
       status: 'awaiting_owner_approval',
       error: null,
@@ -421,7 +456,14 @@ async function processHighlightBatch(id) {
       description,
       tags: highlightTags
     });
+    const playlistAssignment = await autoAssignPlaylist({
+      id: highlight.id, privacyStatus: 'private', title: highlightTitle, description,
+      tags: highlightTags,
+      context: { topic: batch.streamTitle || '', takeaways: batch.highlights.map((moment) =>
+        moment.title + ': ' + moment.reason).join('\n'), videoType: 'Gameplay' }
+    });
     const highlightPatch = {
+      playlistAssignment,
       status: 'creating_shorts',
       youtubeVideoId: highlight.id,
       duration: timeline.durationSeconds
@@ -478,14 +520,21 @@ async function processHighlightBatch(id) {
       try {
         if (existingShorts.some((draft) => draft.highlightIndex === index)) { offset += durations[index]; continue; }
         await video.shortFromHighlight(montage, offset, length, shortPath);
+        const shortDescription = (moment.reason || 'Livestream highlight') +
+          '\n\nHighlight video: https://youtu.be/' + highlight.id + '\n#Saevond #Shorts';
+        const shortTags = ['Saevond', 'gaming', 'Shorts'];
         const uploaded = await youtube.uploadPrivate({ filePath: shortPath, title: moment.title,
-          description: `${moment.reason || 'Livestream highlight'}\n\nHighlight video: https://youtu.be/${highlight.id}\n#Saevond #Shorts`,
-          tags: ['Saevond', 'gaming', 'Shorts'] });
+          description: shortDescription, tags: shortTags });
+        const playlistAssignment = await autoAssignPlaylist({
+          id: uploaded.id, privacyStatus: 'private', title: moment.title, description: shortDescription,
+          tags: shortTags,
+          context: { takeaways: moment.reason || moment.title, videoType: 'Gameplay' }
+        });
         await store.addDraft({ id: crypto.randomUUID(), sourceType: 'twitch_highlight_short', parentId: id, highlightIndex: index,
-          vodId: batch.vodId, title: moment.title, youtubeVideoId: uploaded.id,
+          vodId: batch.vodId, title: moment.title, youtubeVideoId: uploaded.id, playlistAssignment,
           status: 'awaiting_owner_approval', createdAt: new Date().toISOString() });
         await seo.registerUpload(uploaded.id, {
-          title: moment.title, description: moment.reason || '', tags: ['Saevond', 'gaming', 'Shorts'],
+          title: moment.title, description: shortDescription, tags: shortTags,
           durationSeconds: length, context: { takeaways: moment.reason || moment.title, videoType: 'Gameplay' },
           markers: [{ kind: 'clip', startSeconds: 0, endSeconds: length,
             title: moment.title, provenance: 'twitch_highlight' }]
@@ -784,8 +833,12 @@ app.get('/api/youtube/playlists', admin, async (_req, res, next) => {
 });
 
 app.post('/api/youtube/playlists', admin, async (req, res, next) => {
-  try { res.status(201).json(await youtube.createPlaylist(req.body || {})); }
-  catch (error) { next(error); }
+  try {
+    const playlist = await youtube.createPlaylist(req.body || {});
+    if (playlist.privacyStatus === 'public') await store.resetSeoPlaylistResults();
+    seo.schedule(true);
+    res.status(201).json(playlist);
+  } catch (error) { next(error); }
 });
 
 app.post('/api/youtube/playlists/:playlistId/items', admin, async (req, res, next) => {
@@ -940,11 +993,16 @@ app.post('/api/drafts', agentOrAdmin, upload.single('video'), async (req, res, n
       tags,
       madeForKids: req.body.madeForKids === 'true'
     });
+    const playlistAssignment = await autoAssignPlaylist({
+      id: uploaded.id, privacyStatus: 'private', title,
+      description: String(req.body.description || ''), tags, context
+    });
     fs.unlink(req.file.path, () => {});
     const draft = await store.addDraft({
       id: crypto.randomUUID(),
       youtubeVideoId: uploaded.id,
       title,
+      playlistAssignment,
       status: 'awaiting_owner_approval',
       createdAt: new Date().toISOString()
     });
@@ -1008,7 +1066,11 @@ app.post('/api/drafts/:id/approve', admin, async (req, res, next) => {
     if (!draft) return res.status(404).json({ error: 'Draft not found' });
     if (draft.status !== 'awaiting_owner_approval') return res.status(409).json({ error: 'Draft was already handled' });
     const published = await youtube.publish(draft.youtubeVideoId, req.body.publishAt || null);
+    const playlistAssignment = req.body.publishAt
+      ? draft.playlistAssignment
+      : await autoAssignPublishedPlaylist(draft.youtubeVideoId, draft);
     const updated = await store.updateDraft(draft.id, {
+      playlistAssignment,
       status: req.body.publishAt ? 'scheduled' : 'published',
       publishAt: req.body.publishAt || null,
       youtubeUrl: `https://youtu.be/${draft.youtubeVideoId}`
