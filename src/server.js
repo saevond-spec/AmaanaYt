@@ -70,6 +70,9 @@ const market = createSeoMarket({ store, youtube });
 const playlistAuto = createPlaylistAutoAssigner({ store, youtube });
 const seo = createSeoWorker({ store, youtube, market, playlistAuto });
 const monetization = createMonetizationWorker({ youtube });
+const configuredHighlightAttempts = Number(process.env.HIGHLIGHT_MAX_AUTO_ATTEMPTS);
+const highlightMaxAutoAttempts = Number.isSafeInteger(configuredHighlightAttempts) && configuredHighlightAttempts > 0
+  ? Math.min(configuredHighlightAttempts, 24) : 12;
 
 async function autoAssignPlaylist(metadata) {
   try {
@@ -358,6 +361,7 @@ function enqueueClipProcessing(id) {
 const processHighlightBatch = createHighlightProcessor({
   uploadDir, store, twitch, video, youtube, seo, autoAssignPlaylist,
   buildHighlightTimeline, buildHighlightDescription, cleanText,
+  maxAutoAttempts: highlightMaxAutoAttempts,
   autoPublish: !['false', '0', 'off'].includes(String(process.env.HIGHLIGHT_AUTO_PUBLISH || '').toLowerCase()),
   logError: (id, error) => console.error('Highlight batch ' + id + ' failed:', error.message)
 });const highlightBatchQueue = createBatchQueue(processHighlightBatch, {
