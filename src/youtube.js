@@ -252,12 +252,21 @@ async function recentGameVideos(game, { now = Date.now() } = {}) {
     part: ['snippet', 'statistics', 'status'], id: ids,
     fields: 'items(id,snippet(title,publishedAt,channelId),statistics(viewCount),status(privacyStatus))'
   });
-  return (details.data.items || []).filter((item) => item.status?.privacyStatus === 'public' &&
-    item.snippet?.publishedAt && Number.isSafeInteger(Number(item.statistics?.viewCount)))
-    .map((item) => ({ id: item.id, title: String(item.snippet.title || '').slice(0, 150),
+  const dayMs = 24 * 60 * 60 * 1000;
+  return (details.data.items || []).filter((item) => {
+    const publishedAtMs = Date.parse(item.snippet?.publishedAt || '');
+    const viewCount = Number(item.statistics?.viewCount);
+    return item.status?.privacyStatus === 'public' && Number.isFinite(publishedAtMs) &&
+      publishedAtMs <= now && Number.isSafeInteger(viewCount) && viewCount >= 0;
+  }).map((item) => {
+    const publishedAtMs = Date.parse(item.snippet.publishedAt);
+    const viewCount = Number(item.statistics.viewCount);
+    const ageDays = Math.max(1, (now - publishedAtMs) / dayMs);
+    return { id: item.id, title: String(item.snippet.title || '').slice(0, 150),
       channelId: item.snippet.channelId, publishedAt: item.snippet.publishedAt,
-      viewCount: Number(item.statistics.viewCount) }))
-    .sort((left, right) => right.viewCount - left.viewCount);
+      viewCount, estimatedViewsPerDay: Math.round(viewCount / ageDays) };
+  }).sort((left, right) => right.estimatedViewsPerDay - left.estimatedViewsPerDay ||
+    right.viewCount - left.viewCount);
 }
 
 async function enablePublicBroadcastAds(broadcast) {

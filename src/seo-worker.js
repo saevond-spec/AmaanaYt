@@ -9,6 +9,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   let rerunRequested = false;
   let lastRun = 0;
   let lastDiagnostic = null;
+  let legacyTagRecoveryChecked = false;
   const configuredLimit = Number(env.SEO_DAILY_LIMIT);
   const dailyLimit = Number.isSafeInteger(configuredLimit) && configuredLimit >= 1 ? configuredLimit : 200;
   const configuredAnalysisBatch = Number(env.SEO_ANALYSIS_BATCH_SIZE);
@@ -165,6 +166,15 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
         if (requeued) logger.info?.('Requeued ' + requeued + ' public videos for footage analysis');
       }
       if (!env.SEO_AI_API_KEY || !env.SEO_AI_MODEL || state.enabled === false) return;
+      if (!legacyTagRecoveryChecked && typeof store.requeueLegacySeoTagFailures === 'function') {
+        try {
+          const requeued = await store.requeueLegacySeoTagFailures();
+          legacyTagRecoveryChecked = true;
+          if (requeued) logger.info?.(`Requeued ${requeued} failed SEO packages with legacy tag-format errors`);
+        } catch (error) {
+          logger.warn?.(`Legacy SEO tag-failure recovery failed: ${error.message}`);
+        }
+      }
       const counts = await store.seoCounts();
       logger.info?.(`SEO queue statuses: ${JSON.stringify(counts.statuses || {})}; attemptedToday=${counts.attemptedToday}`);
       const probeTag = gemini ? `final:${env.SEO_AI_FINAL_MODEL || 'gemini-3.8-flash'}` : null;

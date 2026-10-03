@@ -29,7 +29,7 @@ const packageDraft = {
   paragraphs: ['A NARAKA gameplay duel for players who enjoy close combat.',
     'Watch the match unfold and review its final exchange.'],
   tags: ['NARAKA duel', 'NARAKA', 'NARAKA gameplay', 'duel', 'combat', 'match', 'fighters',
-    'final exchange', 'one on one', 'gameplay'], hashtags: ['#NARAKA', '#Gameplay', '#Gaming'],
+    'final exchange'], hashtags: ['#NARAKA', '#Gameplay', '#Gaming'],
   pinnedComment: 'Which exchange stood out?', communityPost: 'A close NARAKA duel is up.', clipHooks: []
 };
 

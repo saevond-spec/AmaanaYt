@@ -39,24 +39,13 @@ test('automatic copy preserves existing links and disclosures without inserting 
   assert.ok(auditVideo(item()).some((finding) => finding.includes('keyword')));
 });
 
-test('automatic publishing supports all video visibility states with evidence gates', () => {
-  assert.throws(() => automaticVideoEdit(item({
-    source: { ...item().source, privacyStatus: 'scheduled' }
-  })), /public, private, and unlisted/);
-  assert.throws(() => automaticVideoEdit(item({ analysis: null })), /Video analysis or owner/);
-  for (const privacyStatus of ['private', 'unlisted']) {
+test('automatic SEO edits only public videos and enforces evidence gates', () => {
+  for (const privacyStatus of ['scheduled', 'private', 'unlisted']) {
     assert.throws(() => automaticVideoEdit(item({
-      source: { ...item().source, privacyStatus, description: 'Short metadata only' },
-      analysis: null
-    })), /100 characters of existing description/);
-    const description = 'ARC Raiders gameplay details from the recorded match. '.repeat(4);
-    const edit = automaticVideoEdit(item({
-      source: { ...item().source, privacyStatus, description },
-      analysis: null
-    }));
-    assert.equal(edit.description.includes(description.trim()), true);
-    assert.equal(Object.hasOwn(edit, 'status'), false);
+      source: { ...item().source, privacyStatus }
+    })), /Only public videos/);
   }
+  assert.throws(() => automaticVideoEdit(item({ analysis: null })), /Video analysis or owner/);
   assert.throws(() => automaticVideoEdit(item({
     package: { ...item().package, missingEvidence: ['Script or key takeaways needed'] }
   })), /insufficient evidence/);
@@ -92,42 +81,25 @@ test('description length uses YouTube UTF-8 byte limit', () => {
   assert.ok(Buffer.byteLength(edit.description, 'utf8') <= 5000);
 });
 
-test('publisher applies SEO to public, private, and unlisted videos without sending visibility', async () => {
-  for (const privacyStatus of ['public', 'private', 'unlisted']) {
-    const base = item();
-    const description = privacyStatus === 'public'
-      ? base.source.description
-      : 'ARC Raiders gameplay details from the recorded match. '.repeat(4);
-    const row = item({
-      source: { ...base.source, privacyStatus, description },
-      analysis: privacyStatus === 'public' ? base.analysis : null
-    });
-    const events = [];
+test('publisher does not write private or unlisted video metadata', async () => {
+  for (const privacyStatus of ['private', 'unlisted']) {
+    const row = item({ source: { ...item().source, privacyStatus } });
+    const writes = [];
     const store = {
       getSeoVideo: async () => row,
-      getSeoSyncState: async () => ({ channelId: 'channel-1' }),
-      markSeoApplied: async (_id, applied) => events.push(['applied', applied]),
-      markSeoAutoResult: async (_id, result) => events.push(['result', result]),
-      upsertSeoVideo: async (_id, source) => events.push(['source', source])
+      markSeoApplied: async () => writes.push('applied'),
+      markSeoAutoResult: async () => writes.push('result'),
+      upsertSeoVideo: async () => writes.push('source')
     };
     const youtube = {
-      ownedChannel: async () => ({ id: 'channel-1' }),
-      assertTargetChannel: async (id) => { assert.equal(id, 'channel-1'); },
-      getVideo: async () => ({ snippet: { ...row.source, categoryId: '20' },
-        status: { privacyStatus } }),
-      updateVideoSeo: async (_id, video, edit) => {
-        assert.equal(video.status.privacyStatus, privacyStatus);
-        events.push(['youtube', edit]);
-        assert.equal(Object.hasOwn(edit, 'status'), false);
-      }
+      ownedChannel: async () => writes.push('channel'),
+      assertTargetChannel: async () => writes.push('assert-channel'),
+      getVideo: async () => writes.push('read-video'),
+      updateVideoSeo: async () => writes.push('update-video')
     };
     const publisher = createSeoPublisher({ store, youtube, logger: { info() {}, warn() {} } });
     await publisher.publishVideo(row.videoId);
-    assert.deepEqual(events.map(([type]) => type), ['youtube', 'applied', 'source', 'result']);
-    assert.equal(events[0][1].status, undefined);
-    assert.equal(events.at(-1)[1].state, 'applied');
-    assert.equal(events[1][1].privacyStatus, privacyStatus);
-    assert.equal(events[2][1].privacyStatus, privacyStatus);
+    assert.deepEqual(writes, []);
   }
 });
 
@@ -136,9 +108,7 @@ test('publisher skips when live visibility differs from the scanned visibility',
   let result;
   const base = item();
   const row = item({
-    source: { ...base.source, privacyStatus: 'private',
-      description: 'ARC Raiders gameplay details from the recorded match. '.repeat(4) },
-    analysis: null
+    source: { ...base.source, privacyStatus: 'public' }
   });
   const store = {
     getSeoVideo: async () => row,
@@ -345,7 +315,7 @@ test('worker analyzes a public upload, publishes its SEO, and updates channel ke
     getSeoSyncState: async () => sync,
     saveSeoSyncState: async (state) => { sync = state; },
     listSeoAutoCandidates: async () => [...rows.values()].filter((row) =>
-      row.package && ['public', 'private', 'unlisted'].includes(row.source.privacyStatus) && !row.autoResult),
+      row.package && row.source.privacyStatus === 'public' && !row.autoResult),
     listSeoChannelCandidates: async () => [...rows.values()].filter((row) =>
       row.source.privacyStatus === 'public' && row.package),
     listSeoVideos: async () => { throw new Error('Channel should use public package candidates'); },
@@ -355,8 +325,7 @@ test('worker analyzes a public upload, publishes its SEO, and updates channel ke
     seoCounts: async () => ({ statuses: {}, attemptedToday: 0 }),
     claimSeoVideo: async () => {
       const row = [...rows.values()].find((candidate) =>
-        candidate.status === 'queued' &&
-        ['public', 'private', 'unlisted'].includes(candidate.source.privacyStatus));
+        candidate.status === 'queued' && candidate.source.privacyStatus === 'public');
       if (!row) return null;
       row.status = 'generating';
       return { ...row, claimToken: 'claim-1', attempts: 1 };
@@ -403,31 +372,26 @@ test('worker analyzes a public upload, publishes its SEO, and updates channel ke
     return { summary: 'An ARC Raiders match' };
   }, generate: async (source, _context, options) => {
     const id = 'video-' + source.title.split(' ').at(-1);
-    if (source.privacyStatus === 'public') {
-      assert.equal(options.analysis.summary, 'An ARC Raiders match');
-    } else {
-      assert.equal(options.analysis, null);
-    }
+    assert.equal(source.privacyStatus, 'public');
+    assert.equal(options.analysis.summary, 'An ARC Raiders match');
     events.push(['package', id]);
     return { ...item().package, missingEvidence: [] };
   } });
   await worker.run();
-  assert.deepEqual(events.map(([kind]) => kind),
-    ['analysis', 'package', 'video', 'channel', 'package', 'video', 'package', 'video']);
+  assert.deepEqual(events.map(([kind]) => kind), ['analysis', 'package', 'video', 'channel']);
   assert.equal(rows.get('video-0').autoResult.state, 'applied');
   assert.equal(rows.get('video-0').applied.privacyStatus, 'public');
-  assert.equal(rows.get('video-1').autoResult.state, 'applied');
-  assert.equal(rows.get('video-1').applied.privacyStatus, 'private');
-  assert.equal(rows.get('video-2').autoResult.state, 'applied');
-  assert.equal(rows.get('video-2').applied.privacyStatus, 'unlisted');
-  assert.equal(original.get('video-1').status.privacyStatus, 'private');
-  assert.equal(original.get('video-2').status.privacyStatus, 'unlisted');
-  assert.equal(original.get('video-1').snippet.title, 'ARC Raiders Gameplay Highlights');
-  assert.equal(original.get('video-2').snippet.title, 'ARC Raiders Gameplay Highlights');
+  assert.equal(rows.get('video-0').source.privacyStatus, 'public');
+  for (const id of ['video-1', 'video-2']) {
+    assert.equal(rows.get(id).package, undefined);
+    assert.equal(rows.get(id).autoResult, undefined);
+    assert.equal(rows.get(id).applied, undefined);
+    assert.equal(original.get(id).snippet.title, 'ARC Raiders match ' + id.slice(-1));
+  }
   assert.equal(channelKeywords, 'gaming "ARC Raiders"');
   assert.ok(diagnostics.some((line) => line.includes('providerConfigured":true')));
   await worker.run();
-  assert.equal(events.length, 8);
+  assert.equal(events.length, 4);
 });
 
 test('worker reports missing YouTube connection once without accessing the catalog', async () => {
@@ -480,3 +444,127 @@ test('permanent permission errors are skipped but quota and transient errors ret
   assert.equal(retryablePublishError({ code: 'ECONNRESET' }), true);
   assert.equal(retryablePublishError({ status: 409, message: 'Metadata changed' }), false);
 });
+
+test('730-day review queue simulation settles safe packages, retries transient errors, and preserves visibility', async (t) => {
+  const priorLimit = process.env.SEO_AUTO_DAILY_LIMIT;
+  process.env.SEO_AUTO_DAILY_LIMIT = '50';
+  t.after(() => {
+    if (priorLimit === undefined) delete process.env.SEO_AUTO_DAILY_LIMIT;
+    else process.env.SEO_AUTO_DAILY_LIMIT = priorLimit;
+  });
+
+  const rows = new Map();
+  const liveVideos = new Map();
+  const originalVisibility = new Map();
+  for (let index = 0; index < 134; index += 1) {
+    const base = item();
+    const blocked = index >= 130;
+    const privacyStatus = 'public';
+    const description = blocked ? 'Short source description'
+      : privacyStatus === 'public' ? base.source.description
+        : 'Owner-provided match notes with grounded details. '.repeat(4);
+    const source = { ...base.source, title: 'ARC Raiders review ' + index,
+      description, privacyStatus };
+    const row = item({
+      videoId: 'review-' + index,
+      status: 'needs_review',
+      generatedAt: new Date(Date.UTC(2026, 0, 1) + index * 86400000).toISOString(),
+      source,
+      context: blocked ? { takeaways: '' }
+        : privacyStatus === 'public' ? { takeaways: '' } : { takeaways: 'Owner supplied gameplay details' },
+      analysis: blocked ? null : privacyStatus === 'public' ? { summary: 'Observed match' } : null,
+      package: { ...base.package, missingEvidence: blocked
+        ? ['Script or key takeaways needed to confirm the description and thumbnail claims']
+        : ['Three verified chapter markers are needed'] }
+    });
+    rows.set(row.videoId, row);
+    liveVideos.set(row.videoId, { snippet: { ...source, categoryId: '20', liveBroadcastContent: 'none' },
+      status: { privacyStatus } });
+    originalVisibility.set(row.videoId, privacyStatus);
+  }
+  for (const [index, privacyStatus] of [[134, 'private'], [135, 'unlisted']]) {
+    const base = item();
+    const source = { ...base.source, title: 'ARC Raiders hidden ' + privacyStatus,
+      description: 'Owner supplied gameplay notes for this draft. '.repeat(4), privacyStatus };
+    const row = item({
+      videoId: 'review-' + index,
+      status: 'needs_review',
+      generatedAt: new Date(Date.UTC(2026, 0, 1) + index * 86400000).toISOString(),
+      source,
+      context: { takeaways: 'Owner supplied gameplay details' },
+      analysis: null,
+      package: { ...base.package, missingEvidence: [] }
+    });
+    rows.set(row.videoId, row);
+    liveVideos.set(row.videoId, { snippet: { ...source, categoryId: '20', liveBroadcastContent: 'none' },
+      status: { privacyStatus } });
+    originalVisibility.set(row.videoId, privacyStatus);
+  }
+
+  let dailyWrites = 0;
+  let maxDailyWrites = 0;
+  let applied = 0;
+  const updateCalls = new Map();
+  const transientIds = new Set(Array.from({ length: 5 }, (_value, index) => 'review-' + index));
+  const store = {
+    listSeoAutoCandidates: async (limit = 20) => [...rows.values()].filter((row) =>
+      row.source.privacyStatus === 'public' &&
+      row.package && ['ready', 'needs_review'].includes(row.status) &&
+      (!row.autoResult || row.autoResult.state === 'retry'))
+      .slice(0, Math.min(50, limit)).map((row) => ({ videoId: row.videoId })),
+    getSeoVideo: async (videoId) => rows.get(videoId),
+    getSeoSyncState: async () => ({ channelId: 'channel-1' }),
+    seoUpdatesToday: async () => dailyWrites,
+    markSeoApplied: async (videoId, value) => {
+      rows.get(videoId).applied = value;
+      dailyWrites += 1;
+      applied += 1;
+      maxDailyWrites = Math.max(maxDailyWrites, dailyWrites);
+    },
+    upsertSeoVideo: async (videoId, nextSource) => { rows.get(videoId).source = nextSource; },
+    markSeoAutoResult: async (videoId, value) => { rows.get(videoId).autoResult = value; }
+  };
+  const youtube = {
+    ownedChannel: async () => ({ id: 'channel-1' }),
+    assertTargetChannel: async () => {},
+    getVideo: async (videoId) => {
+      const live = liveVideos.get(videoId);
+      return { snippet: { ...live.snippet }, status: { ...live.status } };
+    },
+    updateVideoSeo: async (videoId, video, edit) => {
+      assert.equal(Object.hasOwn(edit, 'status'), false);
+      assert.equal(video.status.privacyStatus, originalVisibility.get(videoId));
+      const calls = (updateCalls.get(videoId) || 0) + 1;
+      updateCalls.set(videoId, calls);
+      if (transientIds.has(videoId) && calls === 1) {
+        const error = new Error('YouTube rate limit');
+        error.status = 429;
+        throw error;
+      }
+      Object.assign(liveVideos.get(videoId).snippet, edit);
+    }
+  };
+  const publisher = createSeoPublisher({ store, youtube, logger: { info() {}, warn() {} } });
+  let settledAfterDay = null;
+  for (let day = 0; day < 730; day += 1) {
+    dailyWrites = 0;
+    await publisher.publishPending(50);
+    const pending = [...rows.values()].filter((row) => row.source.privacyStatus === 'public' &&
+      (!row.autoResult || row.autoResult.state === 'retry')).length;
+    if (settledAfterDay === null && pending === 0) settledAfterDay = day + 1;
+  }
+
+  assert.equal(settledAfterDay, 3);
+  assert.equal(applied, 130);
+  assert.equal(maxDailyWrites, 50);
+  assert.equal(updateCalls.size, 130);
+  assert.equal([...updateCalls.values()].filter((count) => count === 2).length, 5);
+  assert.equal([...rows.values()].filter((row) => row.autoResult?.state === 'skipped').length, 4);
+  assert.equal([...rows.values()].filter((row) => row.applied).length, 130);
+  assert.ok(['review-134', 'review-135'].every((id) =>
+    !rows.get(id).applied && !rows.get(id).autoResult &&
+    liveVideos.get(id).snippet.title === rows.get(id).source.title));
+  assert.ok([...liveVideos.entries()].every(([id, live]) =>
+    live.status.privacyStatus === originalVisibility.get(id)));
+});
+
