@@ -250,8 +250,8 @@ async function reservePlaylistAutoSlot(privacyStatus, limit, date) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(\`INSERT INTO amaana_state (key, value, updated_at)
-      VALUES ($1, $2::jsonb, NOW()) ON CONFLICT (key) DO NOTHING\`,
+    await client.query(`INSERT INTO amaana_state (key, value, updated_at)
+      VALUES ($1, $2::jsonb, NOW()) ON CONFLICT (key) DO NOTHING`,
     [key, JSON.stringify({ date, used: 0 })]);
     const selected = await client.query('SELECT value FROM amaana_state WHERE key = $1 FOR UPDATE', [key]);
     const current = selected.rows[0]?.value || {};
@@ -326,29 +326,29 @@ async function listSeoNeedsPlaylist(limit = 20) {
   await init();
   const requestedLimit = Number(limit);
   const safeLimit = Number.isSafeInteger(requestedLimit) ? Math.max(1, Math.min(50, requestedLimit)) : 20;
-  const result = await pool.query(\`SELECT video_id AS "videoId", source, context
+  const result = await pool.query(`SELECT video_id AS "videoId", source, context
     FROM amaana_seo_packages
     WHERE source->>'privacyStatus' = 'public'
       AND (playlist_result IS NULL OR
         (playlist_result->>'state' = 'retry' AND
          (playlist_result->>'at')::timestamptz < NOW() - INTERVAL '1 hour'))
     ORDER BY (source->>'publishedAt') ASC NULLS LAST, created_at ASC
-    LIMIT $1\`, [safeLimit]);
+    LIMIT $1`, [safeLimit]);
   return result.rows;
 }
 
 async function markSeoPlaylistResult(videoId, result) {
   await init();
-  await pool.query(\`UPDATE amaana_seo_packages SET playlist_result = $2::jsonb, updated_at = NOW()
-    WHERE video_id = $1\`, [videoId, JSON.stringify(result)]);
+  await pool.query(`UPDATE amaana_seo_packages SET playlist_result = $2::jsonb, updated_at = NOW()
+    WHERE video_id = $1`, [videoId, JSON.stringify(result)]);
 }
 
 async function resetSeoPlaylistResults() {
   await init();
-  const result = await pool.query(\`UPDATE amaana_seo_packages
+  const result = await pool.query(`UPDATE amaana_seo_packages
     SET playlist_result = NULL, updated_at = NOW()
     WHERE source->>'privacyStatus' = 'public'
-      AND playlist_result->>'state' IN ('no_match', 'ambiguous')\`);
+      AND playlist_result->>'state' IN ('no_match', 'ambiguous')`);
   return result.rowCount;
 }
 
