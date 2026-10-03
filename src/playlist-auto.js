@@ -10,8 +10,17 @@ function setting(value, fallback, cap) {
 function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger = console, now = Date.now }) {
   if (!store || !youtube) throw new TypeError('Store and YouTube clients are required');
   const enabled = env.YOUTUBE_AUTO_PLAYLISTS !== 'false';
-  const dailyLimit = setting(env.YOUTUBE_AUTO_PLAYLIST_DAILY_LIMIT, 20, 50);
+  const dailyLimit = setting(env.YOUTUBE_AUTO_PLAYLIST_DAILY_LIMIT, 20, 20);
   const batchSize = setting(env.YOUTUBE_AUTO_PLAYLIST_BATCH_SIZE, 20, 50);
+  let playlistsCache = null;
+  let playlistsCacheAt = 0;
+
+  async function getOwnedPlaylists() {
+    if (playlistsCache && now() - playlistsCacheAt < 5 * 60 * 1000) return playlistsCache;
+    playlistsCache = await youtube.listOwnedPlaylists();
+    playlistsCacheAt = now();
+    return playlistsCache;
+  }
 
   async function assign(video = {}) {
     if (!enabled) return { state: 'disabled' };
@@ -27,7 +36,7 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
     if (!slot?.allowed) return { state: 'daily_limit', privacyStatus, limit: dailyLimit };
 
     try {
-      const playlists = await youtube.listOwnedPlaylists();
+      const playlists = await getOwnedPlaylists();
       const selected = chooseAutoPlaylist({ ...video, id: videoId, privacyStatus }, playlists);
       if (!selected.playlist) return { state: selected.state, reason: selected.reason };
       const result = await youtube.addVideoToPlaylist({
@@ -68,7 +77,8 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
     return { attempted, assigned };
   }
 
-  return { enabled, dailyLimit, assign, assignPublicBacklog };
+  return { enabled, dailyLimit, assign, assignPublicBacklog,
+    invalidatePlaylists: () => { playlistsCache = null; playlistsCacheAt = 0; } };
 }
 
 module.exports = { createPlaylistAutoAssigner };
