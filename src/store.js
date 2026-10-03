@@ -472,7 +472,11 @@ async function listSeoAutoCandidates(limit = 20) {
       AND generated_at IS NOT NULL
       AND (auto_result IS NULL
         OR (auto_result->>'packageGeneratedAt')::timestamptz IS DISTINCT FROM generated_at
-        OR (auto_result->>'state' = 'retry' AND (auto_result->>'at')::timestamptz < NOW() - INTERVAL '1 hour'))
+        OR (auto_result->>'state' = 'retry' AND (auto_result->>'at')::timestamptz < NOW() - INTERVAL '1 hour')
+        OR auto_result->>'reason' = 'Video analysis or owner supplied video context is required for automatic publishing'
+        OR ((auto_result->>'packageGeneratedAt')::timestamptz = generated_at
+          AND auto_result->>'thumbnailState' IS NULL)
+        OR (auto_result->>'thumbnailState' = 'retry' AND (auto_result->>'at')::timestamptz < NOW() - INTERVAL '1 hour'))
     ORDER BY generated_at ASC LIMIT $1`, [Math.max(1, Math.min(50, limit))]);
   return result.rows;
 }
@@ -480,7 +484,8 @@ async function listSeoAutoCandidates(limit = 20) {
 async function seoUpdatesToday() {
   await init();
   const result = await pool.query(`SELECT COUNT(*)::integer AS count FROM amaana_seo_packages
-    WHERE (applied->>'at')::timestamptz >= date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`);
+    WHERE (applied->>'at')::timestamptz >= date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+      OR (auto_result->>'thumbnailAt')::timestamptz >= date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`);
   return result.rows[0].count;
 }
 
