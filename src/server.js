@@ -17,6 +17,7 @@ const { createMonetizationWorker } = require('./monetization-worker');
 const { createSeoMarket, detectGame } = require('./seo-market');
 const { normalizeContext } = require('./seo-package');
 const { buildHighlightTimeline, buildHighlightDescription } = require('./highlight-metadata');
+const { parseTwitchDuration, validateHighlightMoments } = require('./highlight-validation');
 const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries, findHighlightBatchByVodId } = require('./highlight-pipeline');
 const { auditVideo, channelSuggestions, problem } = require('./seo-publish');
 const { createSessionStore } = require('./session-store');
@@ -236,45 +237,6 @@ function cleanText(value, maxLength) {
   return String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maxLength);
 }
 
-function formatOffset(seconds) {
-  const total = Math.max(0, Math.round(seconds));
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const secs = total % 60;
-  return [hours, minutes, secs].map((part) => String(part).padStart(2, '0')).join(':');
-}
-
-function normalizeHighlights(items) {
-  if (!Array.isArray(items) || !items.length) throw new Error('timestamps must contain at least one AI highlight');
-  const normalized = items.slice(0, 10).map((item, index) => {
-    let start = Number(item?.startSeconds);
-    let end = Number(item?.endSeconds ?? item?.vodOffset);
-    if (!Number.isFinite(end) && Number.isFinite(start)) end = start + Number(item?.duration || 30);
-    if (!Number.isFinite(start) && Number.isFinite(end)) start = end - Number(item?.duration || 30);
-    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= 0) {
-      throw new Error(`Highlight ${index + 1} has invalid startSeconds/endSeconds`);
-    }
-    let duration = Math.min(60, Math.max(5, end - start));
-    end = Math.max(duration, Math.round(end));
-    start = Math.max(0, end - duration);
-    duration = end - start;
-    const fallbackTitle = `Saevond highlight at ${formatOffset(end)}`;
-    return {
-      startSeconds: Number(start.toFixed(1)),
-      endSeconds: Number(end.toFixed(1)),
-      duration: Number(duration.toFixed(1)),
-      title: cleanText(item?.title || fallbackTitle, 100),
-      reason: cleanText(item?.reason, 500),
-      score: Number.isFinite(Number(item?.score)) ? Number(item.score) : null
-    };
-  });
-  const deduplicated = [];
-  for (const item of normalized.sort((a, b) => (b.score || 0) - (a.score || 0))) {
-    if (!deduplicated.some((existing) => Math.abs(existing.endSeconds - item.endSeconds) < 12)) deduplicated.push(item);
-  }
-  return deduplicated.slice(0, 8).sort((a, b) => a.startSeconds - b.startSeconds);
-}
-
 function unlinkQuietly(filePath) {
   if (filePath) fs.unlink(filePath, () => {});
 }
@@ -396,9 +358,9 @@ function enqueueClipProcessing(id) {
 const processHighlightBatch = createHighlightProcessor({
   uploadDir, store, twitch, video, youtube, seo, autoAssignPlaylist,
   buildHighlightTimeline, buildHighlightDescription, cleanText,
+  autoPublish: !['false', '0', 'off'].includes(String(process.env.HIGHLIGHT_AUTO_PUBLISH || '').toLowerCase()),
   logError: (id, error) => console.error('Highlight batch ' + id + ' failed:', error.message)
-});
-const highlightBatchQueue = createBatchQueue(processHighlightBatch, {
+});const highlightBatchQueue = createBatchQueue(processHighlightBatch, {
   onError: (id, error) => console.error('Highlight batch queue failed for ' + id + ':', error.message)
 });
 function enqueueHighlightBatch(id) {
@@ -797,8 +759,7 @@ app.post('/api/drafts/:id/tiktok-inbox', admin, async (req, res, next) => {
 
 app.get('/api/drafts/:id/tiktok-status', admin, async (req, res, next) => {
   try {
-    const draft = await store.getDraft(req.params.id);
-    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    const draft = await store.getDraft(req.params.id);    if (!draft) return res.status(404).json({ error: 'Draft not found' });
     if (!draft.tiktokPublishId) {
       return res.json({ status: draft.tiktokStatus || 'not_sent', error: draft.tiktokError || null });
     }
@@ -869,18 +830,26 @@ app.post('/api/twitch/vod-clips', vodWebhookOrAgentOrAdmin, async (req, res, nex
     if (!/^\d+$/.test(vodId)) return res.status(400).json({ error: 'vodId must be a Twitch VOD number' });
     const twitchStatus = await twitch.connectionStatus();
     if (!twitchStatus.connected) return res.status(409).json({ error: twitchStatus.error || 'Connect Twitch in the Amaana dashboard first' });
-    const highlights = normalizeHighlights(req.body?.timestamps);
-    const channel = cleanText(req.body?.channel || 'saevond', 50);
     const existingDrafts = await store.listDrafts();
-    let batch = findHighlightBatchByVodId(existingDrafts, vodId);
-    if (!batch) {
-      batch = await store.addDraft({ id: crypto.randomUUID(), sourceType: 'twitch_highlight_batch',
-        sourceChannel: channel, vodId, highlights, streamTitle: cleanText(req.body?.streamTitle, 80),
-        title: cleanText(`${req.body?.streamTitle || 'Saevond livestream'} | Best moments`, 100),
-        pipelineVersion: 2, thumbnailStatus: 'pending',
-        status: 'clip_queued', createdAt: new Date().toISOString() });
-      enqueueHighlightBatch(batch.id);
+    const existing = findHighlightBatchByVodId(existingDrafts, vodId);
+    if (existing) {
+      return res.status(202).json({
+        accepted: true,
+        highlightVideo: { id: existing.id, status: existing.status, title: existing.title },
+        shortsPlanned: existing.highlights.length
+      });
     }
+    const vod = await twitch.getVod(vodId);
+    const vodDurationSeconds = parseTwitchDuration(vod.duration);
+    const highlights = validateHighlightMoments(req.body?.timestamps, vodDurationSeconds);
+    const channel = cleanText(req.body?.channel || 'saevond', 50);
+    const streamTitle = cleanText(req.body?.streamTitle, 80);
+    const batch = await store.addDraft({ id: crypto.randomUUID(), sourceType: 'twitch_highlight_batch',
+      sourceChannel: channel, vodId, vodDurationSeconds, highlights, streamTitle,
+      title: cleanText(`${streamTitle || 'Saevond livestream'} | Best moments`, 100),
+      pipelineVersion: 2, thumbnailStatus: 'pending', autoPublishEligible: true,
+      publicationStatus: 'pending', status: 'clip_queued', createdAt: new Date().toISOString() });
+    enqueueHighlightBatch(batch.id);
     res.status(202).json({
       accepted: true,
       highlightVideo: { id: batch.id, status: batch.status, title: batch.title },
