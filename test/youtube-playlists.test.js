@@ -53,3 +53,47 @@ test('video playlist insertion is idempotent and uses the YouTube video resource
   assert.equal(inserted[0].requestBody.snippet.playlistId, 'PL1');
   await assert.rejects(client.addVideoToPlaylist({ playlistId: 'PL1', videoId: 'bad' }), /11-character/);
 });
+
+
+test('automatic playlist matching uses specific metadata and respects video privacy', () => {
+  const { chooseAutoPlaylist } = require('../src/youtube-playlists');
+  const playlists = [
+    { id: 'PL-ARC', title: 'ARC Raiders Highlights', description: '', privacyStatus: 'private' },
+    { id: 'PL-APEX', title: 'Apex Legends', description: '', privacyStatus: 'private' },
+    { id: 'PL-GENERIC', title: 'Gaming Highlights', description: '', privacyStatus: 'private' },
+    { id: 'PL-PUBLIC', title: 'ARC Raiders', description: '', privacyStatus: 'public' }
+  ];
+  const match = chooseAutoPlaylist({
+    id: 'abcdefghijk', privacyStatus: 'private',
+    title: 'ARC Raiders Clutch Extraction', tags: ['gaming', 'Shorts'],
+    description: 'A highlight from this ARC Raiders match.'
+  }, playlists);
+  assert.equal(match.state, 'matched');
+  assert.equal(match.playlist.id, 'PL-ARC');
+
+  const ambiguous = chooseAutoPlaylist({
+    id: 'abcdefghijk', privacyStatus: 'private', title: 'ARC Raiders',
+    tags: ['gaming']
+  }, [
+    playlists[0],
+    { id: 'PL-ARC-SHORTS', title: 'ARC Raiders Shorts', description: '', privacyStatus: 'private' }
+  ]);
+  assert.equal(ambiguous.state, 'ambiguous');
+
+  const publicMatch = chooseAutoPlaylist({
+    id: 'abcdefghijk', privacyStatus: 'public', title: 'ARC Raiders clutch',
+    tags: ['ARC Raiders']
+  }, playlists);
+  assert.equal(publicMatch.state, 'matched');
+  assert.equal(publicMatch.playlist.id, 'PL-PUBLIC');
+
+  const generic = chooseAutoPlaylist({
+    id: 'abcdefghijk', privacyStatus: 'private', title: 'Gaming highlights compilation'
+  }, playlists);
+  assert.equal(generic.state, 'no_match');
+
+  const privateNoLeak = chooseAutoPlaylist({
+    id: 'abcdefghijk', privacyStatus: 'private', title: 'ARC Raiders gameplay'
+  }, [playlists[3]]);
+  assert.equal(privateNoLeak.state, 'no_match');
+});
