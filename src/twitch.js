@@ -134,7 +134,11 @@ async function helix(pathname, { method = 'GET', query } = {}) {
     signal: AbortSignal.timeout(30000)
   });
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.message || payload.error || `Twitch API failed (${response.status})`);
+  if (!response.ok) {
+    const error = new Error(payload.message || payload.error || `Twitch API failed (${response.status})`);
+    error.status = response.status;
+    throw error;
+  }
   return payload;
 }
 
@@ -143,6 +147,40 @@ async function currentUser() {
   const user = payload.data?.[0];
   if (!user?.id) throw new Error('Twitch did not return the connected user');
   return user;
+}
+
+async function getVod(vodId) {
+  const [payload, user] = await Promise.all([
+    helix('/videos', { query: { id: String(vodId) } }), currentUser()
+  ]);
+  const vod = payload.data?.find((item) => String(item.id) === String(vodId));
+  if (!vod) {
+    const error = new Error('Twitch archive VOD is not available yet');
+    error.status = 425;
+    throw error;
+  }
+  if (String(vod.user_id) !== String(user.id)) {
+    const error = new Error('Twitch VOD does not belong to the connected broadcaster');
+    error.status = 403;
+    throw error;
+  }
+  if (vod.type !== 'archive') {
+    const error = new Error('The supplied Twitch video is not an archived livestream VOD');
+    error.status = 422;
+    throw error;
+  }
+  return vod;
+}
+
+async function getClip(clipId) {
+  const payload = await helix('/clips', { query: { id: String(clipId) } });
+  const clip = payload.data?.find((item) => String(item.id) === String(clipId));
+  if (!clip) {
+    const error = new Error('Twitch clip timestamp metadata is not available yet');
+    error.status = 425;
+    throw error;
+  }
+  return clip;
 }
 
 async function isConnected() {
@@ -233,6 +271,8 @@ module.exports = {
   authorizationUrl,
   exchangeCode,
   createClipFromVod,
+  getVod,
+  getClip,
   waitForClipDownload,
   downloadClip
 };
