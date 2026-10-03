@@ -2,6 +2,9 @@ const loginView = document.querySelector('#loginView');
 const dashboardView = document.querySelector('#dashboardView');
 const loginForm = document.querySelector('#loginForm');
 const uploadForm = document.querySelector('#uploadForm');
+const playlistList = document.querySelector('#playlistList');
+const playlistForm = document.querySelector('#playlistForm');
+const playlistCreateButton = document.querySelector('#playlistCreateButton');
 const notice = document.querySelector('#notice');
 const connectionDot = document.querySelector('#connectionDot');
 const connectionText = document.querySelector('#connectionText');
@@ -28,6 +31,7 @@ let seoOffset = 0;
 let seoEnabled = true;
 let draftPoll = null;
 let tiktokConnected = false;
+let youtubePlaylists = [];
 
 function showNotice(message, isError = false) {
   notice.textContent = message;
@@ -143,6 +147,49 @@ async function approveDraft(id, publishAt, button) {
   }
 }
 
+function renderPlaylistAdder(videoId, videoPrivacyStatus = 'private') {
+  if (!videoId) return null;
+  const eligible = youtubePlaylists.filter((playlist) =>
+    videoPrivacyStatus === 'public' || playlist.privacyStatus === 'private');
+  const box = element('div', 'playlist-adder');
+  const label = element('label', '', 'Add video to a playlist');
+  const select = document.createElement('select');
+  select.setAttribute('aria-label', 'Choose a YouTube playlist');
+  const prompt = document.createElement('option');
+  prompt.value = '';
+  prompt.textContent = 'Choose a playlist';
+  select.append(prompt);
+  eligible.forEach((playlist) => {
+    const option = document.createElement('option');
+    option.value = playlist.id;
+    option.textContent = playlist.title + ' · ' + playlist.privacyStatus;
+    select.append(option);
+  });
+  const add = element('button', 'ghost', 'Add to playlist');
+  add.type = 'button';
+  add.disabled = eligible.length === 0;
+  select.addEventListener('change', () => { add.disabled = !select.value; });
+  add.addEventListener('click', async () => {
+    if (!select.value) return;
+    add.disabled = true;
+    try {
+      const result = await api('/api/youtube/playlists/' + encodeURIComponent(select.value) + '/items', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ videoId })
+      });
+      showNotice(result.alreadyAdded ? 'Video is already in ' + result.playlist.title + '.'
+        : 'Video added to ' + result.playlist.title + '. Its visibility was not changed.');
+      await Promise.all([loadDrafts(), loadSeo()]);
+    } catch (error) {
+      showNotice(error.message, true);
+      add.disabled = !select.value;
+    }
+  });
+  box.append(label, select, add);
+  if (!eligible.length) box.append(element('p', 'draft-meta',
+    'Create a private playlist to organize this private or unlisted video.'));
+  return box;
+}
 function renderDraft(draft) {
   const isHighlight = draft.sourceType === 'twitch_highlight_batch';
   const card = element('article', 'draft');
@@ -153,6 +200,11 @@ function renderDraft(draft) {
 
   const created = draft.createdAt ? new Date(draft.createdAt).toLocaleString() : 'Unknown date';
   card.append(element('p', 'draft-meta', `Created ${created}`));
+  if (draft.youtubeVideoId) {
+    const playlistControl = renderPlaylistAdder(draft.youtubeVideoId,
+      draft.youtubePrivacyStatus === 'public' || draft.status === 'published' ? 'public' : 'private');
+    if (playlistControl) card.append(playlistControl);
+  }
 
   if (draft.sourceType === 'twitch_vod') {
     const source = element('p', 'draft-meta', `Twitch VOD ${draft.vodId} · ${Math.round(draft.startSeconds || 0)}s–${Math.round(draft.endSeconds || 0)}s`);
@@ -382,6 +434,8 @@ function renderSeoVideo(item) {
   card.append(link);
   if (item.error) card.append(element('p', 'draft-error', item.error));
   card.append(element('p', 'draft-meta', `YouTube visibility: ${item.source.privacyStatus || 'unknown'}`));
+  const playlistControl = renderPlaylistAdder(item.videoId, item.source.privacyStatus || 'unknown');
+  if (playlistControl) card.append(playlistControl);
   if (item.applied) card.append(element('p', 'draft-meta',
     `SEO applied to this video on ${new Date(item.applied.at).toLocaleString()}.`));
   if (item.autoResult?.state === 'skipped') card.append(element('p', 'draft-meta',
@@ -540,6 +594,29 @@ async function loadChannelSeo() {
   }
 }
 
+async function loadPlaylists() {
+  try {
+    const result = await api('/api/youtube/playlists');
+    youtubePlaylists = Array.isArray(result) ? result : [];
+    if (!youtubePlaylists.length) {
+      playlistList.replaceChildren(element('div', 'empty-state', 'No playlists found yet. Create one below.'));
+      return;
+    }
+    playlistList.replaceChildren(...youtubePlaylists.map((playlist) => {
+      const row = element('div', 'playlist-row');
+      const link = element('a', 'video-link', playlist.title || 'Untitled playlist');
+      link.href = 'https://www.youtube.com/playlist?list=' + encodeURIComponent(playlist.id);
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      row.append(link, element('span', 'draft-status', playlist.privacyStatus));
+      return row;
+    }));
+  } catch (error) {
+    youtubePlaylists = [];
+    playlistList.replaceChildren(element('div', 'empty-state', error.message || 'Could not load playlists.'));
+    if (error.status === 401) showLogin();
+  }
+}
 async function loadDrafts() {
   try {
     const drafts = await api('/api/drafts');
@@ -557,7 +634,7 @@ async function loadDrafts() {
 
 async function refreshDashboard() {
   try {
-    await Promise.all([refreshConnection(), refreshTwitchConnection(), refreshTikTokConnection()]);
+    await Promise.all([refreshConnection(), refreshTwitchConnection(), refreshTikTokConnection(), loadPlaylists()]);
     await loadDrafts();
     await loadSeo();
     await loadChannelSeo();
@@ -609,6 +686,26 @@ uploadForm.addEventListener('submit', async (event) => {
   }
 });
 
+playlistForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  playlistCreateButton.disabled = true;
+  playlistCreateButton.textContent = 'Creating playlist…';
+  try {
+    const form = Object.fromEntries(new FormData(playlistForm));
+    const playlist = await api('/api/youtube/playlists', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(form)
+    });
+    playlistForm.reset();
+    showNotice('Created ' + playlist.privacyStatus + ' playlist: ' + playlist.title + '.');
+    await loadPlaylists();
+    await Promise.all([loadDrafts(), loadSeo()]);
+  } catch (error) {
+    showNotice(error.message, true);
+  } finally {
+    playlistCreateButton.disabled = false;
+    playlistCreateButton.textContent = 'Create playlist';
+  }
+});
 connectButton.addEventListener('click', () => window.location.assign('/auth/google'));
 twitchConnectButton.addEventListener('click', () => window.location.assign('/auth/twitch'));
 tiktokConnectButton.addEventListener('click', () => window.location.assign('/auth/tiktok'));
