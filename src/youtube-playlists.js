@@ -24,6 +24,87 @@ function canAddVideoToPlaylist(videoPrivacyStatus, playlistPrivacyStatus) {
   return false;
 }
 
+
+const GENERIC_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'at', 'best', 'by', 'clip', 'clips', 'content', 'episode',
+  'episodes', 'game', 'games', 'gaming', 'gameplay', 'highlight', 'highlights', 'in',
+  'live', 'livestream', 'moment', 'moments', 'of', 'official', 'part', 'playthrough',
+  'saevond', 'series', 'short', 'shorts', 'stream', 'the', 'video', 'videos'
+]);
+const FORMAT_WORDS = new Set([
+  'clip', 'clips', 'highlight', 'highlights', 'live', 'livestream', 'short', 'shorts',
+  'stream', 'tutorial', 'guide', 'review', 'vod', 'walkthrough'
+]);
+
+function words(value) {
+  return String(value || '').normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase()
+    .match(/[\p{L}\p{N}]+/gu) || [];
+}
+
+function meaningfulWords(value) {
+  return words(value).filter((word) => !GENERIC_WORDS.has(word) && !/^\d+$/.test(word));
+}
+
+function metadataFields(video = {}) {
+  const source = video.source || video;
+  const context = video.context || {};
+  const snippet = video.snippet || {};
+  const seoPackage = video.package || video.seoPackage || {};
+  const tags = [video.tags, source.tags, snippet.tags].flat()
+    .filter((value) => typeof value === 'string').join(' ');
+  return {
+    strong: [
+      video.title || snippet.title || source.title || '',
+      tags,
+      [video.topic, video.primaryKeyword, context.topic, context.primaryKeyword,
+        seoPackage.primaryKeyword].filter(Boolean).join(' ')
+    ],
+    supporting: [
+      video.description || snippet.description || source.description || '',
+      [context.takeaways, context.audience, context.videoType, video.videoType].filter(Boolean).join(' ')
+    ]
+  };
+}
+
+function chooseAutoPlaylist(video = {}, playlists = []) {
+  const videoPrivacy = video.privacyStatus || video.status?.privacyStatus || video.source?.privacyStatus;
+  const targetPrivacy = videoPrivacy === 'public' ? 'public'
+    : ['private', 'unlisted'].includes(videoPrivacy) ? 'private' : null;
+  if (!targetPrivacy) return { state: 'ineligible', playlist: null, reason: 'unknown_video_privacy' };
+
+  const fields = metadataFields(video);
+  const strongWords = new Set(fields.strong.flatMap(words));
+  const allWords = new Set([...strongWords, ...fields.supporting.flatMap(words)]);
+  const candidates = [];
+  for (const playlist of playlists) {
+    if (!playlist?.id || playlist.privacyStatus !== targetPrivacy) continue;
+    const titleIdentity = meaningfulWords(playlist.title);
+    const descriptionIdentity = meaningfulWords(playlist.description);
+    const identity = titleIdentity.length ? titleIdentity : descriptionIdentity;
+    if (!identity.length) continue;
+
+    const isInStrongMetadata = identity.every((word) => strongWords.has(word));
+    const isInAnyMetadata = identity.every((word) => allWords.has(word));
+    if (!isInAnyMetadata) continue;
+
+    let score = isInStrongMetadata ? 100 : 82;
+    const titleFormats = words(playlist.title).filter((word) => FORMAT_WORDS.has(word));
+    if (titleFormats.length) {
+      score += titleFormats.every((word) => allWords.has(word)) ? 25 : -25;
+    }
+    candidates.push({ playlist, score, identity: identity.join(' ') });
+  }
+
+  candidates.sort((left, right) => right.score - left.score);
+  if (!candidates.length || candidates[0].score < 80) {
+    return { state: 'no_match', playlist: null, reason: 'no_confident_metadata_match' };
+  }
+  if (candidates[1] && candidates[0].score - candidates[1].score < 20) {
+    return { state: 'ambiguous', playlist: null, reason: 'multiple_playlists_match_metadata' };
+  }
+  return { state: 'matched', playlist: candidates[0].playlist, score: candidates[0].score };
+}
+
 function createYouTubePlaylistClient(getService) {
   if (typeof getService !== 'function') throw new TypeError('A YouTube service factory is required');
 
@@ -91,4 +172,4 @@ function createYouTubePlaylistClient(getService) {
   return { listOwnedPlaylists, createPlaylist, addVideoToPlaylist };
 }
 
-module.exports = { normalizePlaylistInput, canAddVideoToPlaylist, createYouTubePlaylistClient };
+module.exports = { normalizePlaylistInput, canAddVideoToPlaylist, chooseAutoPlaylist, createYouTubePlaylistClient };
