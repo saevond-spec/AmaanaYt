@@ -396,7 +396,8 @@ async function requeueLegacySeoTagFailures() {
       SET status = 'queued', package = NULL, attempts = 0, error = NULL,
         next_attempt_at = NULL, claim_token = NULL, claimed_at = NULL,
         generated_at = NULL, auto_result = NULL, updated_at = NOW()
-      WHERE status = 'failed' AND (
+      WHERE status = 'failed'
+        AND source->>'privacyStatus' = 'public' AND (
         error ILIKE 'Expected 10%15%tag%'
         OR error ILIKE 'Tags exceed the recommended combined length%'
         OR error ILIKE 'Tags must include the exact primary keyword%'
@@ -426,7 +427,7 @@ async function claimSeoVideo() {
   const token = crypto.randomUUID();
   const result = await pool.query(`WITH candidate AS (
       SELECT video_id FROM amaana_seo_packages
-      WHERE source->>'privacyStatus' IN ('public', 'private', 'unlisted')
+      WHERE source->>'privacyStatus' = 'public'
         AND ((status IN ('queued', 'retry') AND (next_attempt_at IS NULL OR next_attempt_at <= NOW()))
         OR (status = 'generating' AND claimed_at < NOW() - INTERVAL '20 minutes'))
       ORDER BY (source->>'publishedAt') DESC NULLS LAST, created_at ASC
@@ -467,7 +468,7 @@ async function listSeoAutoCandidates(limit = 20) {
   await init();
   const result = await pool.query(`SELECT video_id AS "videoId" FROM amaana_seo_packages
     WHERE status IN ('ready', 'needs_review')
-      AND source->>'privacyStatus' IN ('public', 'private', 'unlisted')
+      AND source->>'privacyStatus' = 'public'
       AND generated_at IS NOT NULL
       AND (auto_result IS NULL
         OR (auto_result->>'packageGeneratedAt')::timestamptz IS DISTINCT FROM generated_at
