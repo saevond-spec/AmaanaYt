@@ -84,6 +84,8 @@ Required values:
 
 `HIGHLIGHT_AUTO_PUBLISH` defaults to `true` for new, quality-checked Twitch highlight batches. Set it to `false` to keep new highlight videos and Shorts private for owner review. This switch does not affect any existing private or unlisted video.
 
+Transient production and YouTube-processing failures retry up to 12 times by default, with exponential backoff capped at 30 minutes. Set `HIGHLIGHT_MAX_AUTO_ATTEMPTS` to a positive integer from 1 to 24 to change the limit. Permanent processing or permission errors stop for owner review.
+
 Render generates `SESSION_SECRET`.
 
 Optional `REDIS_URL` enables Redis-backed sessions (`redis://` or `rediss://`). With no URL, or if Redis cannot connect during startup, sessions use the existing PostgreSQL pool and an automatically created `amaana_sessions` table. This avoids the production MemoryStore warning. Switching stores requires signing in again; keep `SESSION_SECRET` stable across redeploys.
