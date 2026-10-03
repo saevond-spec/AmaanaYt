@@ -7,6 +7,15 @@ function setting(value, fallback, cap) {
   return Number.isSafeInteger(number) && number > 0 ? Math.min(number, cap) : fallback;
 }
 
+function youtubeQuotaDate(timestamp) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(new Date(timestamp));
+  const value = Object.fromEntries(parts.filter((part) => part.type !== 'literal')
+    .map((part) => [part.type, part.value]));
+  return [value.year, value.month, value.day].join('-');
+}
+
 function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger = console, now = Date.now }) {
   if (!store || !youtube) throw new TypeError('Store and YouTube clients are required');
   const enabled = env.YOUTUBE_AUTO_PLAYLISTS !== 'false';
@@ -32,7 +41,7 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
     }
 
     const slot = await store.reservePlaylistAutoSlot(privacyStatus, dailyLimit,
-      new Date(now()).toISOString().slice(0, 10));
+      youtubeQuotaDate(now()));
     if (!slot?.allowed) return { state: 'daily_limit', privacyStatus, limit: dailyLimit };
 
     try {
@@ -82,4 +91,4 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
     invalidatePlaylists: () => { playlistsCache = null; playlistsCacheAt = 0; } };
 }
 
-module.exports = { createPlaylistAutoAssigner };
+module.exports = { createPlaylistAutoAssigner, youtubeQuotaDate };
