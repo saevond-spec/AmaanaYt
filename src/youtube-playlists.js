@@ -68,16 +68,16 @@ function metadataFields(video = {}) {
 
 function chooseAutoPlaylist(video = {}, playlists = []) {
   const videoPrivacy = video.privacyStatus || video.status?.privacyStatus || video.source?.privacyStatus;
-  const targetPrivacy = videoPrivacy === 'public' ? 'public'
-    : ['private', 'unlisted'].includes(videoPrivacy) ? 'private' : null;
-  if (!targetPrivacy) return { state: 'ineligible', playlist: null, reason: 'unknown_video_privacy' };
+  if (!['public', 'private', 'unlisted'].includes(videoPrivacy)) {
+    return { state: 'ineligible', playlist: null, reason: 'unknown_video_privacy' };
+  }
 
   const fields = metadataFields(video);
   const strongWords = new Set(fields.strong.flatMap(words));
   const allWords = new Set([...strongWords, ...fields.supporting.flatMap(words)]);
   const candidates = [];
   for (const playlist of playlists) {
-    if (!playlist?.id || playlist.privacyStatus !== targetPrivacy) continue;
+    if (!playlist?.id || !canAddVideoToPlaylist(videoPrivacy, playlist.privacyStatus)) continue;
     const titleIdentity = meaningfulWords(playlist.title);
     const descriptionIdentity = meaningfulWords(playlist.description);
     const identity = titleIdentity.length ? titleIdentity : descriptionIdentity;
@@ -88,6 +88,8 @@ function chooseAutoPlaylist(video = {}, playlists = []) {
     if (!isInAnyMetadata) continue;
 
     let score = isInStrongMetadata ? 100 : 82;
+    if (videoPrivacy === 'public') score += playlist.privacyStatus === 'public' ? 25
+      : playlist.privacyStatus === 'unlisted' ? 10 : 0;
     const titleFormats = words(playlist.title).filter((word) => FORMAT_WORDS.has(word));
     if (titleFormats.length) {
       score += titleFormats.every((word) => allWords.has(word)) ? 25 : -25;
