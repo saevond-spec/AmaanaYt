@@ -21,7 +21,7 @@ function sameTags(left, right) {
   return JSON.stringify(left || []) === JSON.stringify(right || []);
 }
 
-const ALLOWED_VIDEO_PRIVACY_STATUSES = new Set(['public', 'private', 'unlisted']);
+const ALLOWED_VIDEO_PRIVACY_STATUSES = new Set(['public']);
 
 function auditVideo(item) {
   const source = item.source || {};
@@ -70,7 +70,7 @@ function automaticVideoEdit(item) {
   const source = item.source || {};
   const pkg = item.package;
   if (!ALLOWED_VIDEO_PRIVACY_STATUSES.has(source.privacyStatus)) {
-    throw problem('Only public, private, and unlisted catalog videos can be updated');
+    throw problem('Only public videos can be automatically updated');
   }
   if (!pkg || !['ready', 'needs_review'].includes(item.status)) throw problem('No generated SEO package');
   const hasOwnerContext = Boolean(item.context?.takeaways?.trim());
