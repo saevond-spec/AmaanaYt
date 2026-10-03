@@ -19,7 +19,7 @@ test('five-year simulation reports draft volume, queue throughput, and quota hea
   assert.equal(result.youtubeApiQuota.maxPlaylistAssignmentsPerDay, 40);
   assert.equal(result.youtubeApiQuota.ownedPlaylistListMaxPages, 20);
   assert.equal(result.youtubeApiQuota.automaticPlaylistDailyUnits, 2840);
-  assert.equal(result.youtubeApiQuota.currentPipelineDailyWriteUnits, 5390);
-  assert.equal(result.youtubeApiQuota.combinedDailyWriteUnitsWith50PerDayThumbnailBackfill, 7890);
+  assert.equal(result.youtubeApiQuota.currentPipelineDailyQuotaUnits, 5390);
+  assert.equal(result.youtubeApiQuota.combinedDailyQuotaUnitsWith50PerDayThumbnailBackfill, 7890);
   assert.equal(result.youtubeApiQuota.headroomWithBulkThumbnailBackfillBeforeReads, 2110);
 });
