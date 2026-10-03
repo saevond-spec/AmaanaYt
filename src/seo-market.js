@@ -38,7 +38,8 @@ function createSeoMarket({ store, youtube, env = process.env, logger = console, 
     try {
       const examples = await youtube.recentGameVideos(game);
       const samples = examples.filter((item) => item.channelId !== source.channelId).slice(0, 5)
-        .map(({ id, title, publishedAt, viewCount }) => ({ id, title, publishedAt, viewCount }));
+        .map(({ id, title, publishedAt, viewCount, estimatedViewsPerDay }) =>
+          ({ id, title, publishedAt, viewCount, estimatedViewsPerDay }));
       const snapshot = { game, query: `${game} gameplay`, observedAt: new Date(now()).toISOString(),
         windowDays: 7, samples };
       await store.saveSeoMarketSnapshot(game, snapshot);
