@@ -17,6 +17,7 @@ const { createMonetizationWorker } = require('./monetization-worker');
 const { createSeoMarket, detectGame } = require('./seo-market');
 const { normalizeContext } = require('./seo-package');
 const { buildHighlightTimeline, buildHighlightDescription } = require('./highlight-metadata');
+const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries, findHighlightBatchByVodId } = require('./highlight-pipeline');
 const { auditVideo, channelSuggestions, problem } = require('./seo-publish');
 const { createSessionStore } = require('./session-store');
 const { canAddVideoToPlaylist } = require('./youtube-playlists');
@@ -392,186 +393,32 @@ function enqueueClipProcessing(id) {
   setImmediate(() => runClipQueue().catch((error) => console.error('Clip queue failed:', error.message)));
 }
 
-async function processHighlightBatch(id) {
-  const directory = path.join(uploadDir, `highlights-${id}`);
+const processHighlightBatch = createHighlightProcessor({
+  uploadDir, store, twitch, video, youtube, seo, autoAssignPlaylist,
+  buildHighlightTimeline, buildHighlightDescription, cleanText,
+  logError: (id, error) => console.error('Highlight batch ' + id + ' failed:', error.message)
+});
+const highlightBatchQueue = createBatchQueue(processHighlightBatch, {
+  onError: (id, error) => console.error('Highlight batch queue failed for ' + id + ':', error.message)
+});
+function enqueueHighlightBatch(id) {
+  return highlightBatchQueue.enqueue(id);
+}
+let highlightRetryScanRunning = false;
+async function scheduleDueHighlightRetries() {
+  if (highlightRetryScanRunning) return;
+  highlightRetryScanRunning = true;
   try {
-    const batch = await store.getDraft(id);
-    if (!batch || batch.sourceType !== 'twitch_highlight_batch' || batch.status === 'completed') return;
-    await fs.promises.mkdir(directory, { recursive: true });
-    await store.updateDraft(id, { status: 'creating_twitch_clips', error: null });
-    const sources = [];
-    const twitchClips = [...(batch.twitchClips || [])];
-    for (let index = 0; index < batch.highlights.length; index += 1) {
-      const moment = batch.highlights[index];
-      const clip = twitchClips[index] || await twitch.createClipFromVod({ vodId: batch.vodId, vodOffset: moment.endSeconds, duration: moment.duration, title: moment.title });
-      if (!twitchClips[index]) {
-        twitchClips[index] = clip;
-        await store.updateDraft(id, { twitchClips });
-      }
-      const download = await twitch.waitForClipDownload({ clipId: clip.id, broadcasterId: clip.broadcasterId, editorId: clip.editorId });
-      const url = download.landscape_download_url || download.portrait_download_url;
-      if (!url) throw new Error('Twitch clip media was unavailable');
-      const source = path.join(directory, `source-${index}.mp4`);
-      await twitch.downloadClip(url, source);
-      sources.push(source);
-    }
-    const montage = path.join(directory, 'highlight.mp4');
-    await store.updateDraft(id, { status: 'assembling_highlight_video' });
-    const durations = await video.assembleHighlights(sources, montage, directory);
-    const timeline = buildHighlightTimeline(batch.highlights, durations);
-    const description = batch.pipelineVersion >= 2
-      ? buildHighlightDescription(batch.vodId, timeline)
-      : 'Highlights from https://www.twitch.tv/videos/' + batch.vodId;
-    const highlightTitle = cleanText((batch.streamTitle || 'Saevond livestream') + ' | Best moments', 100);
-    const highlightTags = ['Saevond', 'gaming', 'livestream highlights'];
-    const thumbnailPath = path.join(directory, 'highlight-thumbnail.jpg');
-    let thumbnailStatus = batch.thumbnailStatus || 'pending';
-    let thumbnailError = null;
-    let thumbnailHeadline = batch.thumbnailHeadline || '';
-    let thumbnailReady = false;
-    if (batch.pipelineVersion >= 2 && thumbnailStatus !== 'applied') {
-      const selectedIndex = batch.highlights.reduce((best, item, index, all) =>
-        (Number(item.score) || 0) > (Number(all[best]?.score) || 0) ? index : best, 0);
-      const selected = batch.highlights[selectedIndex];
-      const startOffset = durations.slice(0, selectedIndex).reduce((total, value) => total + value, 0);
-      const frameOffset = startOffset + Math.min(durations[selectedIndex] / 2,
-        Math.max(0.25, durations[selectedIndex] - 0.25));
-      thumbnailHeadline = video.thumbnailHeadline(selected.title || highlightTitle);
-      try {
-        await video.createThumbnail(montage, thumbnailPath, {
-          timestampSeconds: frameOffset,
-          headline: thumbnailHeadline
-        });
-        thumbnailReady = true;
-        thumbnailStatus = 'generated';
-      } catch (error) {
-        thumbnailStatus = 'failed';
-        thumbnailError = cleanText(error.message, 300);
-        console.warn('Thumbnail generation ' + id + ' failed:', error.message);
-      }
-    }
-    const highlight = batch.youtubeVideoId ? { id: batch.youtubeVideoId } : await youtube.uploadPrivate({
-      filePath: montage,
-      title: highlightTitle,
-      description,
-      tags: highlightTags
-    });
-    const playlistAssignment = await autoAssignPlaylist({
-      id: highlight.id, privacyStatus: 'private', title: highlightTitle, description,
-      tags: highlightTags,
-      context: { topic: batch.streamTitle || '', takeaways: batch.highlights.map((moment) =>
-        moment.title + ': ' + moment.reason).join('\n'), videoType: 'Gameplay' }
-    });
-    const highlightPatch = {
-      playlistAssignment,
-      status: 'creating_shorts',
-      youtubeVideoId: highlight.id,
-      duration: timeline.durationSeconds
-    };
-    if (batch.pipelineVersion >= 2) {
-      Object.assign(highlightPatch, {
-        chapterTimestamps: timeline.timestamps.map(({ time, title }) => ({ time, title })),
-        chapters: timeline.chapters.map(({ time, title }) => ({ time, title })),
-        chapterStatus: timeline.chapters.length >= 3 ? 'chapters_added' : 'timestamps_only',
-        thumbnailStatus,
-        thumbnailError,
-        thumbnailHeadline
-      });
-    }
-    await store.updateDraft(id, highlightPatch);
-    if (batch.pipelineVersion >= 2 && thumbnailReady) {
-      try {
-        await youtube.setThumbnail(highlight.id, thumbnailPath);
-        thumbnailStatus = 'applied';
-        thumbnailError = null;
-      } catch (error) {
-        thumbnailStatus = 'failed';
-        thumbnailError = cleanText(error.message, 300);
-        console.warn('Thumbnail upload ' + id + ' failed:', error.message);
-      }
-      await store.updateDraft(id, { thumbnailStatus, thumbnailError, thumbnailHeadline });
-    }
-    let markerOffset = 0;
-    const markers = batch.highlights.flatMap((moment, index) => {
-      const length = durations[index];
-      const chapter = { kind: 'chapter', startSeconds: markerOffset, title: moment.title, provenance: 'twitch_highlight' };
-      const clip = { kind: 'clip', startSeconds: markerOffset, endSeconds: markerOffset + Math.min(60, length),
-        title: moment.title, provenance: 'twitch_highlight' };
-      markerOffset += length;
-      return [chapter, clip];
-    });
-    await seo.registerUpload(highlight.id, {
-      title: highlightTitle,
-      description,
-      tags: highlightTags,
-      durationSeconds: markerOffset,
-      context: { topic: batch.streamTitle || '', takeaways: batch.highlights.map((moment) =>
-        moment.title + ': ' + moment.reason).join('\n'), videoType: 'Gameplay' },
-      markers
-    }).catch((error) => console.error('Highlight SEO registration failed:', error.message));
-
-    const existingShorts = (await store.listDrafts()).filter((draft) => draft.parentId === id);
-    let offset = 0;
-    const failures = [];
-    for (let index = 0; index < batch.highlights.length; index += 1) {
-      const moment = batch.highlights[index];
-      const length = Math.min(60, durations[index]);
-      const shortPath = path.join(directory, `short-${index}.mp4`);
-      try {
-        if (existingShorts.some((draft) => draft.highlightIndex === index)) { offset += durations[index]; continue; }
-        await video.shortFromHighlight(montage, offset, length, shortPath);
-        const shortDescription = (moment.reason || 'Livestream highlight') +
-          '\n\nHighlight video: https://youtu.be/' + highlight.id + '\n#Saevond #Shorts';
-        const shortTags = ['Saevond', 'gaming', 'Shorts'];
-        const uploaded = await youtube.uploadPrivate({ filePath: shortPath, title: moment.title,
-          description: shortDescription, tags: shortTags });
-        const playlistAssignment = await autoAssignPlaylist({
-          id: uploaded.id, privacyStatus: 'private', title: moment.title, description: shortDescription,
-          tags: shortTags,
-          context: { takeaways: moment.reason || moment.title, videoType: 'Gameplay' }
-        });
-        await store.addDraft({ id: crypto.randomUUID(), sourceType: 'twitch_highlight_short', parentId: id, highlightIndex: index,
-          vodId: batch.vodId, title: moment.title, youtubeVideoId: uploaded.id, playlistAssignment,
-          status: 'awaiting_owner_approval', createdAt: new Date().toISOString() });
-        await seo.registerUpload(uploaded.id, {
-          title: moment.title, description: shortDescription, tags: shortTags,
-          durationSeconds: length, context: { takeaways: moment.reason || moment.title, videoType: 'Gameplay' },
-          markers: [{ kind: 'clip', startSeconds: 0, endSeconds: length,
-            title: moment.title, provenance: 'twitch_highlight' }]
-        }).catch((error) => console.error('Stream Short SEO registration failed:', error.message));
-      } catch (error) {
-        failures.push(`${index + 1}: ${cleanText(error.message, 150)}`);
-      }
-      offset += durations[index];
-    }
-    await store.updateDraft(id, { status: 'awaiting_owner_approval',
-      error: failures.length ? failures.join('; ') : null, processedAt: new Date().toISOString() });
+    const drafts = await store.listDrafts();
+    findDueHighlightRetries(drafts).forEach((draft) => enqueueHighlightBatch(draft.id));
   } catch (error) {
-    console.error(`Highlight batch ${id} failed:`, error.message);
-    await store.updateDraft(id, { status: 'clip_failed', error: cleanText(error.message, 500) }).catch(() => {});
+    console.error('Failed to scan scheduled highlight retries:', error.message);
   } finally {
-    await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => {});
+    highlightRetryScanRunning = false;
   }
 }
-
-const batchQueue = [];
-const queuedBatchIds = new Set();
-let batchWorkerRunning = false;
-function enqueueHighlightBatch(id) {
-  if (queuedBatchIds.has(id)) return;
-  queuedBatchIds.add(id);
-  batchQueue.push(id);
-  setImmediate(async () => {
-    if (batchWorkerRunning) return;
-    batchWorkerRunning = true;
-    try {
-      while (batchQueue.length) {
-        const next = batchQueue.shift();
-        try { await processHighlightBatch(next); } finally { queuedBatchIds.delete(next); }
-      }
-    } finally { batchWorkerRunning = false; }
-  });
-}
+const highlightRetryTimer = setInterval(() => { void scheduleDueHighlightRetries(); }, 30 * 1000);
+highlightRetryTimer.unref();
 
 app.get('/', (_req, res) => {
   res.set('Cache-Control', 'no-store');
@@ -1025,7 +872,7 @@ app.post('/api/twitch/vod-clips', vodWebhookOrAgentOrAdmin, async (req, res, nex
     const highlights = normalizeHighlights(req.body?.timestamps);
     const channel = cleanText(req.body?.channel || 'saevond', 50);
     const existingDrafts = await store.listDrafts();
-    let batch = existingDrafts.find((draft) => draft.sourceType === 'twitch_highlight_batch' && draft.vodId === vodId);
+    let batch = findHighlightBatchByVodId(existingDrafts, vodId);
     if (!batch) {
       batch = await store.addDraft({ id: crypto.randomUUID(), sourceType: 'twitch_highlight_batch',
         sourceChannel: channel, vodId, highlights, streamTitle: cleanText(req.body?.streamTitle, 80),
@@ -1048,11 +895,15 @@ app.post('/api/drafts/:id/retry', admin, async (req, res, next) => {
   try {
     const draft = await store.getDraft(req.params.id);
     if (!draft) return res.status(404).json({ error: 'Draft not found' });
-    if (!['twitch_vod', 'twitch_highlight_batch'].includes(draft.sourceType)
-      || (draft.status !== 'clip_failed' && !(draft.sourceType === 'twitch_highlight_batch' && draft.error))) {
+    const retryable = ['clip_failed', 'clip_partial', 'clip_retry_wait'].includes(draft.status) ||
+      draft.sourceType === 'twitch_highlight_batch' && Boolean(draft.error);
+    if (!['twitch_vod', 'twitch_highlight_batch'].includes(draft.sourceType) || !retryable) {
       return res.status(409).json({ error: 'Only failed Twitch clip jobs can be retried' });
     }
-    const updated = await store.updateDraft(draft.id, { status: 'clip_queued', error: null });
+    const updated = await store.updateDraft(draft.id, {
+      status: 'clip_queued', productionState: 'queued', productionFailures: [],
+      clipAttemptCount: 0, nextClipAttemptAt: null, error: null
+    });
     if (draft.sourceType === 'twitch_highlight_batch') enqueueHighlightBatch(draft.id);
     else enqueueClipProcessing(draft.id);
     res.json(updated);
@@ -1124,6 +975,7 @@ store.init()
       seo.schedule();
       monetization.schedule();
       market.schedule();
+      void scheduleDueHighlightRetries();
       try {
         const drafts = await store.listDrafts();
         const resumable = new Set([

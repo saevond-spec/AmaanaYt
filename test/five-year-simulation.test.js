@@ -23,3 +23,33 @@ test('five-year simulation reports draft volume, queue throughput, and quota hea
   assert.equal(result.youtubeApiQuota.combinedDailyQuotaUnitsWith50PerDayThumbnailBackfill, 7890);
   assert.equal(result.youtubeApiQuota.headroomWithBulkThumbnailBackfillBeforeReads, 2110);
 });
+
+test('five-year lifecycle simulation exercises baseline and deterministic recovery stress', () => {
+  const result = simulateFiveYears({ startDate: '2026-10-02', streamsPerDay: 1, momentsPerStream: 3,
+    productionAttemptsPerDay: 4, productionMaxAttempts: 8 });
+  const reliability = result.productionReliability;
+  const baseline = reliability.baseline;
+  const stress = reliability.recoveryStress;
+
+  assert.equal(reliability.assumptions.modelDays, 1826);
+  assert.match(reliability.assumptions.timestampSource, /external detector/);
+  assert.match(reliability.assumptions.stressSchedule, /not measured production failure rates/);
+  assert.equal(baseline.submittedBatches, 1826);
+  assert.equal(baseline.completedBatches, 1826);
+  assert.equal(baseline.privateVideosProduced, 7304);
+  assert.equal(baseline.automaticRetries, 0);
+  assert.equal(baseline.visibilityInvariant, true);
+  assert.equal(stress.submittedBatches, 1826);
+  assert.equal(stress.completedBatches, 1825);
+  assert.equal(stress.batchesNeedingManualRecovery, 1);
+  assert.equal(stress.queuedAtHorizon, 0);
+  assert.equal(stress.duplicateWebhookDeliveries, 260);
+  assert.ok(stress.automaticRetries > 0);
+  assert.ok(stress.simulatedProcessRestarts > 0);
+  assert.equal(stress.duplicateParentUploads, 0);
+  assert.equal(stress.generatedPublicVideos, 0);
+  assert.equal(stress.existingVisibilityMutations, 0);
+  assert.equal(stress.visibilityInvariant, true);
+  assert.equal(stress.parentPrivateUploads, 1825);
+  assert.equal(stress.shortPrivateUploads, 5475);
+});
