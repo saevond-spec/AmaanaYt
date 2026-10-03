@@ -8,6 +8,8 @@ For new Twitch highlight batches, Amaana derives moment timestamps from FFmpeg-m
 
 Generated Shorts can also be sent to the creator's TikTok inbox **one at a time after the creator previews and consents to each transfer**. The creator edits and completes each post in the TikTok app. TikTok delivery does not happen automatically at stream end.
 
+Amaana can list and create the channel's YouTube playlists and add a video from a private draft or the public SEO catalog after an owner action. New playlists default to private. Private and unlisted videos can only be added to private playlists; adding an item never changes video visibility.
+
 ## Five-year capacity simulation
 
 Run `npm run simulate:five-years` to estimate pipeline volume, SEO analysis backlog, safe write throughput, and YouTube API quota use over five years. The default scenario assumes one six-hour Twitch VOD per day, three selected moments per VOD, and a 1,000-video public-library stress cohort with 30% missing analysis. These are adjustable load-test assumptions, not channel measurements.
