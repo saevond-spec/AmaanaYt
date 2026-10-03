@@ -8,7 +8,7 @@ For new Twitch highlight batches, Amaana derives moment timestamps from FFmpeg-m
 
 Generated Shorts can also be sent to the creator's TikTok inbox **one at a time after the creator previews and consents to each transfer**. The creator edits and completes each post in the TikTok app. TikTok delivery does not happen automatically at stream end.
 
-Amaana can list and create the channel's YouTube playlists and add a video from a private draft or the public SEO catalog after an owner action. New playlists default to private. Private and unlisted videos can only be added to private playlists; adding an item never changes video visibility.
+Amaana can list and create the channel's YouTube playlists and automatically place confident metadata matches from the existing public, private, and unlisted catalog. New drafts and private/unlisted catalog videos can only go into private playlists; public videos prefer a matching public playlist. Adding a playlist item never changes video visibility.
 
 ## Five-year capacity simulation
 
@@ -26,7 +26,7 @@ The simulator forecasts operational capacity only; it does not predict views, re
 - `ADMIN_KEY` controls OAuth connection, draft review, publication, and scheduling.
 - New uploads always start as private.
 - TikTok delivery requires owner approval per Short. TikTok media URLs are signed and expire.
-- Amaana automatically applies evidence-backed SEO titles, descriptions, and tags only to videos that are already public on the connected channel. It never changes video visibility through this path. Private and unlisted videos remain untouched. It preserves existing description text, links, and disclosures, and skips videos when evidence or metadata checks fail.
+- Amaana automatically applies evidence-backed SEO titles, descriptions, and tags to eligible public, private, and unlisted videos on the connected channel. Video visibility is never included in these updates. Public videos require video analysis or owner takeaways; private and unlisted videos use metadata only and require at least 100 characters of existing description or owner takeaways. It preserves existing description text, links, and disclosures, and skips videos when evidence or metadata checks fail.
 - Amaana updates channel keywords from analyzed public uploads and fills an empty channel description with a brief, topic-grounded description. It does not post comments or Community posts.
 - The service does not delete existing videos.
 
@@ -191,9 +191,9 @@ Do not give OpenClaw `ADMIN_KEY`.
 
 Amaana compares each video's title, description, tags, and owner-entered topic fields with the titles and descriptions of playlists owned by the connected channel. A confident match is added automatically. If multiple playlists match equally or the metadata is too broad, the video stays unassigned. It does not create playlists automatically; create the right series playlists in the dashboard first.
 
-New private uploads and Twitch highlights are assigned only to private playlists while they remain drafts. Existing public catalog videos are processed from YouTube metadata; public videos prefer public playlists, with a matching private or unlisted playlist as a fallback. Existing private and unlisted videos are not scanned or changed. Playlist assignment never changes a video's visibility. Creating a new public playlist makes previously unmatched public catalog videos eligible for another pass.
+New private uploads and Twitch highlights are assigned only to private playlists while they remain drafts. Existing public, private, and unlisted catalog videos are classified from YouTube metadata; public videos prefer public playlists, with a matching private or unlisted playlist as a fallback, while private and unlisted videos only use private playlists. Playlist assignment never changes a video's visibility. Creating a playlist makes previously unmatched catalog videos eligible for another pass.
 
-**YOUTUBE_AUTO_PLAYLISTS** defaults to true. **YOUTUBE_AUTO_PLAYLIST_DAILY_LIMIT** defaults to 20 assignment attempts per YouTube quota day (midnight Pacific) for public videos and 20 for private/unlisted videos; each group is capped at 20. **YOUTUBE_AUTO_PLAYLIST_BATCH_SIZE** defaults to 20 public videos per worker pass. Disable automatic placement with **YOUTUBE_AUTO_PLAYLISTS=false**. The five-year simulator includes one playlist-item duplicate check and all 20 possible owned-playlist pages for each assignment, plus the insert unit cost.
+**YOUTUBE_AUTO_PLAYLISTS** defaults to true. **YOUTUBE_AUTO_PLAYLIST_DAILY_LIMIT** defaults to 20 assignment attempts per YouTube quota day (midnight Pacific) for public videos and 20 for the combined private/unlisted group; each group is capped at 20. **YOUTUBE_AUTO_PLAYLIST_BATCH_SIZE** defaults to 20 catalog videos per worker pass. Disable automatic placement with **YOUTUBE_AUTO_PLAYLISTS=false**. The five-year simulator includes one playlist-item duplicate check and all 20 possible owned-playlist pages for each assignment, plus the insert unit cost.
 
 ### SEO packages for every channel upload
 
@@ -223,7 +223,7 @@ Add the topic, primary keyword, script or key takeaways, audience, and video typ
 ]
 ```
 
-Saving context queues a replacement package. SEO status and catalog APIs require the owner session or `x-admin-key`: `GET /api/seo/status`, `GET /api/seo/channel`, `GET /api/seo/videos?offset=0`, `PUT /api/seo/videos/{videoId}/context`, `POST /api/seo/videos/{videoId}/regenerate`, and `POST /api/seo/backfill` with `{"enabled":true}` or `{"enabled":true,"restart":true}`. Pausing with `{"enabled":false}` pauses generation and automatic publication. Automatic publishing requires the explicit owner-approved `SEO_AUTO_PUBLISH=true` setting in `render.yaml`; removing it or setting it to `false` stops automatic metadata writes. `SEO_AUTO_DAILY_LIMIT` caps metadata updates at 50 per UTC day by default. New private uploads from the dashboard and Twitch jobs enter the SEO queue, but this workflow never edits or publishes private, unlisted, or unpublished videos. Active or upcoming public broadcasts wait until they end before an SEO write is attempted again.
+Saving context queues a replacement package. SEO status and catalog APIs require the owner session or `x-admin-key`: `GET /api/seo/status`, `GET /api/seo/channel`, `GET /api/seo/videos?offset=0`, `PUT /api/seo/videos/{videoId}/context`, `POST /api/seo/videos/{videoId}/regenerate`, and `POST /api/seo/backfill` with `{"enabled":true}` or `{"enabled":true,"restart":true}`. Pausing with `{"enabled":false}` pauses generation and automatic publication. Automatic publishing requires the explicit owner-approved `SEO_AUTO_PUBLISH=true` setting in `render.yaml`; removing it or setting it to `false` stops automatic metadata writes. `SEO_AUTO_DAILY_LIMIT` caps metadata updates at 50 per UTC day by default. New private uploads from the dashboard and Twitch jobs enter the SEO queue. The catalog backfill also applies eligible metadata SEO to existing private and unlisted videos without changing their privacy status. Private/unlisted video analysis stays metadata-only; the publisher rechecks the live status and skips a video if its visibility changed since scanning. Active or upcoming broadcasts wait until they end before an SEO write is attempted again.
 
 For a one-time owner-approved resume of a paused SEO catalog, set a new nonempty `SEO_OWNER_APPROVAL_ID` on the service. The worker stores that marker and enables the catalog once. A later dashboard pause stays paused, even while the setting remains present.
 

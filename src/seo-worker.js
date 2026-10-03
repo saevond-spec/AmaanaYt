@@ -85,12 +85,13 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     return page;
   }
 
-  async function assignPublicPlaylists() {
-    if (!playlistAuto?.enabled || typeof playlistAuto.assignPublicBacklog !== 'function') return;
+  async function assignCatalogPlaylists() {
+    const assignBacklog = playlistAuto?.assignCatalogBacklog || playlistAuto?.assignPublicBacklog;
+    if (!playlistAuto?.enabled || typeof assignBacklog !== 'function') return;
     try {
-      const result = await playlistAuto.assignPublicBacklog();
+      const result = await assignBacklog.call(playlistAuto);
       if (result.attempted) logger.info?.('Automatic playlists: attempted ' + result.attempted +
-        ' public videos; assigned ' + result.assigned);
+        ' channel videos; assigned ' + result.assigned);
     } catch (error) {
       logger.warn?.('Automatic playlist scan failed:', error.message);
     }
@@ -146,7 +147,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
         if (!state.cursor) state.completed = true;
         await store.saveSeoSyncState(state);
       }
-      await assignPublicPlaylists();
+      await assignCatalogPlaylists();
       if (publisher && state.enabled !== false) {
         await publisher.publishPending().catch((error) => logger.warn?.('SEO auto publish scan failed:', error.message));
         await publisher.updateChannel().catch((error) => logger.warn?.('SEO channel update failed:', error.message));

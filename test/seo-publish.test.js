@@ -39,10 +39,24 @@ test('automatic copy preserves existing links and disclosures without inserting 
   assert.ok(auditVideo(item()).some((finding) => finding.includes('keyword')));
 });
 
-test('automatic publishing requires public source and actual video evidence', () => {
-  assert.throws(() => automaticVideoEdit(item({ source: { ...item().source, privacyStatus: 'private' } })),
-    /Only existing public videos/);
+test('automatic publishing supports all video visibility states with evidence gates', () => {
+  assert.throws(() => automaticVideoEdit(item({
+    source: { ...item().source, privacyStatus: 'scheduled' }
+  })), /public, private, and unlisted/);
   assert.throws(() => automaticVideoEdit(item({ analysis: null })), /Video analysis or owner/);
+  for (const privacyStatus of ['private', 'unlisted']) {
+    assert.throws(() => automaticVideoEdit(item({
+      source: { ...item().source, privacyStatus, description: 'Short metadata only' },
+      analysis: null
+    })), /100 characters of existing description/);
+    const description = 'ARC Raiders gameplay details from the recorded match. '.repeat(4);
+    const edit = automaticVideoEdit(item({
+      source: { ...item().source, privacyStatus, description },
+      analysis: null
+    }));
+    assert.equal(edit.description.includes(description.trim()), true);
+    assert.equal(Object.hasOwn(edit, 'status'), false);
+  }
   assert.throws(() => automaticVideoEdit(item({
     package: { ...item().package, missingEvidence: ['Script or key takeaways needed'] }
   })), /insufficient evidence/);
@@ -78,36 +92,54 @@ test('description length uses YouTube UTF-8 byte limit', () => {
   assert.ok(Buffer.byteLength(edit.description, 'utf8') <= 5000);
 });
 
-test('publisher updates only a matching public video, with no visibility update', async () => {
-  const row = item();
-  const events = [];
-  const store = {
-    getSeoVideo: async () => row,
-    getSeoSyncState: async () => ({ channelId: 'channel-1' }),
-    markSeoApplied: async (_id, applied) => events.push(['applied', applied]),
-    markSeoAutoResult: async (_id, result) => events.push(['result', result]),
-    upsertSeoVideo: async (_id, source) => events.push(['source', source])
-  };
-  const youtube = {
-    ownedChannel: async () => ({ id: 'channel-1' }),
-    assertTargetChannel: async (id) => { assert.equal(id, 'channel-1'); },
-    getVideo: async () => ({ snippet: { ...row.source, categoryId: '20' },
-      status: { privacyStatus: 'public' } }),
-    updateVideoSeo: async (_id, _video, edit) => {
-      events.push(['youtube', edit]);
-      assert.equal(Object.hasOwn(edit, 'status'), false);
-    }
-  };
-  const publisher = createSeoPublisher({ store, youtube, logger: { info() {}, warn() {} } });
-  await publisher.publishVideo(row.videoId);
-  assert.deepEqual(events.map(([type]) => type), ['youtube', 'applied', 'source', 'result']);
-  assert.equal(events.at(-1)[1].state, 'applied');
+test('publisher applies SEO to public, private, and unlisted videos without sending visibility', async () => {
+  for (const privacyStatus of ['public', 'private', 'unlisted']) {
+    const base = item();
+    const description = privacyStatus === 'public'
+      ? base.source.description
+      : 'ARC Raiders gameplay details from the recorded match. '.repeat(4);
+    const row = item({
+      source: { ...base.source, privacyStatus, description },
+      analysis: privacyStatus === 'public' ? base.analysis : null
+    });
+    const events = [];
+    const store = {
+      getSeoVideo: async () => row,
+      getSeoSyncState: async () => ({ channelId: 'channel-1' }),
+      markSeoApplied: async (_id, applied) => events.push(['applied', applied]),
+      markSeoAutoResult: async (_id, result) => events.push(['result', result]),
+      upsertSeoVideo: async (_id, source) => events.push(['source', source])
+    };
+    const youtube = {
+      ownedChannel: async () => ({ id: 'channel-1' }),
+      assertTargetChannel: async (id) => { assert.equal(id, 'channel-1'); },
+      getVideo: async () => ({ snippet: { ...row.source, categoryId: '20' },
+        status: { privacyStatus } }),
+      updateVideoSeo: async (_id, video, edit) => {
+        assert.equal(video.status.privacyStatus, privacyStatus);
+        events.push(['youtube', edit]);
+        assert.equal(Object.hasOwn(edit, 'status'), false);
+      }
+    };
+    const publisher = createSeoPublisher({ store, youtube, logger: { info() {}, warn() {} } });
+    await publisher.publishVideo(row.videoId);
+    assert.deepEqual(events.map(([type]) => type), ['youtube', 'applied', 'source', 'result']);
+    assert.equal(events[0][1].status, undefined);
+    assert.equal(events.at(-1)[1].state, 'applied');
+    assert.equal(events[1][1].privacyStatus, privacyStatus);
+    assert.equal(events[2][1].privacyStatus, privacyStatus);
+  }
 });
 
-test('publisher does not edit private or newly unlisted videos', async () => {
+test('publisher skips when live visibility differs from the scanned visibility', async () => {
   let updates = 0;
   let result;
-  const row = item();
+  const base = item();
+  const row = item({
+    source: { ...base.source, privacyStatus: 'private',
+      description: 'ARC Raiders gameplay details from the recorded match. '.repeat(4) },
+    analysis: null
+  });
   const store = {
     getSeoVideo: async () => row,
     getSeoSyncState: async () => ({ channelId: 'channel-1' }),
@@ -124,14 +156,7 @@ test('publisher does not edit private or newly unlisted videos', async () => {
   await publisher.publishVideo(row.videoId);
   assert.equal(updates, 0);
   assert.equal(result.state, 'skipped');
-  await publisher.publishVideo(row.videoId);
-  assert.equal(updates, 0);
-  const privatePublisher = createSeoPublisher({
-    store: { getSeoVideo: async () => item({ source: { ...row.source, privacyStatus: 'private' } }) },
-    youtube, logger: { info() {}, warn() {} }
-  });
-  await privatePublisher.publishVideo(row.videoId);
-  assert.equal(updates, 0);
+  assert.match(result.reason, /visibility changed/);
 });
 
 test('publisher does not change an active public livestream', async () => {
@@ -301,7 +326,9 @@ test('worker analyzes a public upload, publishes its SEO, and updates channel ke
   const original = new Map(visibility.map((privacyStatus, index) => {
     const id = `video-${index}`;
     return [id, {
-      id, snippet: { title: `ARC Raiders match ${index}`, description: 'Original links: https://example.com',
+      id, snippet: { title: `ARC Raiders match ${index}`, description: privacyStatus === 'public'
+        ? 'Original links: https://example.com'
+        : 'ARC Raiders gameplay details from the recorded match. '.repeat(4),
         tags: ['ARC Raiders'], channelId: 'channel-1', categoryId: '20',
         publishedAt: '2026-10-01T10:00:00.000Z', liveBroadcastContent: 'none' },
       status: { privacyStatus }, contentDetails: { duration: 'PT3M' }, etag: `etag-${index}`
@@ -318,7 +345,7 @@ test('worker analyzes a public upload, publishes its SEO, and updates channel ke
     getSeoSyncState: async () => sync,
     saveSeoSyncState: async (state) => { sync = state; },
     listSeoAutoCandidates: async () => [...rows.values()].filter((row) =>
-      row.package && row.source.privacyStatus === 'public' && !row.autoResult),
+      row.package && ['public', 'private', 'unlisted'].includes(row.source.privacyStatus) && !row.autoResult),
     listSeoChannelCandidates: async () => [...rows.values()].filter((row) =>
       row.source.privacyStatus === 'public' && row.package),
     listSeoVideos: async () => { throw new Error('Channel should use public package candidates'); },
@@ -328,7 +355,8 @@ test('worker analyzes a public upload, publishes its SEO, and updates channel ke
     seoCounts: async () => ({ statuses: {}, attemptedToday: 0 }),
     claimSeoVideo: async () => {
       const row = [...rows.values()].find((candidate) =>
-        candidate.status === 'queued' && candidate.source.privacyStatus === 'public');
+        candidate.status === 'queued' &&
+        ['public', 'private', 'unlisted'].includes(candidate.source.privacyStatus));
       if (!row) return null;
       row.status = 'generating';
       return { ...row, claimToken: 'claim-1', attempts: 1 };
@@ -351,7 +379,7 @@ test('worker analyzes a public upload, publishes its SEO, and updates channel ke
     channelSeo: async () => ({ id: 'channel-1', title: 'Saevond',
       description: 'Original channel description', keywords: channelKeywords }),
     updateVideoSeo: async (id, video, edit) => {
-      assert.equal(video.status.privacyStatus, 'public');
+      assert.equal(video.status.privacyStatus, rows.get(id).source.privacyStatus);
       assert.equal(Object.hasOwn(edit, 'status'), false);
       events.push(['video', id]);
       Object.assign(video.snippet, edit);
@@ -374,23 +402,32 @@ test('worker analyzes a public upload, publishes its SEO, and updates channel ke
     events.push(['analysis', 'video-0']);
     return { summary: 'An ARC Raiders match' };
   }, generate: async (source, _context, options) => {
-    assert.equal(source.privacyStatus, 'public');
-    assert.equal(options.analysis.summary, 'An ARC Raiders match');
-    events.push(['package', 'video-0']);
+    const id = 'video-' + source.title.split(' ').at(-1);
+    if (source.privacyStatus === 'public') {
+      assert.equal(options.analysis.summary, 'An ARC Raiders match');
+    } else {
+      assert.equal(options.analysis, null);
+    }
+    events.push(['package', id]);
     return { ...item().package, missingEvidence: [] };
   } });
   await worker.run();
-  assert.deepEqual(events.map(([kind]) => kind), ['analysis', 'package', 'video', 'channel']);
+  assert.deepEqual(events.map(([kind]) => kind),
+    ['analysis', 'package', 'video', 'channel', 'package', 'video', 'package', 'video']);
   assert.equal(rows.get('video-0').autoResult.state, 'applied');
   assert.equal(rows.get('video-0').applied.privacyStatus, 'public');
-  assert.equal(rows.get('video-1').package, undefined);
-  assert.equal(rows.get('video-2').package, undefined);
-  assert.equal(original.get('video-1').snippet.title, 'ARC Raiders match 1');
-  assert.equal(original.get('video-2').snippet.title, 'ARC Raiders match 2');
+  assert.equal(rows.get('video-1').autoResult.state, 'applied');
+  assert.equal(rows.get('video-1').applied.privacyStatus, 'private');
+  assert.equal(rows.get('video-2').autoResult.state, 'applied');
+  assert.equal(rows.get('video-2').applied.privacyStatus, 'unlisted');
+  assert.equal(original.get('video-1').status.privacyStatus, 'private');
+  assert.equal(original.get('video-2').status.privacyStatus, 'unlisted');
+  assert.equal(original.get('video-1').snippet.title, 'ARC Raiders Gameplay Highlights');
+  assert.equal(original.get('video-2').snippet.title, 'ARC Raiders Gameplay Highlights');
   assert.equal(channelKeywords, 'gaming "ARC Raiders"');
   assert.ok(diagnostics.some((line) => line.includes('providerConfigured":true')));
   await worker.run();
-  assert.equal(events.length, 4);
+  assert.equal(events.length, 8);
 });
 
 test('worker reports missing YouTube connection once without accessing the catalog', async () => {

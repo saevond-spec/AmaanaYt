@@ -40,6 +40,47 @@ test('daily cap defers assignment without playlist API writes', async () => {
 });
 
 
+test('catalog backlog classifies private and unlisted videos into private playlists only', async () => {
+  const reservations = [];
+  const additions = [];
+  const results = [];
+  const candidates = [
+    { videoId: 'abcdefghijk', source: { title: 'ARC Raiders clutch extraction',
+      description: '', tags: ['ARC Raiders'], privacyStatus: 'private' } },
+    { videoId: 'lmnopqrstuv', source: { title: 'Naraka Bladepoint Songbird Arena',
+      description: '', tags: ['Naraka Bladepoint'], privacyStatus: 'unlisted' } }
+  ];
+  const assigner = createPlaylistAutoAssigner({
+    store: {
+      listSeoNeedsPlaylist: async () => candidates,
+      markSeoPlaylistResult: async (id, result) => results.push([id, result]),
+      reservePlaylistAutoSlot: async (privacyStatus) => {
+        reservations.push(privacyStatus);
+        return { allowed: true };
+      }
+    },
+    youtube: {
+      listOwnedPlaylists: async () => [
+        { id: 'PL-arc-private', title: 'ARC Raiders', privacyStatus: 'private' },
+        { id: 'PL-arc-public', title: 'ARC Raiders', privacyStatus: 'public' },
+        { id: 'PL-naraka-private', title: 'Naraka Bladepoint', privacyStatus: 'private' },
+        { id: 'PL-naraka-public', title: 'Naraka Bladepoint', privacyStatus: 'public' }
+      ],
+      addVideoToPlaylist: async (input) => { additions.push(input); return { alreadyAdded: false }; }
+    },
+    logger: { warn() {} }
+  });
+  const result = await assigner.assignCatalogBacklog();
+  assert.deepEqual(reservations, ['private', 'unlisted']);
+  assert.equal(result.attempted, 2);
+  assert.equal(result.assigned, 2);
+  assert.deepEqual(additions, [
+    { playlistId: 'PL-arc-private', videoId: 'abcdefghijk' },
+    { playlistId: 'PL-naraka-private', videoId: 'lmnopqrstuv' }
+  ]);
+  assert.ok(results.every(([, value]) => value.privacyStatus === 'private'));
+});
+
 test('playlist quota day follows YouTube midnight Pacific reset', () => {
   assert.equal(youtubeQuotaDate(Date.parse('2026-10-03T06:30:00Z')), '2026-10-02');
   assert.equal(youtubeQuotaDate(Date.parse('2026-10-03T08:00:00Z')), '2026-10-03');

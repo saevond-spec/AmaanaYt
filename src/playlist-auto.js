@@ -65,7 +65,7 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
     }
   }
 
-  async function assignPublicBacklog() {
+  async function assignCatalogBacklog() {
     if (!enabled || typeof store.listSeoNeedsPlaylist !== 'function' ||
         typeof store.markSeoPlaylistResult !== 'function') return { attempted: 0, assigned: 0 };
     const candidates = await store.listSeoNeedsPlaylist(batchSize);
@@ -76,8 +76,7 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
         ...(candidate.source || {}),
         id: candidate.videoId,
         context: candidate.context || {},
-        package: candidate.package || null,
-        privacyStatus: 'public'
+        package: candidate.package || null
       });
       if (result.state === 'daily_limit') break;
       attempted += 1;
@@ -87,7 +86,7 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
     return { attempted, assigned };
   }
 
-  return { enabled, dailyLimit, assign, assignPublicBacklog,
+  return { enabled, dailyLimit, assign, assignCatalogBacklog, assignPublicBacklog: assignCatalogBacklog,
     invalidatePlaylists: () => { playlistsCache = null; playlistsCacheAt = 0; } };
 }
 
