@@ -835,6 +835,7 @@ app.get('/api/youtube/playlists', admin, async (_req, res, next) => {
 app.post('/api/youtube/playlists', admin, async (req, res, next) => {
   try {
     const playlist = await youtube.createPlaylist(req.body || {});
+    playlistAuto.invalidatePlaylists();
     if (playlist.privacyStatus === 'public') await store.resetSeoPlaylistResults();
     seo.schedule(true);
     res.status(201).json(playlist);
