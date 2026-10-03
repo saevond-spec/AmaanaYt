@@ -380,6 +380,38 @@ async function seoCounts() {
   };
 }
 
+async function requeueLegacySeoTagFailures() {
+  await init();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const claimed = await client.query(`INSERT INTO amaana_state (key, value, updated_at)
+      VALUES ('seo_tag_recovery_focused_v1', '{"done":true}'::jsonb, NOW())
+      ON CONFLICT (key) DO NOTHING RETURNING key`);
+    if (!claimed.rowCount) {
+      await client.query('COMMIT');
+      return 0;
+    }
+    const result = await client.query(`UPDATE amaana_seo_packages
+      SET status = 'queued', package = NULL, attempts = 0, error = NULL,
+        next_attempt_at = NULL, claim_token = NULL, claimed_at = NULL,
+        generated_at = NULL, auto_result = NULL, updated_at = NOW()
+      WHERE status = 'failed' AND (
+        error ILIKE 'Expected 10%15%tag%'
+        OR error ILIKE 'Tags exceed the recommended combined length%'
+        OR error ILIKE 'Tags must include the exact primary keyword%'
+      )
+      RETURNING video_id`);
+    await client.query('COMMIT');
+    return result.rowCount;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function updateSeoContext(videoId, context) {
   await init();
   const result = await pool.query(`UPDATE amaana_seo_packages
@@ -506,6 +538,7 @@ module.exports = {
   getVideoAnalysis,
   saveVideoAnalysis,
   seoCounts,
+  requeueLegacySeoTagFailures,
   updateSeoContext,
   claimSeoVideo,
   finishSeoVideo,
