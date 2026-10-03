@@ -651,6 +651,11 @@ test('two-year queue simulation drains the active backlog and requeues only lega
   rows.push(makeRow(2569, 'failed', 'Tags exceed the recommended combined length', 3));
   rows.push(makeRow(2570, 'failed', 'Tags must include the exact primary keyword', 3));
   rows.push(makeRow(2571, 'failed', 'Invalid JSON output', 3));
+  for (const [index, privacyStatus] of [[2572, 'private'], [2573, 'unlisted']]) {
+    const row = makeRow(index, 'failed', 'Tags exceed the recommended combined length', 3);
+    row.source = { ...row.source, privacyStatus };
+    rows.push(row);
+  }
 
   let sync = { channelId: 'channel-1', recentAt: '2099-01-01T00:00:00.000Z',
     completed: true, enabled: true };
@@ -663,7 +668,7 @@ test('two-year queue simulation drains the active backlog and requeues only lega
       tagRecoveryDone = true;
       let count = 0;
       for (const row of rows) {
-        if (row.status === 'failed' &&
+        if (row.status === 'failed' && row.source.privacyStatus === 'public' &&
             (/^Expected 10.*15.*tag/i.test(row.error || '') ||
              /^Tags exceed the recommended combined length/i.test(row.error || '') ||
              /^Tags must include the exact primary keyword/i.test(row.error || ''))) {
@@ -742,16 +747,19 @@ test('two-year queue simulation drains the active backlog and requeues only lega
 
   const counts = {};
   for (const row of rows) counts[row.status] = (counts[row.status] || 0) + 1;
-  assert.equal(rows.length, 2572);
+  assert.equal(rows.length, 2574);
   assert.equal(recoveryCalls, 2);
   assert.equal(requeuedTotal, 3);
   assert.equal(drainedAfterDay, 13);
   assert.equal(counts.ready, 2441);
   assert.equal(counts.needs_review, 130);
-  assert.equal(counts.failed, 1);
+  assert.equal(counts.failed, 3);
   assert.equal(counts.queued || 0, 0);
   assert.equal(counts.retry || 0, 0);
   assert.equal(counts.generating || 0, 0);
-  assert.ok(rows.every((row) => row.source.privacyStatus === source.privacyStatus));
+  assert.ok(rows.filter((row) => !['video-2572', 'video-2573'].includes(row.videoId))
+    .every((row) => row.source.privacyStatus === source.privacyStatus));
+  assert.equal(rows.find((row) => row.videoId === 'video-2572').status, 'failed');
+  assert.equal(rows.find((row) => row.videoId === 'video-2573').status, 'failed');
 });
 
