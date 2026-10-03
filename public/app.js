@@ -190,6 +190,19 @@ function renderPlaylistAdder(videoId, videoPrivacyStatus = 'private') {
     'Create a private playlist to organize this private or unlisted video.'));
   return box;
 }
+function playlistAssignmentText(result) {
+  if (!result) return '';
+  const title = result.playlistTitle || 'matching playlist';
+  if (result.state === 'added') return 'added to ' + title;
+  if (result.state === 'already_added') return 'already in ' + title;
+  if (result.state === 'no_match') return 'no confident metadata match; left unassigned';
+  if (result.state === 'ambiguous') return 'multiple playlists matched; left unassigned';
+  if (result.state === 'daily_limit') return 'waiting for the daily playlist quota';
+  if (result.state === 'retry') return 'will retry: ' + (result.reason || 'temporary YouTube error');
+  if (result.state === 'disabled') return 'automatic placement is disabled';
+  return String(result.state || 'pending').replaceAll('_', ' ');
+}
+
 function renderDraft(draft) {
   const isHighlight = draft.sourceType === 'twitch_highlight_batch';
   const card = element('article', 'draft');
@@ -200,6 +213,8 @@ function renderDraft(draft) {
 
   const created = draft.createdAt ? new Date(draft.createdAt).toLocaleString() : 'Unknown date';
   card.append(element('p', 'draft-meta', `Created ${created}`));
+  if (draft.playlistAssignment) card.append(element('p', 'draft-meta',
+    'Automatic playlist: ' + playlistAssignmentText(draft.playlistAssignment)));
   if (draft.youtubeVideoId) {
     const playlistControl = renderPlaylistAdder(draft.youtubeVideoId,
       draft.youtubePrivacyStatus === 'public' || draft.status === 'published' ? 'public' : 'private');
@@ -434,6 +449,8 @@ function renderSeoVideo(item) {
   card.append(link);
   if (item.error) card.append(element('p', 'draft-error', item.error));
   card.append(element('p', 'draft-meta', `YouTube visibility: ${item.source.privacyStatus || 'unknown'}`));
+  if (item.playlistResult) card.append(element('p', 'draft-meta',
+    'Automatic playlist: ' + playlistAssignmentText(item.playlistResult)));
   const playlistControl = renderPlaylistAdder(item.videoId, item.source.privacyStatus || 'unknown');
   if (playlistControl) card.append(playlistControl);
   if (item.applied) card.append(element('p', 'draft-meta',
