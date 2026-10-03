@@ -37,6 +37,9 @@ function simulateFiveYears(input = {}) {
   const defaultQuota = positiveInteger(input.defaultQuota ?? process.env.SIM_YOUTUBE_DAILY_QUOTA, 10000);
   const updateUnits = positiveInteger(input.updateUnits ?? process.env.SIM_VIDEO_UPDATE_UNITS, 50);
   const thumbnailUnits = positiveInteger(input.thumbnailUnits ?? process.env.SIM_THUMBNAIL_SET_UNITS, 50);
+  const playlistAutoDailyLimit = positiveInteger(input.playlistAutoDailyLimit ?? process.env.YOUTUBE_AUTO_PLAYLIST_DAILY_LIMIT, 20);
+  const playlistInsertUnits = positiveInteger(input.playlistInsertUnits ?? process.env.SIM_PLAYLIST_ITEM_INSERT_UNITS, 50);
+  const playlistCheckUnits = positiveInteger(input.playlistCheckUnits ?? process.env.SIM_PLAYLIST_ITEM_CHECK_UNITS, 1);
 
   const streams = window.days * streamsPerDay;
   const missingAnalysisVideos = Math.ceil(publicVideos * missingAnalysisShare);
@@ -47,7 +50,9 @@ function simulateFiveYears(input = {}) {
     ? analysisQueueWaitDays + Math.ceil(missingAnalysisVideos / currentAnalysisPerDay) : 0;
   const batchedQueueDays = missingAnalysisVideos
     ? analysisQueueWaitDays + Math.ceil(missingAnalysisVideos / batchedAnalysisPerDay) : 0;
-  const currentDailyUnits = seoWriteDailyLimit * updateUnits + streamsPerDay * thumbnailUnits;
+  const playlistAutoAssignmentsPerDay = playlistAutoDailyLimit * 2;
+  const playlistAutoDailyUnits = playlistAutoAssignmentsPerDay * (playlistInsertUnits + playlistCheckUnits);
+  const currentDailyUnits = seoWriteDailyLimit * updateUnits + streamsPerDay * thumbnailUnits + playlistAutoDailyUnits;
   const bulkThumbnailDailyUnits = thumbnailBackfillDailyLimit * thumbnailUnits;
   const totalWithBulkThumbnailBackfill = currentDailyUnits + bulkThumbnailDailyUnits;
   const candidateScanLimit = 20;
@@ -58,7 +63,8 @@ function simulateFiveYears(input = {}) {
     note: 'Capacity and failure-mode simulation only; it does not forecast views, revenue, or ranking.',
     assumptions: { startDate: window.start, endDate: window.end, days: window.days, streamsPerDay,
       hoursPerStream, momentsPerStream, existingPublicVideoStressCohort: publicVideos,
-      missingAnalysisShare, analysisBatchSize, analysisDailyLimit, seoWriteDailyLimit },
+      missingAnalysisShare, analysisBatchSize, analysisDailyLimit, seoWriteDailyLimit,
+      playlistAutoDailyLimitPerPrivacy: playlistAutoDailyLimit },
     fiveYearPipeline: { streams, activeStreamHours: streams * hoursPerStream,
       privateLandscapeDrafts: streams, privateShortDrafts: streams * momentsPerStream,
       totalPrivateDrafts: streams * (1 + momentsPerStream),
@@ -72,7 +78,9 @@ function simulateFiveYears(input = {}) {
       afterFixCandidatesFreedOnNextScan: permanentForbiddenHead,
       behavior: 'Permanent permission/channel errors are skipped; quota and transient errors remain retryable.' },
     youtubeApiQuota: { defaultDailyUnits: defaultQuota, videoUpdateUnits: updateUnits,
-      thumbnailSetUnits: thumbnailUnits, currentPipelineDailyWriteUnits: currentDailyUnits,
+      thumbnailSetUnits: thumbnailUnits, playlistItemInsertUnits: playlistInsertUnits,
+      playlistItemCheckUnits: playlistCheckUnits, maxPlaylistAssignmentsPerDay: playlistAutoAssignmentsPerDay,
+      automaticPlaylistDailyUnits: playlistAutoDailyUnits, currentPipelineDailyWriteUnits: currentDailyUnits,
       currentPipelineHeadroomBeforeReads: defaultQuota - currentDailyUnits,
       optionalExistingThumbnailBackfillUnitsPerDay: bulkThumbnailDailyUnits,
       combinedDailyWriteUnitsWith50PerDayThumbnailBackfill: totalWithBulkThumbnailBackfill,
