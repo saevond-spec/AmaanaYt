@@ -21,12 +21,14 @@ async function harness(t, options = {}) {
   const batch = {
     id: 'batch-1', sourceType: 'twitch_highlight_batch', vodId: '1234567890',
     highlights: structuredClone(moments), streamTitle: 'Saevond ranked session',
+    vodDurationSeconds: 3600, autoPublishEligible: true, publicationStatus: 'pending',
     pipelineVersion: 2, thumbnailStatus: 'pending', status: 'clip_queued'
   };
   const drafts = new Map([[batch.id, batch]]);
   const counters = {
     clipCreates: 0, uploads: [], thumbnailSets: 0, thumbnailCreates: 0,
-    shortRenders: 0, seo: [], playlists: [], visibilityMutations: 0, errors: []
+    shortRenders: 0, seo: [], playlists: [], visibilityMutations: 0,
+    publicationChecks: [], publications: [], errors: []
   };
   let listFailureUsed = false;
   let clipFailureUsed = false;
@@ -72,6 +74,10 @@ async function harness(t, options = {}) {
     async waitForClipDownload({ clipId }) {
       return { landscape_download_url: 'fixture://' + clipId };
     },
+    async getClip(clipId) {
+      const end = Number(String(clipId).slice('clip-'.length));
+      return { id: clipId, video_id: '1234567890', vod_offset: end - 30 + (options.timestampDrift || 0), duration: 30 };
+    },
     async downloadClip(_url, destination) { await fs.writeFile(destination, 'fixture media'); }
   };
 
@@ -89,12 +95,20 @@ async function harness(t, options = {}) {
       await fs.writeFile(destination, 'fixture montage');
       return options.invalidDuration ? sources.map(() => 0) : sources.map(() => 30);
     },
+    async validateHighlight() {
+      if (options.failHighlightValidation) throw new Error('Landscape validation failed');
+    },
+    async validateShort() {
+      if (options.failShortValidation) throw new Error('Short validation failed');
+    },
     async shortFromHighlight(_source, _offset, _length, destination) {
       counters.shortRenders += 1;
       await fs.writeFile(destination, 'fixture short');
     }
   };
 
+  const youtubeVideos = new Map();
+  let publishFailureUsed = false;
   const youtube = {
     async uploadPrivate(request) {
       const isShort = request.tags.includes('Shorts');
@@ -109,7 +123,30 @@ async function harness(t, options = {}) {
         throw Object.assign(new Error('YouTube upload forbidden'), { status: 403 });
       }
       call.succeeded = true;
-      return { id: isShort ? 'yt-short-' + request.title.toLowerCase().replaceAll(' ', '-') : 'yt-parent' };
+      const id = isShort ? 'yt-short-' + request.title.toLowerCase().replaceAll(' ', '-') : 'yt-parent';
+      call.id = id;
+      youtubeVideos.set(id, 'private');
+      return { id };
+    },
+    async getVideo(videoId) {
+      counters.publicationChecks.push(videoId);
+      const privacyStatus = youtubeVideos.get(videoId) || options.initialPrivacyStatus || 'private';
+      const processingStatus = options.unprocessedVideoId === videoId ? 'processing'
+        : options.failedProcessingVideoId === videoId ? 'failed' : 'succeeded';
+      return { id: videoId, status: { privacyStatus }, processingDetails: { processingStatus } };
+    },
+    async publish(videoId) {
+      counters.publications.push(videoId);
+      if (options.failPublishOnce && counters.publications.length === 2 && !publishFailureUsed) {
+        publishFailureUsed = true;
+        throw Object.assign(new Error('YouTube publication rate limited'), { status: 429 });
+      }
+      if (options.failPublishPermanently) {
+        throw Object.assign(new Error('YouTube publication forbidden'), { status: 403 });
+      }
+      youtubeVideos.set(videoId, options.publishAsUnlisted ? 'unlisted' : 'public');
+      if (youtubeVideos.get(videoId) === 'public') counters.visibilityMutations += 1;
+      return { id: videoId, status: { privacyStatus: youtubeVideos.get(videoId) } };
     },
     async setThumbnail(_videoId, _thumbnailPath) {
       counters.thumbnailSets += 1;
@@ -138,6 +175,7 @@ async function harness(t, options = {}) {
   const dependencies = {
     uploadDir, store, twitch, video, youtube, seo, autoAssignPlaylist,
     buildHighlightTimeline, buildHighlightDescription, cleanText,
+    autoPublish: options.autoPublish !== false,
     idFactory: () => 'short-draft-' + (++idCounter),
     logError: (_id, error) => counters.errors.push(error.message)
   };
@@ -146,23 +184,28 @@ async function harness(t, options = {}) {
     createProcessor: () => createHighlightProcessor(dependencies) };
 }
 
-test('complete production writes private highlight and Shorts, applies thumbnail and registers SEO', async (t) => {
+test('complete production validates media and timestamps, then publishes all outputs after SEO and thumbnail checks', async (t) => {
   const h = await harness(t);
   await h.processor(h.batch.id);
   const parent = h.drafts.get(h.batch.id);
   const shorts = [...h.drafts.values()].filter((draft) => draft.sourceType === 'twitch_highlight_short');
-  assert.equal(parent.status, 'awaiting_owner_approval');
-  assert.equal(parent.productionState, 'ready');
+  assert.equal(parent.status, 'completed');
+  assert.equal(parent.productionState, 'published');
+  assert.equal(parent.publicationStatus, 'published');
+  assert.equal(parent.mediaValidation, 'passed');
   assert.equal(parent.thumbnailStatus, 'applied');
   assert.equal(parent.seoRegistrationStatus, 'registered');
   assert.equal(shorts.length, 3);
-  assert.ok(shorts.every((draft) => draft.status === 'awaiting_owner_approval' &&
-    draft.productionState === 'ready' && draft.seoRegistrationStatus === 'registered'));
+  assert.ok(shorts.every((draft) => draft.status === 'published' &&
+    draft.productionState === 'published' && draft.seoRegistrationStatus === 'registered' &&
+    draft.publicationStatus === 'published' && draft.mediaValidation === 'passed'));
   assert.equal(h.counters.uploads.filter((upload) => upload.succeeded).length, 4);
   assert.ok(h.counters.uploads.every((upload) => upload.privacyStatus === 'private'));
   assert.ok(h.counters.playlists.every((visibility) => visibility === 'private'));
   assert.equal(h.counters.seo.length, 4);
-  assert.equal(h.counters.visibilityMutations, 0);
+  assert.equal(h.counters.publications.length, 4);
+  assert.equal(h.counters.visibilityMutations, 4);
+  assert.equal(h.counters.publicationChecks.length, 4);
 });
 
 test('a transient Short upload failure schedules retry, then finishes without duplicate uploads', async (t) => {
@@ -173,12 +216,12 @@ test('a transient Short upload failure schedules retry, then finishes without du
   assert.match(h.drafts.get(h.batch.id).error, /Short 2/);
   assert.equal([...h.drafts.values()].filter((draft) => draft.sourceType === 'twitch_highlight_short').length, 2);
   await h.processor(h.batch.id);
-  assert.equal(h.drafts.get(h.batch.id).status, 'awaiting_owner_approval');
-  assert.equal(h.drafts.get(h.batch.id).productionState, 'ready');
+  assert.equal(h.drafts.get(h.batch.id).status, 'completed');
+  assert.equal(h.drafts.get(h.batch.id).productionState, 'published');
   assert.equal(h.counters.uploads.filter((upload) => upload.kind === 'highlight' && upload.succeeded).length, 1);
   assert.equal(h.counters.uploads.filter((upload) => upload.kind === 'short' && upload.succeeded).length, 3);
   assert.equal(h.counters.clipCreates, 3);
-  assert.equal(h.counters.visibilityMutations, 0);
+  assert.equal(h.counters.publications.length, 4);
 });
 
 test('thumbnail generation and upload failures block review-ready status and recover on retry', async (t) => {
@@ -189,8 +232,9 @@ test('thumbnail generation and upload failures block review-ready status and rec
   await h.processor(h.batch.id);
   assert.equal(h.drafts.get(h.batch.id).status, 'clip_retry_wait');
   await h.processor(h.batch.id);
-  assert.equal(h.drafts.get(h.batch.id).status, 'awaiting_owner_approval');
+  assert.equal(h.drafts.get(h.batch.id).status, 'completed');
   assert.equal(h.drafts.get(h.batch.id).thumbnailStatus, 'applied');
+  assert.equal(h.counters.publications.length, 4);
   assert.equal(h.counters.uploads.filter((upload) => upload.kind === 'highlight' && upload.succeeded).length, 1);
   assert.equal(h.counters.uploads.filter((upload) => upload.kind === 'short' && upload.succeeded).length, 3);
 });
@@ -202,7 +246,8 @@ test('SEO registration failures keep affected output partial and retry only miss
   const first = [...h.drafts.values()].find((draft) => draft.highlightIndex === 0);
   assert.equal(first.seoRegistrationStatus, 'failed');
   await h.processor(h.batch.id);
-  assert.equal(h.drafts.get(h.batch.id).productionState, 'ready');
+  assert.equal(h.drafts.get(h.batch.id).productionState, 'published');
+  assert.equal(h.drafts.get(h.batch.id).status, 'completed');
   assert.equal(h.counters.uploads.filter((upload) => upload.kind === 'highlight' && upload.succeeded).length, 1);
   assert.equal(h.counters.uploads.filter((upload) => upload.kind === 'short' && upload.succeeded).length, 3);
 });
@@ -214,10 +259,10 @@ test('a transient database error after parent persistence schedules recovery wit
   assert.equal(h.drafts.get(h.batch.id).youtubeVideoId, 'yt-parent');
   const restartedProcessor = h.createProcessor();
   await restartedProcessor(h.batch.id);
-  assert.equal(h.drafts.get(h.batch.id).productionState, 'ready');
+  assert.equal(h.drafts.get(h.batch.id).productionState, 'published');
   assert.equal(h.counters.uploads.filter((upload) => upload.kind === 'highlight' && upload.succeeded).length, 1);
   assert.equal(h.counters.clipCreates, 3);
-  assert.equal(h.counters.visibilityMutations, 0);
+  assert.equal(h.counters.publications.length, 4);
 });
 
 test('a restarted worker resumes a persisted creating-shorts batch without uploading the parent again', async (t) => {
@@ -231,11 +276,11 @@ test('a restarted worker resumes a persisted creating-shorts batch without uploa
     privacyStatus: 'private', succeeded: true });
   const restartedProcessor = h.createProcessor();
   await restartedProcessor(h.batch.id);
-  assert.equal(h.drafts.get(h.batch.id).status, 'awaiting_owner_approval');
+  assert.equal(h.drafts.get(h.batch.id).status, 'completed');
   assert.equal(h.counters.uploads.filter((upload) => upload.kind === 'highlight' && upload.succeeded).length, 1);
   assert.equal(h.counters.uploads.filter((upload) => upload.kind === 'short' && upload.succeeded).length, 3);
   assert.equal(h.counters.clipCreates, 0);
-  assert.equal(h.counters.visibilityMutations, 0);
+  assert.equal(h.counters.publications.length, 4);
 });
 
 test('permanent YouTube permission failure does not create an upload or mark the batch ready', async (t) => {
@@ -294,4 +339,66 @@ test('invalid measured render durations fail closed before YouTube upload', asyn
   assert.equal(h.drafts.get(h.batch.id).status, 'clip_failed');
   assert.equal(h.counters.uploads.length, 0);
   assert.equal(h.counters.visibilityMutations, 0);
+});
+
+test('an inaccurate Twitch VOD clip timestamp blocks all YouTube uploads', async (t) => {
+  const h = await harness(t, { timestampDrift: 10 });
+  h.batch.highlights[0].startSeconds = 20;
+  h.batch.highlights[0].endSeconds = 50;
+  h.batch.highlights[0].duration = 30;
+  h.drafts.set(h.batch.id, h.batch);
+  await h.processor(h.batch.id);
+  assert.equal(h.drafts.get(h.batch.id).status, 'clip_failed');
+  assert.equal(h.counters.uploads.filter((upload) => upload.succeeded).length, 0);
+  assert.equal(h.counters.publications.length, 0);
+});
+
+test('YouTube processing and output validation must pass before any automatic publication', async (t) => {
+  const h = await harness(t, { unprocessedVideoId: 'yt-parent' });
+  await h.processor(h.batch.id);
+  assert.equal(h.drafts.get(h.batch.id).status, 'clip_retry_wait');
+  assert.equal(h.drafts.get(h.batch.id).productionState, 'retry_scheduled');
+  assert.equal(h.counters.publications.length, 0);
+
+  const failedMedia = await harness(t, { failShortValidation: true });
+  await failedMedia.processor(failedMedia.batch.id);
+  assert.equal(failedMedia.drafts.get(failedMedia.batch.id).status, 'clip_partial');
+  assert.equal(failedMedia.counters.publications.length, 0);
+});
+
+test('transient publication failure resumes from the first still-private output', async (t) => {
+  const h = await harness(t, { failPublishOnce: true });
+  await h.processor(h.batch.id);
+  assert.equal(h.drafts.get(h.batch.id).status, 'clip_retry_wait');
+  assert.equal(h.drafts.get(h.batch.id).publicationStatus, 'retry');
+  assert.equal(h.counters.publications.length, 2);
+  const firstShort = [...h.drafts.values()].find((draft) => draft.highlightIndex === 0);
+  assert.equal(firstShort.publicationStatus, 'retry');
+  await h.processor(h.batch.id);
+  assert.equal(h.drafts.get(h.batch.id).status, 'completed');
+  assert.equal(h.counters.uploads.filter((upload) => upload.succeeded).length, 4);
+  assert.equal(h.counters.publications.length, 5);
+});
+
+test('old private batches and disabled automatic publication remain private for owner review', async (t) => {
+  const old = await harness(t);
+  old.batch.autoPublishEligible = false;
+  old.drafts.set(old.batch.id, old.batch);
+  await old.processor(old.batch.id);
+  assert.equal(old.drafts.get(old.batch.id).status, 'awaiting_owner_approval');
+  assert.equal(old.counters.publications.length, 0);
+
+  const disabled = await harness(t, { autoPublish: false });
+  await disabled.processor(disabled.batch.id);
+  assert.equal(disabled.drafts.get(disabled.batch.id).status, 'awaiting_owner_approval');
+  assert.equal(disabled.counters.publications.length, 0);
+});
+
+test('permanent publication permission failure stops with owner review and leaves remaining outputs private', async (t) => {
+  const h = await harness(t, { failPublishPermanently: true });
+  await h.processor(h.batch.id);
+  assert.equal(h.drafts.get(h.batch.id).status, 'awaiting_owner_approval');
+  assert.equal(h.drafts.get(h.batch.id).productionState, 'ready');
+  assert.equal(h.drafts.get(h.batch.id).publicationStatus, 'failed');
+  assert.equal(h.counters.publications.length, 1);
 });
