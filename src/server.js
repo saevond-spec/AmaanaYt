@@ -19,6 +19,7 @@ const { normalizeContext } = require('./seo-package');
 const { buildHighlightTimeline, buildHighlightDescription } = require('./highlight-metadata');
 const { auditVideo, channelSuggestions, problem } = require('./seo-publish');
 const { createSessionStore } = require('./session-store');
+const { canAddVideoToPlaylist } = require('./youtube-playlists');
 
 for (const name of ['BASE_URL', 'DATABASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SESSION_SECRET', 'TOKEN_ENCRYPTION_KEY', 'AGENT_KEY', 'ADMIN_KEY']) {
   if (!process.env[name]) throw new Error(`Missing required environment variable: ${name}`);
@@ -775,6 +776,39 @@ app.get('/api/drafts', admin, async (_req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+app.get('/api/youtube/playlists', admin, async (_req, res, next) => {
+  try { res.json(await youtube.listOwnedPlaylists()); }
+  catch (error) { next(error); }
+});
+
+app.post('/api/youtube/playlists', admin, async (req, res, next) => {
+  try { res.status(201).json(await youtube.createPlaylist(req.body || {})); }
+  catch (error) { next(error); }
+});
+
+app.post('/api/youtube/playlists/:playlistId/items', admin, async (req, res, next) => {
+  try {
+    const videoId = String(req.body?.videoId || '').trim();
+    if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
+      return res.status(400).json({ error: 'A valid 11-character YouTube video ID is required' });
+    }
+    const playlists = await youtube.listOwnedPlaylists();
+    const playlist = playlists.find((item) => item.id === req.params.playlistId);
+    if (!playlist) return res.status(404).json({ error: 'Choose a playlist owned by the connected YouTube channel' });
+    const [channel, video] = await Promise.all([youtube.ownedChannel(), youtube.getVideo(videoId)]);
+    if (!video?.snippet?.channelId) return res.status(404).json({ error: 'YouTube video not found' });
+    if (video.snippet.channelId !== channel.id) {
+      return res.status(403).json({ error: 'Only videos from the connected channel can be added' });
+    }
+    if (!canAddVideoToPlaylist(video.status?.privacyStatus, playlist.privacyStatus)) {
+      return res.status(409).json({ error: 'Private and unlisted videos can only be added to a private playlist' });
+    }
+    const result = await youtube.addVideoToPlaylist({ playlistId: playlist.id, videoId });
+    res.json({ success: true, alreadyAdded: result.alreadyAdded, itemId: result.itemId,
+      playlist: { id: playlist.id, title: playlist.title, privacyStatus: playlist.privacyStatus } });
+  } catch (error) { next(error); }
 });
 
 app.get('/api/shorts/eligible', async (_req, res, next) => {
