@@ -49,6 +49,7 @@ function init() {
         generated_at TIMESTAMPTZ,
         applied JSONB,
         auto_result JSONB,
+        playlist_result JSONB,
         next_attempt_at TIMESTAMPTZ,
         error TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -58,6 +59,7 @@ function init() {
         ON amaana_seo_packages (status, next_attempt_at, created_at);
       ALTER TABLE amaana_seo_packages ADD COLUMN IF NOT EXISTS applied JSONB;
       ALTER TABLE amaana_seo_packages ADD COLUMN IF NOT EXISTS auto_result JSONB;
+      ALTER TABLE amaana_seo_packages ADD COLUMN IF NOT EXISTS playlist_result JSONB;
       CREATE TABLE IF NOT EXISTS amaana_video_analysis (
         video_id TEXT PRIMARY KEY REFERENCES amaana_seo_packages(video_id) ON DELETE CASCADE,
         analysis JSONB NOT NULL,
@@ -237,6 +239,40 @@ async function getSeoMarketBudget() {
   return result.rows[0]?.value || null;
 }
 
+async function reservePlaylistAutoSlot(privacyStatus, limit, date) {
+  await init();
+  if (!['public', 'private', 'unlisted'].includes(privacyStatus) ||
+      !Number.isSafeInteger(limit) || limit < 1 || limit > 50 ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) {
+    throw new Error('Invalid automatic playlist quota reservation');
+  }
+  const key = privacyStatus === 'public' ? 'playlist_auto_public_budget' : 'playlist_auto_private_budget';
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(\`INSERT INTO amaana_state (key, value, updated_at)
+      VALUES ($1, $2::jsonb, NOW()) ON CONFLICT (key) DO NOTHING\`,
+    [key, JSON.stringify({ date, used: 0 })]);
+    const selected = await client.query('SELECT value FROM amaana_state WHERE key = $1 FOR UPDATE', [key]);
+    const current = selected.rows[0]?.value || {};
+    const used = current.date === date && Number.isSafeInteger(current.used) ? current.used : 0;
+    if (used >= limit) {
+      await client.query('COMMIT');
+      return { allowed: false, used, limit };
+    }
+    const next = { date, used: used + 1 };
+    await client.query('UPDATE amaana_state SET value = $2::jsonb, updated_at = NOW() WHERE key = $1',
+      [key, JSON.stringify(next)]);
+    await client.query('COMMIT');
+    return { allowed: true, used: next.used, limit };
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function saveSeoMarketBudget(budget) {
   await init();
   await pool.query(`INSERT INTO amaana_state (key, value, updated_at)
@@ -256,7 +292,7 @@ async function upsertSeoVideo(videoId, source) {
 async function getSeoVideo(videoId) {
   await init();
   const result = await pool.query(`SELECT p.video_id AS "videoId", p.source, p.context, p.package, p.status, p.attempts,
-    p.error, p.applied, p.auto_result AS "autoResult",
+    p.error, p.applied, p.auto_result AS "autoResult", p.playlist_result AS "playlistResult",
     p.generated_at AS "generatedAt", p.updated_at AS "updatedAt",
     a.analysis, a.model AS "analysisModel", a.analyzed_at AS "analyzedAt"
     FROM amaana_seo_packages p LEFT JOIN amaana_video_analysis a ON a.video_id = p.video_id
@@ -267,7 +303,7 @@ async function getSeoVideo(videoId) {
 async function listSeoVideos(limit = 50, offset = 0) {
   await init();
   const result = await pool.query(`SELECT p.video_id AS "videoId", p.source, p.context, p.package, p.status, p.attempts,
-    p.error, p.applied, p.auto_result AS "autoResult",
+    p.error, p.applied, p.auto_result AS "autoResult", p.playlist_result AS "playlistResult",
     p.generated_at AS "generatedAt", p.updated_at AS "updatedAt",
     a.analysis, a.model AS "analysisModel", a.analyzed_at AS "analyzedAt"
     FROM amaana_seo_packages p LEFT JOIN amaana_video_analysis a ON a.video_id = p.video_id
@@ -284,6 +320,36 @@ async function listSeoChannelCandidates(limit = 100) {
     WHERE p.source->>'privacyStatus' = 'public' AND p.package IS NOT NULL
     ORDER BY p.generated_at DESC NULLS LAST LIMIT $1`, [Math.min(100, Math.max(1, limit))]);
   return result.rows;
+}
+
+async function listSeoNeedsPlaylist(limit = 20) {
+  await init();
+  const requestedLimit = Number(limit);
+  const safeLimit = Number.isSafeInteger(requestedLimit) ? Math.max(1, Math.min(50, requestedLimit)) : 20;
+  const result = await pool.query(\`SELECT video_id AS "videoId", source, context
+    FROM amaana_seo_packages
+    WHERE source->>'privacyStatus' = 'public'
+      AND (playlist_result IS NULL OR
+        (playlist_result->>'state' = 'retry' AND
+         (playlist_result->>'at')::timestamptz < NOW() - INTERVAL '1 hour'))
+    ORDER BY (source->>'publishedAt') ASC NULLS LAST, created_at ASC
+    LIMIT $1\`, [safeLimit]);
+  return result.rows;
+}
+
+async function markSeoPlaylistResult(videoId, result) {
+  await init();
+  await pool.query(\`UPDATE amaana_seo_packages SET playlist_result = $2::jsonb, updated_at = NOW()
+    WHERE video_id = $1\`, [videoId, JSON.stringify(result)]);
+}
+
+async function resetSeoPlaylistResults() {
+  await init();
+  const result = await pool.query(\`UPDATE amaana_seo_packages
+    SET playlist_result = NULL, updated_at = NOW()
+    WHERE source->>'privacyStatus' = 'public'
+      AND playlist_result->>'state' IN ('no_match', 'ambiguous')\`);
+  return result.rowCount;
 }
 
 async function getVideoAnalysis(videoId) {
@@ -428,10 +494,14 @@ module.exports = {
   saveSeoMarketSnapshot,
   getSeoMarketBudget,
   saveSeoMarketBudget,
+  reservePlaylistAutoSlot,
   upsertSeoVideo,
   getSeoVideo,
   listSeoVideos,
   listSeoChannelCandidates,
+  listSeoNeedsPlaylist,
+  markSeoPlaylistResult,
+  resetSeoPlaylistResults,
   getVideoAnalysis,
   saveVideoAnalysis,
   seoCounts,
