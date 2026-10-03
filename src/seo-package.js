@@ -100,6 +100,21 @@ function nonempty(value, name, max = 1000) {
   return value.trim();
 }
 
+function focusedTags(rawTags, primaryKeyword) {
+  if (!Array.isArray(rawTags) || rawTags.length < 3 || rawTags.length > 30) {
+    throw new Error('Expected 3–30 focused tag candidates');
+  }
+  const keyword = nonempty(primaryKeyword, 'primary keyword', 59);
+  const tags = rawTags.slice(0, 8).map((item) => nonempty(item, 'tag', 60));
+  const keywordIndex = tags.findIndex((tag) => tag.toLocaleLowerCase() === keyword.toLocaleLowerCase());
+  if (keywordIndex >= 0) tags.splice(keywordIndex, 1);
+  tags.unshift(keyword);
+  if (tags.length > 8) tags.pop();
+  while (tags.length > 3 && tags.join(',').length > 450) tags.pop();
+  if (tags.join(',').length > 450) throw new Error('Tags exceed the recommended combined length');
+  return tags;
+}
+
 function validatePackage(raw, source, context, analysis = null, marketEvidence = null) {
   const keyword = nonempty(raw.primaryKeyword, 'primary keyword', 100);
   if (keyword.length > 59) throw new Error('Primary keyword must be under 60 characters');
@@ -133,9 +148,7 @@ function validatePackage(raw, source, context, analysis = null, marketEvidence =
     throw new Error('Expected two or three description paragraphs');
   }
   const paragraphs = raw.paragraphs.map((item) => nonempty(item, 'description paragraph', 1200));
-  if (!Array.isArray(raw.tags) || raw.tags.length < 3 || raw.tags.length > 8) throw new Error('Expected 3–8 focused tags');
-  const tags = raw.tags.map((item) => nonempty(item, 'tag', 60));
-  if (tags.join(',').length > 450) throw new Error('Tags exceed the recommended combined length');
+  const tags = focusedTags(raw.tags, keyword);
   if (!Array.isArray(raw.hashtags) || raw.hashtags.length !== 3 ||
       raw.hashtags.some((tag) => !/^#[\p{L}\p{N}_]+$/u.test(tag))) throw new Error('Expected three relevant hashtags');
   const { chapters: markers, clips: clipMarkers } = evidenceFor(source, context);
@@ -238,7 +251,7 @@ hashtags:[3 strings beginning #], pinnedComment, communityPost, clipHooks:[one p
 All titles must be under 60 characters. Every search title starts with the primary keyword.
 The hook is 50 to 160 characters and includes the primary keyword naturally. The description paragraphs must say who, what, and why.
 Each thumbnail overlay has at most four words, complements its title, and has clear contrast in light and dark feeds.
-Use 3 to 8 specific tags only when they add value: exact game or mode terms, meaningful aliases, and common misspellings. Do not pad the list with generic tags. Keep total tag text under 450 characters, and treat tags as supporting metadata rather than a ranking driver.
+Return 3 to 8 focused tags, ordered from most relevant to least relevant. The first tag must be the exact primaryKeyword verbatim; then add exact game or mode terms, meaningful aliases, and common misspellings. Do not pad the list with generic tags. Only the first eight candidates are considered; the exact primary keyword is moved to the first position or added if missing, and total tag text stays under 450 characters. Treat tags as supporting metadata rather than a ranking driver.
 Market examples are recent public videos, not search demand estimates or proof of this video's content. Their estimatedViewsPerDay is a rough age-adjusted view-velocity sample with a one-day age floor; never describe it as search demand, likely virality, or a forecast. Never copy another creator's title or imply that an event, weapon, outcome, or update appears here unless the owner input or video analysis confirms it.
 Do not invent games, outcomes, quotes, products, events, or steps absent from the evidence.
 Do not turn approximate video analysis moments into verified timestamps. Chapter and clip times are assembled separately from grounded markers. Provide clipHooks only for the supplied clip markers.
