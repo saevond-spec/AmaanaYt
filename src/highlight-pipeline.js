@@ -82,7 +82,7 @@ function createHighlightProcessor(dependencies) {
     uploadDir, store, twitch, video, youtube, seo, autoAssignPlaylist,
     buildHighlightTimeline, buildHighlightDescription, cleanText,
     idFactory = () => crypto.randomUUID(), logError = () => {},
-    maxAutoAttempts = 4, autoPublish = true, now = () => Date.now()
+    maxAutoAttempts = 12, autoPublish = true, now = () => Date.now()
   } = dependencies;
 
   async function registerSeo(draftId, videoId, payload, label, failures, noteFailure) {
@@ -356,7 +356,7 @@ function createHighlightProcessor(dependencies) {
       const productionReady = failures.length === 0 && readyShortIndexes.size === batch.highlights.length &&
         allOutputIdsPresent && seoReady && mediaReady &&
         (batch.pipelineVersion < 2 || thumbnailStatus === 'applied');
-      const maxAttemptsAllowed = Number.isSafeInteger(maxAutoAttempts) && maxAutoAttempts > 0 ? maxAutoAttempts : 4;
+      const maxAttemptsAllowed = Number.isSafeInteger(maxAutoAttempts) && maxAutoAttempts > 0 ? maxAutoAttempts : 12;
       const retryDelay = Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attemptCount - 1)));
       if (!productionReady) {
         const canAutoRetry = hasRetryableFailure && !hasPermanentFailure && attemptCount < maxAttemptsAllowed;
@@ -461,7 +461,7 @@ function createHighlightProcessor(dependencies) {
       const message = cleanText(error.message || 'Highlight production failed', 500);
       const attemptCount = (Number(batch && batch.clipAttemptCount) || 0) + 1;
       const canAutoRetry = isTransientError(error) && attemptCount <
-        (Number.isSafeInteger(maxAutoAttempts) && maxAutoAttempts > 0 ? maxAutoAttempts : 4);
+        (Number.isSafeInteger(maxAutoAttempts) && maxAutoAttempts > 0 ? maxAutoAttempts : 12);
       const retryDelay = Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attemptCount - 1)));
       logError(id, error);
       await store.updateDraft(id, {
