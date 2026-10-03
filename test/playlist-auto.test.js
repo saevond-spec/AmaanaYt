@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { createPlaylistAutoAssigner } = require('../src/playlist-auto');
+const { createPlaylistAutoAssigner, youtubeQuotaDate } = require('../src/playlist-auto');
 
 test('automatic assignment reserves a daily slot and adds only confident matches', async () => {
   const reservations = [];
@@ -37,4 +37,10 @@ test('daily cap defers assignment without playlist API writes', async () => {
     id: 'abcdefghijk', privacyStatus: 'public', title: 'ARC Raiders'
   })).state, 'daily_limit');
   assert.equal(listed, false);
+});
+
+
+test('playlist quota day follows YouTube midnight Pacific reset', () => {
+  assert.equal(youtubeQuotaDate(Date.parse('2026-10-03T06:30:00Z')), '2026-10-02');
+  assert.equal(youtubeQuotaDate(Date.parse('2026-10-03T08:00:00Z')), '2026-10-03');
 });
