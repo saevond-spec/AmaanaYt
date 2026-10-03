@@ -3,7 +3,7 @@ const { analyzeVideo } = require('./video-analysis');
 const { createSeoPublisher } = require('./seo-publish');
 
 function createSeoWorker({ store, youtube, env = process.env, logger = console, sleep,
-  generate = generatePackage, analyze = analyzeVideo, market = null }) {
+  generate = generatePackage, analyze = analyzeVideo, market = null, playlistAuto = null }) {
   let running = false;
   let scheduled = false;
   let rerunRequested = false;
@@ -85,6 +85,17 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     return page;
   }
 
+  async function assignPublicPlaylists() {
+    if (!playlistAuto?.enabled || typeof playlistAuto.assignPublicBacklog !== 'function') return;
+    try {
+      const result = await playlistAuto.assignPublicBacklog();
+      if (result.attempted) logger.info?.('Automatic playlists: attempted ' + result.attempted +
+        ' public videos; assigned ' + result.assigned);
+    } catch (error) {
+      logger.warn?.('Automatic playlist scan failed:', error.message);
+    }
+  }
+
   async function run() {
     if (running) return;
     running = true;
@@ -135,6 +146,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
         if (!state.cursor) state.completed = true;
         await store.saveSeoSyncState(state);
       }
+      await assignPublicPlaylists();
       if (publisher && state.enabled !== false) {
         await publisher.publishPending().catch((error) => logger.warn?.('SEO auto publish scan failed:', error.message));
         await publisher.updateChannel().catch((error) => logger.warn?.('SEO channel update failed:', error.message));
