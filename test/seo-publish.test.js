@@ -459,7 +459,7 @@ test('730-day review queue simulation settles safe packages, retries transient e
   for (let index = 0; index < 134; index += 1) {
     const base = item();
     const blocked = index >= 130;
-    const privacyStatus = blocked ? 'public' : ['public', 'private', 'unlisted'][index % 3];
+    const privacyStatus = 'public';
     const description = blocked ? 'Short source description'
       : privacyStatus === 'public' ? base.source.description
         : 'Owner-provided match notes with grounded details. '.repeat(4);
@@ -476,6 +476,24 @@ test('730-day review queue simulation settles safe packages, retries transient e
       package: { ...base.package, missingEvidence: blocked
         ? ['Script or key takeaways needed to confirm the description and thumbnail claims']
         : ['Three verified chapter markers are needed'] }
+    });
+    rows.set(row.videoId, row);
+    liveVideos.set(row.videoId, { snippet: { ...source, categoryId: '20', liveBroadcastContent: 'none' },
+      status: { privacyStatus } });
+    originalVisibility.set(row.videoId, privacyStatus);
+  }
+  for (const [index, privacyStatus] of [[134, 'private'], [135, 'unlisted']]) {
+    const base = item();
+    const source = { ...base.source, title: 'ARC Raiders hidden ' + privacyStatus,
+      description: 'Owner supplied gameplay notes for this draft. '.repeat(4), privacyStatus };
+    const row = item({
+      videoId: 'review-' + index,
+      status: 'needs_review',
+      generatedAt: new Date(Date.UTC(2026, 0, 1) + index * 86400000).toISOString(),
+      source,
+      context: { takeaways: 'Owner supplied gameplay details' },
+      analysis: null,
+      package: { ...base.package, missingEvidence: [] }
     });
     rows.set(row.videoId, row);
     liveVideos.set(row.videoId, { snippet: { ...source, categoryId: '20', liveBroadcastContent: 'none' },
@@ -536,15 +554,16 @@ test('730-day review queue simulation settles safe packages, retries transient e
     if (settledAfterDay === null && pending === 0) settledAfterDay = day + 1;
   }
 
-  assert.equal(settledAfterDay, 2);
-  assert.equal(applied, 44);
+  assert.equal(settledAfterDay, 3);
+  assert.equal(applied, 130);
   assert.equal(maxDailyWrites, 50);
-  assert.equal(updateCalls.size, 44);
-  assert.equal([...updateCalls.values()].filter((count) => count === 2).length, 2);
+  assert.equal(updateCalls.size, 130);
+  assert.equal([...updateCalls.values()].filter((count) => count === 2).length, 5);
   assert.equal([...rows.values()].filter((row) => row.autoResult?.state === 'skipped').length, 4);
-  assert.equal([...rows.values()].filter((row) => row.applied).length, 44);
-  assert.ok(['review-1', 'review-2'].every((id) =>
-    !rows.get(id).applied && !rows.get(id).autoResult));
+  assert.equal([...rows.values()].filter((row) => row.applied).length, 130);
+  assert.ok(['review-134', 'review-135'].every((id) =>
+    !rows.get(id).applied && !rows.get(id).autoResult &&
+    liveVideos.get(id).snippet.title === rows.get(id).source.title));
   assert.ok([...liveVideos.entries()].every(([id, live]) =>
     live.status.privacyStatus === originalVisibility.get(id)));
 });
