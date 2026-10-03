@@ -67,6 +67,7 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
         ...(candidate.source || {}),
         id: candidate.videoId,
         context: candidate.context || {},
+        package: candidate.package || null,
         privacyStatus: 'public'
       });
       if (result.state === 'daily_limit') break;
