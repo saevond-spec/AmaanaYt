@@ -187,7 +187,7 @@ function simulateProductionHorizon(input, days) {
   const streamsPerDay = positiveInteger(input.streamsPerDay ?? process.env.SIM_STREAMS_PER_DAY, 1);
   const momentsPerStream = positiveInteger(input.momentsPerStream ?? process.env.SIM_MOMENTS_PER_STREAM, 3, 0);
   const attemptsPerDay = positiveInteger(input.productionAttemptsPerDay, 4);
-  const maxAttempts = positiveInteger(input.productionMaxAttempts, 8);
+  const maxAttempts = positiveInteger(input.productionMaxAttempts, 12);
   const supplied = input.productionFaults || {};
   const stressFaults = {
     duplicateWebhookEvery: interval(supplied.duplicateWebhookEvery, 7),
