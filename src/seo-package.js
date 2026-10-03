@@ -109,7 +109,7 @@ function focusedTags(rawTags, primaryKeyword) {
   const keywordIndex = tags.findIndex((tag) => tag.toLocaleLowerCase() === keyword.toLocaleLowerCase());
   if (keywordIndex >= 0) tags.splice(keywordIndex, 1);
   tags.unshift(keyword);
-  if (tags.length > 8) tags.pop();
+  if (tags.length > Math.min(8, rawTags.length)) tags.pop();
   while (tags.length > 3 && tags.join(',').length > 450) tags.pop();
   if (tags.join(',').length > 450) throw new Error('Tags exceed the recommended combined length');
   return tags;
