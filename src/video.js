@@ -137,8 +137,12 @@ const THUMBNAIL_GLYPHS = {
 function thumbnailHeadline(title) {
   const words = String(title || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
     .toUpperCase().replace(/[^A-Z0-9\s]/g, ' ').trim().split(/\s+/).filter(Boolean);
+  const filler = new Set(['A', 'AN', 'AND', 'ARE', 'AS', 'AT', 'BUT', 'BY', 'DID', 'DO', 'FOR',
+    'FROM', 'HOW', 'I', 'IN', 'IS', 'IT', 'MY', 'OF', 'ON', 'OR', 'THE', 'THIS', 'TO', 'WE', 'WHAT',
+    'WHEN', 'WHERE', 'WHICH', 'WHO', 'WHY', 'WITH', 'YOU']);
+  const useful = words.filter((word) => !filler.has(word));
   const selected = [];
-  for (const word of words) {
+  for (const word of useful.length ? useful : words) {
     if (selected.length >= 4) break;
     const candidate = selected.concat(word).join(' ');
     if (candidate.length > 22) {
@@ -259,5 +263,25 @@ async function createThumbnail(inputPath, outputPath, { timestampSeconds = 0, he
   }
 }
 
+
+async function createThumbnailFromImage(inputPath, outputPath, { headline } = {}) {
+  if (!inputPath || !outputPath || !String(headline || '').trim()) {
+    throw new Error('A source thumbnail, output path, and headline are required');
+  }
+  const overlayPath = outputPath.replace(/\.[^.]+$/, '') + '-overlay.png';
+  await fs.promises.writeFile(overlayPath, thumbnailOverlay(headline));
+  try {
+    await runFfmpeg([
+      '-y', '-i', inputPath, '-i', overlayPath,
+      '-filter_complex',
+      '[0:v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720[base];' +
+        '[base][1:v]overlay=0:0:format=auto,format=yuv420p[out]',
+      '-map', '[out]', '-frames:v', '1', '-q:v', '2', outputPath
+    ], 2 * 60 * 1000);
+  } finally {
+    await fs.promises.rm(overlayPath, { force: true }).catch(() => {});
+  }
+}
+
 module.exports = { convertLandscapeToShort, assembleHighlights, shortFromHighlight,
-  createThumbnail, thumbnailHeadline, thumbnailOverlay };
+  createThumbnail, createThumbnailFromImage, thumbnailHeadline, thumbnailOverlay };

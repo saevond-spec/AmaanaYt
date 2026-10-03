@@ -459,6 +459,12 @@ function renderSeoVideo(item) {
     `Automatic SEO skipped: ${item.autoResult.reason}`));
   if (item.autoResult?.state === 'retry') card.append(element('p', 'draft-meta',
     `Automatic SEO will retry: ${item.autoResult.reason}`));
+  if (item.autoResult?.thumbnailState === 'applied') card.append(element('p', 'draft-meta',
+    `SEO thumbnail updated: ${item.autoResult.thumbnailHeadline || 'thumbnail'}`));
+  if (item.autoResult?.thumbnailState === 'skipped') card.append(element('p', 'draft-meta',
+    `SEO thumbnail skipped: ${item.autoResult.thumbnailReason}`));
+  if (item.autoResult?.thumbnailState === 'retry') card.append(element('p', 'draft-meta',
+    `SEO thumbnail will retry: ${item.autoResult.thumbnailReason}`));
   if (item.audit?.length) card.append(seoHeading('Current SEO findings', item.audit.join('\n')));
 
   const details = document.createElement('details');
@@ -572,7 +578,7 @@ async function loadSeo() {
     const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
     seoStatus.textContent = [
       status.channelTitle ? `Connected channel: ${status.channelTitle}` : 'Waiting for channel connection',
-      `${total} videos found; ${counts.ready || 0} ready, ${counts.needs_review || 0} have evidence gaps, ${counts.queued || 0} queued`,
+      `${total} videos found; ${counts.ready || 0} ready, ${counts.needs_review || 0} need review, ${counts.queued || 0} queued, ${counts.retry || 0} retry, ${counts.generating || 0} generating, ${counts.failed || 0} failed`,
       `${status.appliedTotal || 0} public videos updated by Amaana`,
       status.completed ? 'Catalog scan complete' : 'Catalog scan in progress',
       status.providerConfigured ? `${status.attemptedToday}/${status.dailyLimit} AI attempts today (UTC)`

@@ -1,4 +1,8 @@
+const fs = require('fs/promises');
+const os = require('os');
+const path = require('path');
 const { descriptionChapters } = require('./seo-package');
+const { createThumbnailFromImage, thumbnailHeadline } = require('./video');
 
 function problem(message, status = 400) {
   const error = new Error(message);
@@ -75,12 +79,9 @@ function automaticVideoEdit(item) {
   if (!pkg || !['ready', 'needs_review'].includes(item.status)) throw problem('No generated SEO package');
   const hasOwnerContext = Boolean(item.context?.takeaways?.trim());
   const hasVideoAnalysis = Boolean(item.analysis);
-  const hasPrivateDescriptionEvidence = String(source.description || '').trim().length >= 100;
-  if (!hasVideoAnalysis && !hasOwnerContext &&
-      (source.privacyStatus === 'public' || !hasPrivateDescriptionEvidence)) {
-    throw problem(source.privacyStatus === 'public'
-      ? 'Video analysis or owner supplied video context is required for automatic publishing'
-      : 'Private and unlisted videos need 100 characters of existing description or owner supplied takeaways');
+  const hasDescriptionEvidence = String(source.description || '').trim().length >= 100;
+  if (!hasVideoAnalysis && !hasOwnerContext && !hasDescriptionEvidence) {
+    throw problem('Video analysis, owner takeaways, or a description of at least 100 characters is required');
   }
   if (pkg.missingEvidence?.some((warning) => /script or key takeaways/i.test(warning))) {
     throw problem('The package has insufficient evidence for its claims');
@@ -146,22 +147,172 @@ function channelEdit(current, suggestions) {
   return { description, keywords };
 }
 
-function createSeoPublisher({ store, youtube, logger = console }) {
+function safeHeadline(value) {
+  const words = String(value || '').trim().toUpperCase().split(/\s+/).filter(Boolean);
+  return words.length >= 1 && words.length <= 4 && words.join(' ').length <= 22 &&
+    words.every((word) => /^[A-Z0-9]+$/.test(word));
+}
+
+function thumbnailHeadlineFor(item) {
+  const source = item.source || {};
+  const evidence = [
+    source.title, source.description, ...(source.tags || []),
+    item.context?.takeaways, item.analysis?.summary, item.analysis?.visualContext,
+    ...(item.analysis?.topics || []), ...(item.analysis?.keywords || [])
+  ].filter(Boolean).join(' ').toLocaleLowerCase();
+  const proposed = String(item.package?.thumbnails?.[0]?.overlay || '').trim();
+  if (safeHeadline(proposed) && evidence.includes(proposed.toLocaleLowerCase())) return proposed.toUpperCase();
+
+  if (!/[A-Za-z0-9]/.test(String(source.title || ''))) return null;
+  const fromTitle = thumbnailHeadline(source.title);
+  if (!safeHeadline(fromTitle) || fromTitle === 'SAEVOND HIGHLIGHT') return null;
+  return fromTitle;
+}
+
+const YOUTUBE_THUMBNAIL_HOSTS = new Set(['i.ytimg.com', 'img.youtube.com']);
+
+async function youtubeThumbnailImage(video, fetchImpl = fetch) {
+  const candidates = Object.values(video?.snippet?.thumbnails || {})
+    .filter((image) => image?.url && Number(image.width) >= 480 && Number(image.height) >= 270)
+    .sort((left, right) => Number(right.width) * Number(right.height) - Number(left.width) * Number(left.height));
+  if (!candidates.length) throw problem('YouTube did not provide a usable thumbnail image', 422);
+
+  let lastError = null;
+  for (const image of candidates) {
+    try {
+      const url = new URL(image.url);
+      if (url.protocol !== 'https:' || !YOUTUBE_THUMBNAIL_HOSTS.has(url.hostname)) {
+        throw problem('Thumbnail URL was not served by YouTube', 400);
+      }
+      const response = await fetchImpl(url.toString(), { signal: AbortSignal.timeout(15000) });
+      if (!response.ok) {
+        lastError = Object.assign(new Error('YouTube thumbnail download returned HTTP ' + response.status), { status: response.status });
+        continue;
+      }
+      const finalUrl = response.url ? new URL(response.url) : url;
+      if (finalUrl.protocol !== 'https:' || !YOUTUBE_THUMBNAIL_HOSTS.has(finalUrl.hostname)) {
+        throw problem('Thumbnail redirect left YouTube image hosting', 400);
+      }
+      const contentType = String(response.headers?.get?.('content-type') || '').split(';')[0].trim().toLowerCase();
+      if (!/^image\/(jpeg|png|webp)$/.test(contentType)) {
+        throw problem('YouTube thumbnail did not return a supported image', 422);
+      }
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (!buffer.length || buffer.length > 10 * 1024 * 1024) {
+        throw problem('YouTube thumbnail image is empty or oversized', 413);
+      }
+      const extension = contentType === 'image/png' ? '.png' :
+        contentType === 'image/webp' ? '.webp' : '.jpg';
+      return { buffer, extension };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || problem('YouTube thumbnail image could not be downloaded', 502);
+}
+
+async function uploadSeoThumbnail(videoId, video, item, { youtube, fetchImpl, renderThumbnail }) {
+  const headline = thumbnailHeadlineFor(item);
+  if (!headline) return { state: 'skipped', reason: 'No supported, evidence-grounded thumbnail text is available' };
+  if (typeof youtube.setThumbnail !== 'function') {
+    return { state: 'skipped', reason: 'YouTube thumbnail upload is unavailable' };
+  }
+  const image = await youtubeThumbnailImage(video, fetchImpl);
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'amaana-seo-thumbnail-'));
+  const inputPath = path.join(directory, 'source' + image.extension);
+  const outputPath = path.join(directory, 'thumbnail.jpg');
+  try {
+    await fs.writeFile(inputPath, image.buffer);
+    await renderThumbnail(inputPath, outputPath, { headline });
+    const output = await fs.readFile(outputPath);
+    if (output.length < 4 || output[0] !== 0xff || output[1] !== 0xd8) {
+      throw new Error('Thumbnail renderer did not produce a JPEG');
+    }
+    if (output.length > 50 * 1024 * 1024) throw problem('Generated thumbnail exceeds YouTube’s upload limit', 413);
+    await youtube.setThumbnail(videoId, outputPath);
+    return { state: 'applied', headline };
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetch,
+  renderThumbnail = createThumbnailFromImage }) {
   const configuredLimit = Number(process.env.SEO_AUTO_DAILY_LIMIT);
   const dailyLimit = Number.isSafeInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : 50;
+  const legacyContextBlock = 'Video analysis or owner supplied video context is required for automatic publishing';
+
+  async function recordResult(videoId, generation, metadata, thumbnail, prior = {}) {
+    const at = new Date().toISOString();
+    const result = {
+      ...(metadata || { state: 'skipped', reason: 'Metadata update was not eligible' }),
+      at,
+      packageGeneratedAt: generation
+    };
+    if (thumbnail) {
+      result.thumbnailState = thumbnail.state;
+      if (thumbnail.reason) result.thumbnailReason = thumbnail.reason;
+      if (thumbnail.headline) result.thumbnailHeadline = thumbnail.headline;
+      if (thumbnail.state === 'applied') result.thumbnailAt = at;
+      else if (prior.thumbnailAt) result.thumbnailAt = prior.thumbnailAt;
+    } else if (prior.thumbnailState) {
+      result.thumbnailState = prior.thumbnailState;
+      if (prior.thumbnailReason) result.thumbnailReason = prior.thumbnailReason;
+      if (prior.thumbnailHeadline) result.thumbnailHeadline = prior.thumbnailHeadline;
+      if (prior.thumbnailAt) result.thumbnailAt = prior.thumbnailAt;
+    }
+    await store.markSeoAutoResult(videoId, result);
+    return result;
+  }
+
   async function publishVideo(videoId) {
     const item = await store.getSeoVideo(videoId);
     if (!item || !item.package) return;
     const privacyStatus = item.source?.privacyStatus;
     if (!ALLOWED_VIDEO_PRIVACY_STATUSES.has(privacyStatus)) return;
+
     const generation = new Date(item.generatedAt).toISOString();
-    if (item.autoResult?.packageGeneratedAt === generation && item.autoResult.state !== 'retry') return;
-    let result;
+    const prior = item.autoResult || {};
+    const sameGeneration = prior.packageGeneratedAt === generation;
+    const legacyContextSkip = sameGeneration && prior.state === 'skipped' && prior.reason === legacyContextBlock;
+    const metadataDone = sameGeneration && prior.state !== 'retry' && !legacyContextSkip;
+    const thumbnailDone = sameGeneration && ['applied', 'skipped'].includes(prior.thumbnailState);
+    if (metadataDone && thumbnailDone) return prior;
+
+    let metadata = metadataDone ? { state: prior.state, reason: prior.reason } : null;
+    let edit = null;
+    if (!metadataDone) {
+      try {
+        edit = automaticVideoEdit(item);
+      } catch (error) {
+        metadata = { state: 'skipped', reason: String(error.message).slice(0, 300) };
+      }
+    }
+
+    let thumbnail = thumbnailDone
+      ? { state: prior.thumbnailState, reason: prior.thumbnailReason, headline: prior.thumbnailHeadline }
+      : null;
+    let headline = null;
+    if (!thumbnailDone) {
+      headline = thumbnailHeadlineFor(item);
+      if (!headline) thumbnail = { state: 'skipped',
+        reason: 'No supported, evidence-grounded thumbnail text is available' };
+      else if (typeof youtube.setThumbnail !== 'function') thumbnail = { state: 'skipped',
+        reason: 'YouTube thumbnail upload is unavailable' };
+    }
+    const metadataWritePending = Boolean(edit);
+    const thumbnailWritePending = Boolean(headline && !thumbnailDone);
+    if (!metadataWritePending && !thumbnailWritePending) {
+      return recordResult(videoId, generation, metadata, thumbnail, prior);
+    }
+
+    let channel;
+    let video;
     try {
-      const edit = automaticVideoEdit(item);
-      const [channel, state, video] = await Promise.all([
-        youtube.ownedChannel(), store.getSeoSyncState(), youtube.getVideo(videoId)
-      ]);
+      const values = await Promise.all([youtube.ownedChannel(), store.getSeoSyncState(), youtube.getVideo(videoId)]);
+      channel = values[0];
+      const state = values[1];
+      video = values[2];
       if (state.channelId !== channel.id) throw problem('Connected channel differs from the SEO catalog', 409);
       await youtube.assertTargetChannel(channel.id);
       if (video?.status?.privacyStatus !== privacyStatus) {
@@ -171,35 +322,69 @@ function createSeoPublisher({ store, youtube, logger = console }) {
         throw problem('Livestream has not ended; SEO will retry later', 425);
       }
       assertVideoMatchesCatalog(video, channel.id, item);
-      if (typeof store.seoUpdatesToday === 'function' && await store.seoUpdatesToday() >= dailyLimit) {
-        throw problem('Daily automatic SEO update budget reached', 429);
-      }
-      await youtube.updateVideoSeo(videoId, video, edit);
-      const prior = item.applied;
-      const originalDescription = prior && item.source.description === prior.description
-        ? prior.originalDescription : item.source.description;
-      const originalTags = prior && sameTags(item.source.tags, prior.tags)
-        ? prior.originalTags : item.source.tags;
-      const applied = { ...edit, originalDescription, originalTags, at: new Date().toISOString(), packageGeneratedAt: generation,
-        privacyStatus };
-      await store.markSeoApplied(videoId, applied);
-      await store.upsertSeoVideo(videoId, { ...item.source, ...edit });
-      result = { state: 'applied' };
-      logger.info?.('SEO metadata applied to ' + privacyStatus + ' video ' + videoId);
     } catch (error) {
-      result = { state: retryablePublishError(error) ? 'retry' : 'skipped',
+      const retry = retryablePublishError(error);
+      if (metadataWritePending) metadata = { state: retry ? 'retry' : 'skipped',
         reason: String(error.message).slice(0, 300) };
-      logger.warn?.(`SEO auto publish ${videoId}: ${result.reason}`);
+      if (thumbnailWritePending) thumbnail = { state: retry ? 'retry' : 'skipped',
+        reason: String(error.message).slice(0, 300) };
+      logger.warn?.('SEO auto publish ' + videoId + ': ' + String(error.message).slice(0, 300));
+      return recordResult(videoId, generation, metadata, thumbnail, prior);
     }
-    await store.markSeoAutoResult(videoId, { ...result, at: new Date().toISOString(),
-      packageGeneratedAt: generation });
-    return result;
+
+    if (typeof store.seoUpdatesToday === 'function' &&
+        await store.seoUpdatesToday() >= dailyLimit) {
+      const reason = 'Daily automatic metadata and thumbnail update budget reached';
+      logger.info?.('SEO update budget reached; remaining candidates will wait until the UTC day resets');
+      return { state: 'deferred', reason, deferred: true };
+    }
+
+    if (edit) {
+      try {
+        await youtube.updateVideoSeo(videoId, video, edit);
+        const oldApplied = item.applied;
+        const originalDescription = oldApplied && item.source.description === oldApplied.description
+          ? oldApplied.originalDescription : item.source.description;
+        const originalTags = oldApplied && sameTags(item.source.tags, oldApplied.tags)
+          ? oldApplied.originalTags : item.source.tags;
+        const applied = { ...edit, originalDescription, originalTags, at: new Date().toISOString(),
+          packageGeneratedAt: generation, privacyStatus };
+        await store.markSeoApplied(videoId, applied);
+        await store.upsertSeoVideo(videoId, { ...item.source, ...edit });
+        video.snippet = { ...video.snippet, ...edit };
+        metadata = { state: 'applied' };
+        logger.info?.('SEO metadata applied to public video ' + videoId);
+      } catch (error) {
+        const retry = retryablePublishError(error);
+        metadata = { state: retry ? 'retry' : 'skipped', reason: String(error.message).slice(0, 300) };
+        if (thumbnailWritePending) thumbnail = { state: retry ? 'retry' : 'skipped',
+          reason: 'Thumbnail waits for metadata write: ' + String(error.message).slice(0, 220) };
+        logger.warn?.('SEO auto publish ' + videoId + ': ' + metadata.reason);
+      }
+    }
+
+    if (thumbnailWritePending && metadata?.state !== 'retry') {
+      try {
+        const result = await uploadSeoThumbnail(videoId, video, item, { youtube, fetchImpl, renderThumbnail });
+        thumbnail = result;
+        if (result.state === 'applied') logger.info?.('SEO thumbnail applied to public video ' + videoId);
+      } catch (error) {
+        const retry = retryablePublishError(error);
+        thumbnail = { state: retry ? 'retry' : 'skipped', reason: String(error.message).slice(0, 300) };
+        logger.warn?.('SEO thumbnail ' + videoId + ': ' + thumbnail.reason);
+      }
+    }
+
+    return recordResult(videoId, generation, metadata, thumbnail, prior);
   }
 
   async function publishPending(limit = 20) {
     const candidates = await store.listSeoAutoCandidates(limit);
-    logger.info?.(`SEO metadata candidates: ${candidates.length}`);
-    for (const candidate of candidates) await publishVideo(candidate.videoId);
+    logger.info?.('SEO metadata and thumbnail candidates: ' + candidates.length);
+    for (const candidate of candidates) {
+      const result = await publishVideo(candidate.videoId);
+      if (result?.deferred) break;
+    }
   }
 
   async function updateChannel() {
@@ -214,9 +399,9 @@ function createSeoPublisher({ store, youtube, logger = console }) {
       videos.filter((video) => video.source?.channelId === channel.id)));
     if (edit) {
       await youtube.updateChannelSeo(channel, edit);
-      logger.info?.(`SEO channel keywords updated for ${channel.id}`);
+      logger.info?.('SEO channel keywords updated for ' + channel.id);
     } else {
-      logger.info?.(`SEO channel unchanged for ${channel.id}: no new grounded keywords`);
+      logger.info?.('SEO channel unchanged for ' + channel.id + ': no new grounded keywords');
     }
   }
 

@@ -45,7 +45,7 @@ test('automatic SEO edits only public videos and enforces evidence gates', () =>
       source: { ...item().source, privacyStatus }
     })), /Only public videos/);
   }
-  assert.throws(() => automaticVideoEdit(item({ analysis: null })), /Video analysis or owner/);
+  assert.throws(() => automaticVideoEdit(item({ analysis: null })), /Video analysis, owner takeaways/);
   assert.throws(() => automaticVideoEdit(item({
     package: { ...item().package, missingEvidence: ['Script or key takeaways needed'] }
   })), /insufficient evidence/);
@@ -71,6 +71,20 @@ test('a full existing description still permits title and tag improvements witho
   assert.equal(edit.description, longDescription);
   assert.equal(edit.title, 'ARC Raiders Gameplay Highlights');
   assert.deepEqual(edit.tags, ['ARC Raiders', 'gaming highlights']);
+});
+
+test('public metadata-only packages can use a substantial existing description as evidence', () => {
+  const description = 'Owner-written match context with the game, location, and sequence of events. '.repeat(3);
+  const row = item({
+    source: { ...item().source, description },
+    context: { takeaways: '' },
+    analysis: null,
+    package: { ...item().package, missingEvidence: ['Three verified chapter markers are needed'] }
+  });
+  const edit = automaticVideoEdit(row);
+  assert.equal(edit.title, 'ARC Raiders Gameplay Highlights');
+  assert.match(edit.description, /Owner-written match context/);
+  assert.doesNotMatch(edit.description, /\[Add verified chapters/);
 });
 
 test('description length uses YouTube UTF-8 byte limit', () => {
@@ -163,7 +177,7 @@ test('publisher rejects a wrong channel, changed metadata, and exhausted daily b
     { channelId: 'channel-1', title: 'Owner edited this video', budget: 0,
       reason: /metadata changed/, state: 'skipped' },
     { channelId: 'channel-1', title: row.source.title, budget: 50,
-      reason: /budget reached/, state: 'retry' }
+      reason: /budget reached/, state: 'deferred' }
   ];
   for (const value of cases) {
     let outcome;
@@ -187,10 +201,12 @@ test('publisher rejects a wrong channel, changed metadata, and exhausted daily b
       },
       logger: { warn() {}, info() {} }
     });
-    await publisher.publishVideo(row.videoId);
+    const result = await publisher.publishVideo(row.videoId);
     assert.equal(updated, false);
-    assert.match(outcome.reason, value.reason);
-    assert.equal(outcome.state, value.state);
+    assert.match(result.reason, value.reason);
+    assert.equal(result.state, value.state);
+    if (value.state === 'deferred') assert.equal(outcome, undefined);
+    else assert.equal(outcome.state, value.state);
   }
 });
 
