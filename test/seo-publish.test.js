@@ -480,3 +480,104 @@ test('permanent permission errors are skipped but quota and transient errors ret
   assert.equal(retryablePublishError({ code: 'ECONNRESET' }), true);
   assert.equal(retryablePublishError({ status: 409, message: 'Metadata changed' }), false);
 });
+
+test('730-day review queue simulation settles safe packages, retries transient errors, and preserves visibility', async (t) => {
+  const priorLimit = process.env.SEO_AUTO_DAILY_LIMIT;
+  process.env.SEO_AUTO_DAILY_LIMIT = '50';
+  t.after(() => {
+    if (priorLimit === undefined) delete process.env.SEO_AUTO_DAILY_LIMIT;
+    else process.env.SEO_AUTO_DAILY_LIMIT = priorLimit;
+  });
+
+  const rows = new Map();
+  const liveVideos = new Map();
+  const originalVisibility = new Map();
+  for (let index = 0; index < 134; index += 1) {
+    const base = item();
+    const blocked = index >= 130;
+    const privacyStatus = blocked ? 'public' : ['public', 'private', 'unlisted'][index % 3];
+    const description = blocked ? 'Short source description'
+      : privacyStatus === 'public' ? base.source.description
+        : 'Owner-provided match notes with grounded details. '.repeat(4);
+    const source = { ...base.source, title: 'ARC Raiders review ' + index,
+      description, privacyStatus };
+    const row = item({
+      videoId: 'review-' + index,
+      status: 'needs_review',
+      generatedAt: new Date(Date.UTC(2026, 0, 1) + index * 86400000).toISOString(),
+      source,
+      context: blocked ? { takeaways: '' }
+        : privacyStatus === 'public' ? { takeaways: '' } : { takeaways: 'Owner supplied gameplay details' },
+      analysis: blocked ? null : privacyStatus === 'public' ? { summary: 'Observed match' } : null,
+      package: { ...base.package, missingEvidence: blocked
+        ? ['Script or key takeaways needed to confirm the description and thumbnail claims']
+        : ['Three verified chapter markers are needed'] }
+    });
+    rows.set(row.videoId, row);
+    liveVideos.set(row.videoId, { snippet: { ...source, categoryId: '20', liveBroadcastContent: 'none' },
+      status: { privacyStatus } });
+    originalVisibility.set(row.videoId, privacyStatus);
+  }
+
+  let dailyWrites = 0;
+  let maxDailyWrites = 0;
+  let applied = 0;
+  const updateCalls = new Map();
+  const transientIds = new Set(Array.from({ length: 5 }, (_value, index) => 'review-' + index));
+  const store = {
+    listSeoAutoCandidates: async (limit = 20) => [...rows.values()].filter((row) =>
+      row.package && ['ready', 'needs_review'].includes(row.status) &&
+      (!row.autoResult || row.autoResult.state === 'retry'))
+      .slice(0, Math.min(50, limit)).map((row) => ({ videoId: row.videoId })),
+    getSeoVideo: async (videoId) => rows.get(videoId),
+    getSeoSyncState: async () => ({ channelId: 'channel-1' }),
+    seoUpdatesToday: async () => dailyWrites,
+    markSeoApplied: async (videoId, value) => {
+      rows.get(videoId).applied = value;
+      dailyWrites += 1;
+      applied += 1;
+      maxDailyWrites = Math.max(maxDailyWrites, dailyWrites);
+    },
+    upsertSeoVideo: async (videoId, nextSource) => { rows.get(videoId).source = nextSource; },
+    markSeoAutoResult: async (videoId, value) => { rows.get(videoId).autoResult = value; }
+  };
+  const youtube = {
+    ownedChannel: async () => ({ id: 'channel-1' }),
+    assertTargetChannel: async () => {},
+    getVideo: async (videoId) => {
+      const live = liveVideos.get(videoId);
+      return { snippet: { ...live.snippet }, status: { ...live.status } };
+    },
+    updateVideoSeo: async (videoId, video, edit) => {
+      assert.equal(Object.hasOwn(edit, 'status'), false);
+      assert.equal(video.status.privacyStatus, originalVisibility.get(videoId));
+      const calls = (updateCalls.get(videoId) || 0) + 1;
+      updateCalls.set(videoId, calls);
+      if (transientIds.has(videoId) && calls === 1) {
+        const error = new Error('YouTube rate limit');
+        error.status = 429;
+        throw error;
+      }
+      Object.assign(liveVideos.get(videoId).snippet, edit);
+    }
+  };
+  const publisher = createSeoPublisher({ store, youtube, logger: { info() {}, warn() {} } });
+  let settledAfterDay = null;
+  for (let day = 0; day < 730; day += 1) {
+    dailyWrites = 0;
+    await publisher.publishPending(50);
+    const pending = [...rows.values()].filter((row) => !row.autoResult || row.autoResult.state === 'retry').length;
+    if (settledAfterDay === null && pending === 0) settledAfterDay = day + 1;
+  }
+
+  assert.equal(settledAfterDay, 3);
+  assert.equal(applied, 130);
+  assert.equal(maxDailyWrites, 50);
+  assert.equal(updateCalls.size, 130);
+  assert.equal([...updateCalls.values()].filter((count) => count === 2).length, 5);
+  assert.equal([...rows.values()].filter((row) => row.autoResult?.state === 'skipped').length, 4);
+  assert.equal([...rows.values()].filter((row) => row.applied).length, 130);
+  assert.ok([...liveVideos.entries()].every(([id, live]) =>
+    live.status.privacyStatus === originalVisibility.get(id)));
+});
+
