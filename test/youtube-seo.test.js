@@ -166,4 +166,40 @@ test('market search keeps only recently published public videos and their observ
   assert.equal(query.type, 'video');
   assert.equal(query.publishedAfter, '2026-09-25T12:00:00.000Z');
   assert.deepEqual(items.map((item) => item.id), ['public-2', 'public-1']);
+  assert.deepEqual(items.map((item) => item.estimatedViewsPerDay), [333, 67]);
+});
+
+test('market search ranks recent examples by age-adjusted views per day', async (t) => {
+  const oldYoutube = google.youtube;
+  const oldTokens = store.getTokens;
+  const oldBaseUrl = process.env.BASE_URL;
+  t.after(() => { google.youtube = oldYoutube; store.getTokens = oldTokens;
+    process.env.BASE_URL = oldBaseUrl; });
+  process.env.BASE_URL = 'https://amaana.example.test';
+  store.getTokens = async () => ({ access_token: 'unit-test', expiry_date: Date.now() + 3600000 });
+  google.youtube = () => ({
+    search: { list: async () => ({ data: { items: [
+      { id: { videoId: 'older-high-total' } },
+      { id: { videoId: 'newer-lower-total' } },
+      { id: { videoId: 'future' } },
+      { id: { videoId: 'invalid-date' } }
+    ] } }) },
+    videos: { list: async () => ({ data: { items: [
+      { id: 'older-high-total', snippet: { title: 'Older high view count',
+        publishedAt: '2026-10-01T12:00:00Z', channelId: 'other' },
+        statistics: { viewCount: '1200' }, status: { privacyStatus: 'public' } },
+      { id: 'newer-lower-total', snippet: { title: 'Newer rising video',
+        publishedAt: '2026-10-06T12:00:00Z', channelId: 'other' },
+        statistics: { viewCount: '250' }, status: { privacyStatus: 'public' } },
+      { id: 'future', snippet: { title: 'Future video',
+        publishedAt: '2026-10-09T00:00:00Z', channelId: 'other' },
+        statistics: { viewCount: '999999' }, status: { privacyStatus: 'public' } },
+      { id: 'invalid-date', snippet: { title: 'Invalid date',
+        publishedAt: 'not-a-date', channelId: 'other' },
+        statistics: { viewCount: '999999' }, status: { privacyStatus: 'public' } }
+    ] } }) }
+  });
+  const items = await youtube.recentGameVideos('ARC Raiders', { now: Date.parse('2026-10-07T12:00:00Z') });
+  assert.deepEqual(items.map((item) => item.id), ['newer-lower-total', 'older-high-total']);
+  assert.deepEqual(items.map((item) => item.estimatedViewsPerDay), [250, 200]);
 });
