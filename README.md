@@ -238,6 +238,8 @@ curl -X POST "$AMAANA_YT_URL/api/twitch/vod-clips" \
 
 Amaana accepts up to eight moments per VOD. It creates official Twitch clips (each at most 60 seconds), joins them in time order into one landscape highlight video, then cuts a 9:16 Short from each segment of that video. The maximum assembled length is about eight minutes, depending on the moments found. The YouTube highlight and Shorts are private drafts until the owner approves each one. Processing starts after the stream ends and the archive is available; a continuous 24/7 stream does not produce an end event. Creating source clips on Twitch may make those Twitch clips visible independently of the private YouTube drafts.
 
+The VOD detector remains an external prerequisite: it must send the actual VOD ID and grounded timestamps to this endpoint. Amaana does not invent timestamps or discover highlight moments by itself. A batch is marked ready for owner review only after the private highlight, its Shorts, the generated and applied thumbnail, and SEO queue registration all succeed. Partial output stays private and shows a retry action. Transient HTTP 408/425/429/5xx and common network failures retry automatically with bounded backoff (up to four attempts); permanent permission failures need an owner retry. SEO text remains in its owner review flow, and no pipeline step changes an existing video's visibility.
+
 ### Upload a private Short
 
 ```bash

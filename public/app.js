@@ -252,6 +252,15 @@ function renderDraft(draft) {
         : 'Gameplay thumbnail: ' + String(draft.thumbnailStatus).replaceAll('_', ' ');
     card.append(element('p', draft.thumbnailStatus === 'failed' ? 'draft-error' : 'draft-meta', thumbnailMessage));
   }
+  if (draft.status === 'awaiting_owner_approval' && draft.productionState === 'ready') {
+    const message = isHighlight
+      ? 'Rendered highlight, Shorts, and thumbnail are complete. SEO jobs are queued; this video stays private until owner approval.'
+      : 'Rendered Short is complete. Its SEO job is queued; this video stays private until owner approval.';
+    card.append(element('p', 'draft-meta', message));
+  }
+  if (draft.seoRegistrationError && !draft.error) {
+    card.append(element('p', 'draft-error', 'SEO job needs retry: ' + draft.seoRegistrationError));
+  }
   if (draft.sourceType === 'twitch_highlight_short') card.append(element('p', 'draft-meta', 'Short made from a highlight video'));
 
   if (draft.error) card.append(element('p', 'draft-error', draft.error));
