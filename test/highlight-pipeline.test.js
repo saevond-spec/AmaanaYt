@@ -30,6 +30,7 @@ async function harness(t, options = {}) {
     shortRenders: 0, seo: [], playlists: [], visibilityMutations: 0,
     publicationChecks: [], publications: [], errors: []
   };
+  const processingChecks = new Map();
   let listFailureUsed = false;
   let clipFailureUsed = false;
   let thumbnailUploadFailureUsed = false;
@@ -130,8 +131,13 @@ async function harness(t, options = {}) {
     },
     async getVideo(videoId) {
       counters.publicationChecks.push(videoId);
+      const checkNumber = (processingChecks.get(videoId) || 0) + 1;
+      processingChecks.set(videoId, checkNumber);
       const privacyStatus = youtubeVideos.get(videoId) || options.initialPrivacyStatus || 'private';
-      const processingStatus = options.unprocessedVideoId === videoId ? 'processing'
+      const sequence = options.processingStatuses?.[videoId];
+      const processingStatus = Array.isArray(sequence)
+        ? sequence[Math.min(checkNumber - 1, sequence.length - 1)]
+        : options.unprocessedVideoId === videoId ? 'processing'
         : options.failedProcessingVideoId === videoId ? 'failed' : 'succeeded';
       return { id: videoId, status: { privacyStatus }, processingDetails: { processingStatus } };
     },
@@ -176,6 +182,7 @@ async function harness(t, options = {}) {
     uploadDir, store, twitch, video, youtube, seo, autoAssignPlaylist,
     buildHighlightTimeline, buildHighlightDescription, cleanText,
     autoPublish: options.autoPublish !== false,
+    maxAutoAttempts: options.maxAutoAttempts,
     idFactory: () => 'short-draft-' + (++idCounter),
     logError: (_id, error) => counters.errors.push(error.message)
   };
@@ -294,10 +301,10 @@ test('permanent YouTube permission failure does not create an upload or mark the
 
 test('transient failures use bounded backoff attempts, while authorization errors are permanent', async (t) => {
   const h = await harness(t, { failClipCreateAlways: true });
-  for (let attempt = 1; attempt <= 4; attempt += 1) {
+  for (let attempt = 1; attempt <= 12; attempt += 1) {
     await h.processor(h.batch.id);
     assert.equal(h.drafts.get(h.batch.id).clipAttemptCount, attempt);
-    assert.equal(h.drafts.get(h.batch.id).status, attempt < 4 ? 'clip_retry_wait' : 'clip_failed');
+    assert.equal(h.drafts.get(h.batch.id).status, attempt < 12 ? 'clip_retry_wait' : 'clip_failed');
   }
   assert.equal(h.drafts.get(h.batch.id).nextClipAttemptAt, null);
   assert.equal(isTransientError({ status: 429 }), true);
@@ -364,6 +371,19 @@ test('YouTube processing and output validation must pass before any automatic pu
   await failedMedia.processor(failedMedia.batch.id);
   assert.equal(failedMedia.drafts.get(failedMedia.batch.id).status, 'clip_partial');
   assert.equal(failedMedia.counters.publications.length, 0);
+});
+
+test('automatic publication keeps retrying while YouTube processing is still underway', async (t) => {
+  const h = await harness(t, { processingStatuses: {
+    'yt-parent': [...Array(6).fill('processing'), 'succeeded']
+  } });
+  for (let attempt = 1; attempt <= 7; attempt += 1) {
+    await h.processor(h.batch.id);
+    assert.equal(h.drafts.get(h.batch.id).clipAttemptCount, attempt);
+    assert.equal(h.drafts.get(h.batch.id).status, attempt < 7 ? 'clip_retry_wait' : 'completed');
+  }
+  assert.equal(h.counters.uploads.filter((upload) => upload.succeeded).length, 4);
+  assert.equal(h.counters.publications.length, 4);
 });
 
 test('transient publication failure resumes from the first still-private output', async (t) => {
