@@ -83,10 +83,10 @@ function simulateFiveYears(input = {}) {
       thumbnailSetUnits: thumbnailUnits, playlistItemInsertUnits: playlistInsertUnits,
       playlistItemCheckUnits: playlistCheckUnits, ownedPlaylistListMaxPages: playlistListMaxPages,
       maxPlaylistAssignmentsPerDay: playlistAutoAssignmentsPerDay,
-      automaticPlaylistDailyUnits: playlistAutoDailyUnits, currentPipelineDailyWriteUnits: currentDailyUnits,
-      currentPipelineHeadroomBeforeReads: defaultQuota - currentDailyUnits,
+      automaticPlaylistDailyUnits: playlistAutoDailyUnits, currentPipelineDailyQuotaUnits: currentDailyUnits,
+      currentPipelineQuotaHeadroom: defaultQuota - currentDailyUnits,
       optionalExistingThumbnailBackfillUnitsPerDay: bulkThumbnailDailyUnits,
-      combinedDailyWriteUnitsWith50PerDayThumbnailBackfill: totalWithBulkThumbnailBackfill,
+      combinedDailyQuotaUnitsWith50PerDayThumbnailBackfill: totalWithBulkThumbnailBackfill,
       headroomWithBulkThumbnailBackfillBeforeReads: defaultQuota - totalWithBulkThumbnailBackfill }
   };
 }
