@@ -328,7 +328,7 @@ async function listSeoNeedsPlaylist(limit = 20) {
   const safeLimit = Number.isSafeInteger(requestedLimit) ? Math.max(1, Math.min(50, requestedLimit)) : 20;
   const result = await pool.query(`SELECT video_id AS "videoId", source, context, package
     FROM amaana_seo_packages
-    WHERE source->>'privacyStatus' = 'public'
+    WHERE source->>'privacyStatus' IN ('public', 'private', 'unlisted')
       AND (playlist_result IS NULL OR
         (playlist_result->>'state' = 'retry' AND
          (playlist_result->>'at')::timestamptz < NOW() - INTERVAL '1 hour'))
@@ -347,7 +347,7 @@ async function resetSeoPlaylistResults() {
   await init();
   const result = await pool.query(`UPDATE amaana_seo_packages
     SET playlist_result = NULL, updated_at = NOW()
-    WHERE source->>'privacyStatus' = 'public'
+    WHERE source->>'privacyStatus' IN ('public', 'private', 'unlisted')
       AND playlist_result->>'state' IN ('no_match', 'ambiguous')`);
   return result.rowCount;
 }
@@ -394,7 +394,7 @@ async function claimSeoVideo() {
   const token = crypto.randomUUID();
   const result = await pool.query(`WITH candidate AS (
       SELECT video_id FROM amaana_seo_packages
-      WHERE source->>'privacyStatus' = 'public'
+      WHERE source->>'privacyStatus' IN ('public', 'private', 'unlisted')
         AND ((status IN ('queued', 'retry') AND (next_attempt_at IS NULL OR next_attempt_at <= NOW()))
         OR (status = 'generating' AND claimed_at < NOW() - INTERVAL '20 minutes'))
       ORDER BY (source->>'publishedAt') DESC NULLS LAST, created_at ASC
@@ -434,7 +434,8 @@ async function markSeoAutoResult(videoId, result) {
 async function listSeoAutoCandidates(limit = 20) {
   await init();
   const result = await pool.query(`SELECT video_id AS "videoId" FROM amaana_seo_packages
-    WHERE status IN ('ready', 'needs_review') AND source->>'privacyStatus' = 'public'
+    WHERE status IN ('ready', 'needs_review')
+      AND source->>'privacyStatus' IN ('public', 'private', 'unlisted')
       AND generated_at IS NOT NULL
       AND (auto_result IS NULL
         OR (auto_result->>'packageGeneratedAt')::timestamptz IS DISTINCT FROM generated_at

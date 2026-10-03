@@ -21,6 +21,8 @@ function sameTags(left, right) {
   return JSON.stringify(left || []) === JSON.stringify(right || []);
 }
 
+const ALLOWED_VIDEO_PRIVACY_STATUSES = new Set(['public', 'private', 'unlisted']);
+
 function auditVideo(item) {
   const source = item.source || {};
   const keyword = item.package?.primaryKeyword || item.context?.primaryKeyword || '';
@@ -49,6 +51,13 @@ function assertVideoMatchesCatalog(video, channelId, item) {
   if (!video || video.snippet?.channelId !== channelId || item.source?.channelId !== channelId) {
     throw problem('This video is not on the connected channel', 403);
   }
+  const privacyStatus = item.source?.privacyStatus;
+  if (!ALLOWED_VIDEO_PRIVACY_STATUSES.has(privacyStatus)) {
+    throw problem('This video has an unsupported privacy status', 403);
+  }
+  if (video.status?.privacyStatus !== privacyStatus) {
+    throw problem('Video visibility changed since the catalog scan', 409);
+  }
   if (video.snippet.title !== item.source.title ||
       (video.snippet.description || '') !== (item.source.description || '') ||
       !sameTags(video.snippet.tags, item.source.tags)) {
@@ -60,10 +69,18 @@ function assertVideoMatchesCatalog(video, channelId, item) {
 function automaticVideoEdit(item) {
   const source = item.source || {};
   const pkg = item.package;
-  if (source.privacyStatus !== 'public') throw problem('Only existing public videos can be updated');
+  if (!ALLOWED_VIDEO_PRIVACY_STATUSES.has(source.privacyStatus)) {
+    throw problem('Only public, private, and unlisted catalog videos can be updated');
+  }
   if (!pkg || !['ready', 'needs_review'].includes(item.status)) throw problem('No generated SEO package');
-  if (!item.analysis && !item.context?.takeaways?.trim()) {
-    throw problem('Video analysis or owner supplied video context is required for automatic publishing');
+  const hasOwnerContext = Boolean(item.context?.takeaways?.trim());
+  const hasVideoAnalysis = Boolean(item.analysis);
+  const hasPrivateDescriptionEvidence = String(source.description || '').trim().length >= 100;
+  if (!hasVideoAnalysis && !hasOwnerContext &&
+      (source.privacyStatus === 'public' || !hasPrivateDescriptionEvidence)) {
+    throw problem(source.privacyStatus === 'public'
+      ? 'Video analysis or owner supplied video context is required for automatic publishing'
+      : 'Private and unlisted videos need 100 characters of existing description or owner supplied takeaways');
   }
   if (pkg.missingEvidence?.some((warning) => /script or key takeaways/i.test(warning))) {
     throw problem('The package has insufficient evidence for its claims');
@@ -134,7 +151,9 @@ function createSeoPublisher({ store, youtube, logger = console }) {
   const dailyLimit = Number.isSafeInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : 50;
   async function publishVideo(videoId) {
     const item = await store.getSeoVideo(videoId);
-    if (!item || item.source?.privacyStatus !== 'public' || !item.package) return;
+    if (!item || !item.package) return;
+    const privacyStatus = item.source?.privacyStatus;
+    if (!ALLOWED_VIDEO_PRIVACY_STATUSES.has(privacyStatus)) return;
     const generation = new Date(item.generatedAt).toISOString();
     if (item.autoResult?.packageGeneratedAt === generation && item.autoResult.state !== 'retry') return;
     let result;
@@ -145,7 +164,9 @@ function createSeoPublisher({ store, youtube, logger = console }) {
       ]);
       if (state.channelId !== channel.id) throw problem('Connected channel differs from the SEO catalog', 409);
       await youtube.assertTargetChannel(channel.id);
-      if (video?.status?.privacyStatus !== 'public') throw problem('Video is no longer public');
+      if (video?.status?.privacyStatus !== privacyStatus) {
+        throw problem('Video visibility changed since the catalog scan', 409);
+      }
       if (video.snippet?.liveBroadcastContent && video.snippet.liveBroadcastContent !== 'none') {
         throw problem('Livestream has not ended; SEO will retry later', 425);
       }
@@ -160,11 +181,11 @@ function createSeoPublisher({ store, youtube, logger = console }) {
       const originalTags = prior && sameTags(item.source.tags, prior.tags)
         ? prior.originalTags : item.source.tags;
       const applied = { ...edit, originalDescription, originalTags, at: new Date().toISOString(), packageGeneratedAt: generation,
-        privacyStatus: 'public' };
+        privacyStatus };
       await store.markSeoApplied(videoId, applied);
       await store.upsertSeoVideo(videoId, { ...item.source, ...edit });
       result = { state: 'applied' };
-      logger.info?.(`SEO metadata applied to public video ${videoId}`);
+      logger.info?.('SEO metadata applied to ' + privacyStatus + ' video ' + videoId);
     } catch (error) {
       result = { state: retryablePublishError(error) ? 'retry' : 'skipped',
         reason: String(error.message).slice(0, 300) };
@@ -177,7 +198,7 @@ function createSeoPublisher({ store, youtube, logger = console }) {
 
   async function publishPending(limit = 20) {
     const candidates = await store.listSeoAutoCandidates(limit);
-    logger.info?.(`SEO public publish candidates: ${candidates.length}`);
+    logger.info?.(`SEO metadata candidates: ${candidates.length}`);
     for (const candidate of candidates) await publishVideo(candidate.videoId);
   }
 
