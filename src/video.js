@@ -72,18 +72,55 @@ async function assembleHighlights(sources, outputPath, segmentDir) {
   return durations;
 }
 
-function mediaDuration(inputPath) {
-  return new Promise((resolve, reject) => {
+async function inspectMedia(inputPath) {
+  if (!ffmpegPath) throw new Error('FFmpeg is not available');
+  const stderr = await new Promise((resolve, reject) => {
     const child = spawn(ffmpegPath, ['-i', inputPath], { stdio: ['ignore', 'ignore', 'pipe'] });
-    let stderr = '';
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', reject);
-    child.on('close', () => {
-      const match = stderr.match(/Duration: (\d+):(\d+):(\d+\.\d+)/);
-      if (!match) return reject(new Error('Could not measure highlight segment'));
-      resolve(Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]));
-    });
+    let output = '';
+    child.stderr.on('data', (chunk) => { output = (output + chunk).slice(-12000); });
+    const timer = setTimeout(() => child.kill('SIGKILL'), 30000);
+    child.on('error', (error) => { clearTimeout(timer); reject(error); });
+    child.on('close', () => { clearTimeout(timer); resolve(output); });
   });
+  const duration = stderr.match(/Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/);
+  const dimensions = stderr.match(/Video:[^\n]*?(\d{2,5})x(\d{2,5})/);
+  if (!duration || !dimensions) throw new Error('Could not verify rendered video duration and dimensions');
+  return {
+    durationSeconds: Number(duration[1]) * 3600 + Number(duration[2]) * 60 + Number(duration[3]),
+    width: Number(dimensions[1]),
+    height: Number(dimensions[2])
+  };
+}
+
+function durationMatches(actual, expected) {
+  const tolerance = Math.max(1.5, Math.min(3, Number(expected) * 0.02));
+  return Number.isFinite(Number(expected)) && Number(expected) > 0 &&
+    Math.abs(actual - Number(expected)) <= tolerance;
+}
+
+async function validateHighlight(filePath, expectedDuration) {
+  const media = await inspectMedia(filePath);
+  const aspect = media.width / media.height;
+  if (media.width < 640 || media.height < 360 || aspect < 1.7 || aspect > 1.85 ||
+      !durationMatches(media.durationSeconds, expectedDuration)) {
+    throw new Error('Rendered highlight failed landscape resolution, aspect, or duration checks');
+  }
+  return media;
+}
+
+async function validateShort(filePath, expectedDuration) {
+  const media = await inspectMedia(filePath);
+  const aspect = media.width / media.height;
+  if (media.width < 360 || media.height < 640 || aspect < 0.55 || aspect > 0.575 ||
+      media.durationSeconds < 5 || media.durationSeconds > 60 ||
+      !durationMatches(media.durationSeconds, expectedDuration)) {
+    throw new Error('Rendered Short failed vertical resolution, aspect, or duration checks');
+  }
+  return media;
+}
+
+async function mediaDuration(inputPath) {
+  return (await inspectMedia(inputPath)).durationSeconds;
 }
 
 async function shortFromHighlight(highlightPath, start, duration, outputPath) {
@@ -283,5 +320,5 @@ async function createThumbnailFromImage(inputPath, outputPath, { headline } = {}
   }
 }
 
-module.exports = { convertLandscapeToShort, assembleHighlights, shortFromHighlight,
-  createThumbnail, createThumbnailFromImage, thumbnailHeadline, thumbnailOverlay };
+module.exports = { convertLandscapeToShort, assembleHighlights, shortFromHighlight, inspectMedia,
+  validateHighlight, validateShort, createThumbnail, createThumbnailFromImage, thumbnailHeadline, thumbnailOverlay };
