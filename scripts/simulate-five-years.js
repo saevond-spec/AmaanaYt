@@ -40,6 +40,7 @@ function simulateFiveYears(input = {}) {
   const playlistAutoDailyLimit = positiveInteger(input.playlistAutoDailyLimit ?? process.env.YOUTUBE_AUTO_PLAYLIST_DAILY_LIMIT, 20);
   const playlistInsertUnits = positiveInteger(input.playlistInsertUnits ?? process.env.SIM_PLAYLIST_ITEM_INSERT_UNITS, 50);
   const playlistCheckUnits = positiveInteger(input.playlistCheckUnits ?? process.env.SIM_PLAYLIST_ITEM_CHECK_UNITS, 1);
+  const playlistListMaxPages = positiveInteger(input.playlistListMaxPages ?? process.env.SIM_PLAYLIST_LIST_MAX_PAGES, 20);
 
   const streams = window.days * streamsPerDay;
   const missingAnalysisVideos = Math.ceil(publicVideos * missingAnalysisShare);
@@ -51,7 +52,8 @@ function simulateFiveYears(input = {}) {
   const batchedQueueDays = missingAnalysisVideos
     ? analysisQueueWaitDays + Math.ceil(missingAnalysisVideos / batchedAnalysisPerDay) : 0;
   const playlistAutoAssignmentsPerDay = playlistAutoDailyLimit * 2;
-  const playlistAutoDailyUnits = playlistAutoAssignmentsPerDay * (playlistInsertUnits + playlistCheckUnits);
+  const playlistAutoDailyUnits = playlistAutoAssignmentsPerDay *
+    (playlistInsertUnits + playlistCheckUnits + playlistListMaxPages);
   const currentDailyUnits = seoWriteDailyLimit * updateUnits + streamsPerDay * thumbnailUnits + playlistAutoDailyUnits;
   const bulkThumbnailDailyUnits = thumbnailBackfillDailyLimit * thumbnailUnits;
   const totalWithBulkThumbnailBackfill = currentDailyUnits + bulkThumbnailDailyUnits;
@@ -79,7 +81,8 @@ function simulateFiveYears(input = {}) {
       behavior: 'Permanent permission/channel errors are skipped; quota and transient errors remain retryable.' },
     youtubeApiQuota: { defaultDailyUnits: defaultQuota, videoUpdateUnits: updateUnits,
       thumbnailSetUnits: thumbnailUnits, playlistItemInsertUnits: playlistInsertUnits,
-      playlistItemCheckUnits: playlistCheckUnits, maxPlaylistAssignmentsPerDay: playlistAutoAssignmentsPerDay,
+      playlistItemCheckUnits: playlistCheckUnits, ownedPlaylistListMaxPages: playlistListMaxPages,
+      maxPlaylistAssignmentsPerDay: playlistAutoAssignmentsPerDay,
       automaticPlaylistDailyUnits: playlistAutoDailyUnits, currentPipelineDailyWriteUnits: currentDailyUnits,
       currentPipelineHeadroomBeforeReads: defaultQuota - currentDailyUnits,
       optionalExistingThumbnailBackfillUnitsPerDay: bulkThumbnailDailyUnits,
