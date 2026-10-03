@@ -187,6 +187,14 @@ Do not give OpenClaw `ADMIN_KEY`.
 
 ## API workflow
 
+### Automatic playlists
+
+Amaana compares each video's title, description, tags, and owner-entered topic fields with the titles and descriptions of playlists owned by the connected channel. A confident match is added automatically. If multiple playlists match equally or the metadata is too broad, the video stays unassigned. It does not create playlists automatically; create the right series playlists in the dashboard first.
+
+New private uploads and Twitch highlights are assigned only to private playlists while they remain drafts. Existing public catalog videos are processed from YouTube metadata; public videos prefer public playlists, with a matching private or unlisted playlist as a fallback. Existing private and unlisted videos are not scanned or changed. Playlist assignment never changes a video's visibility. Creating a new public playlist makes previously unmatched public catalog videos eligible for another pass.
+
+**YOUTUBE_AUTO_PLAYLISTS** defaults to true. **YOUTUBE_AUTO_PLAYLIST_DAILY_LIMIT** defaults to 20 assignment attempts per UTC day for public videos and 20 for private/unlisted videos; each group is capped at 50. **YOUTUBE_AUTO_PLAYLIST_BATCH_SIZE** defaults to 20 public videos per worker pass. Disable automatic placement with **YOUTUBE_AUTO_PLAYLISTS=false**. The five-year simulator includes the maximum insert and duplicate-check quota for both default daily limits.
+
 ### SEO packages for every channel upload
 
 After deployment, Amaana reads the authenticated channel's uploads playlist in pages of up to 50 videos, then fetches the video metadata in batches. It keeps a database cursor, rescans the newest page for future uploads, and resumes the older catalog after restarts. The hourly `/healthz` wake-up also advances this work; on Render Free, sleep and delayed GitHub Actions runs can extend the schedule. The dashboard shows metadata findings, generated packages, automatic results, and skip reasons. You can pause or restart the scan from the owner dashboard; pausing stops automatic SEO publication too. If the connected YouTube channel changes, the scan pauses rather than mixing two channels in one catalog.
