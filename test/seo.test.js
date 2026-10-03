@@ -64,9 +64,48 @@ test('shorter truthful hooks and focused tags pass, and market provenance is rec
   assert.equal(pkg.tags.length, 3);
 });
 
-test('tag output is capped at eight focused values', () => {
-  assert.throws(() => validatePackage({ ...generated, tags: Array(9).fill('NARAKA') }, source, context),
-    /3–8 focused tags/);
+test('tag output caps overlong provider lists and restores the exact primary keyword', () => {
+  const omittedKeyword = validatePackage({ ...generated,
+    tags: ['NARAKA gameplay', 'final fight', 'match guide']
+  }, source, context);
+  assert.equal(omittedKeyword.tags[0], keyword);
+  const differentlyCasedKeyword = validatePackage({ ...generated,
+    tags: ['naraka bladepoint guide', 'final fight', 'match guide']
+  }, source, context);
+  assert.equal(differentlyCasedKeyword.tags[0], keyword);
+
+  const candidates = [keyword, ...Array.from({ length: 14 }, (_value, index) => 'NARAKA term ' + index)];
+  const pkg = validatePackage({ ...generated, tags: candidates }, source, context);
+  assert.deepEqual(pkg.tags, candidates.slice(0, 8));
+  assert.ok(pkg.tags.join(',').length <= 450);
+
+  const longCandidates = [keyword, ...Array(14).fill('x'.repeat(60))];
+  const trimmed = validatePackage({ ...generated, tags: longCandidates }, source, context);
+  assert.ok(trimmed.tags.length <= 8);
+  assert.ok(trimmed.tags.join(',').length <= 450);
+  assert.throws(() => validatePackage({ ...generated, tags: Array(31).fill('NARAKA') }, source, context),
+    /3–30 focused tag candidates/);
+});
+
+test('two-year provider tag-drift simulation keeps all 730 packages valid and focused', () => {
+  let generatedPackages = 0;
+  let trimmedPackages = 0;
+  for (let day = 0; day < 730; day += 1) {
+    const candidateCount = 3 + (day % 13);
+    const candidates = [];
+    if (day % 11 !== 0) candidates.push(keyword);
+    for (let index = 0; candidates.length < candidateCount; index += 1) {
+      candidates.push(day % 17 === 0 ? 'x'.repeat(60) : 'NARAKA term ' + day + '-' + index);
+    }
+    const pkg = validatePackage({ ...generated, tags: candidates }, source, context);
+    assert.ok(pkg.tags.length >= 3 && pkg.tags.length <= 8);
+    assert.equal(pkg.tags[0], keyword);
+    assert.ok(pkg.tags.join(',').length <= 450);
+    generatedPackages += 1;
+    if (candidateCount > 8 || pkg.tags.length < candidateCount || day % 11 === 0) trimmedPackages += 1;
+  }
+  assert.equal(generatedPackages, 730);
+  assert.ok(trimmedPackages > 0);
 });
 
 test('live market evidence reaches the prompt as observations without replacing video facts', async () => {
@@ -588,3 +627,131 @@ test('analysis backfill queues a bounded batch of public videos in one run', asy
   assert.equal(requestedLimit, 5);
   assert.deepEqual(queued, ['public-0', 'public-1', 'public-2', 'public-3', 'public-4']);
 });
+
+test('two-year queue simulation drains the active backlog and requeues only legacy tag failures once', async () => {
+  const days = 730;
+  let currentDay = 0;
+  let tagRecoveryDone = false;
+  let recoveryCalls = 0;
+  let requeuedTotal = 0;
+  const rows = [];
+  const makeRow = (index, status, error = null, attempts = 0) => ({
+    videoId: 'video-' + index,
+    source: { ...source, title: 'NARAKA BLADEPOINT match ' + index },
+    context,
+    status, error, attempts, nextAttemptDay: status === 'retry' ? 1 : 0,
+    claimedDay: status === 'generating' ? -1 : null,
+    lastAttemptDay: null, claimToken: null, package: null
+  });
+  for (let index = 0; index < 2405; index += 1) rows.push(makeRow(index, 'queued'));
+  for (let index = 0; index < 32; index += 1) rows.push(makeRow(2405 + index, 'retry', 'temporary provider issue', 1));
+  rows.push(makeRow(2437, 'generating'));
+  for (let index = 0; index < 130; index += 1) rows.push(makeRow(2438 + index, 'needs_review'));
+  rows.push(makeRow(2568, 'failed', 'Expected 10–15 tags', 3));
+  rows.push(makeRow(2569, 'failed', 'Tags exceed the recommended combined length', 3));
+  rows.push(makeRow(2570, 'failed', 'Tags must include the exact primary keyword', 3));
+  rows.push(makeRow(2571, 'failed', 'Invalid JSON output', 3));
+
+  let sync = { channelId: 'channel-1', recentAt: '2099-01-01T00:00:00.000Z',
+    completed: true, enabled: true };
+  const store = {
+    getSeoSyncState: async () => sync,
+    saveSeoSyncState: async (next) => { sync = next; },
+    requeueLegacySeoTagFailures: async () => {
+      recoveryCalls += 1;
+      if (tagRecoveryDone) return 0;
+      tagRecoveryDone = true;
+      let count = 0;
+      for (const row of rows) {
+        if (row.status === 'failed' &&
+            (/^Expected 10.*15.*tag/i.test(row.error || '') ||
+             /^Tags exceed the recommended combined length/i.test(row.error || '') ||
+             /^Tags must include the exact primary keyword/i.test(row.error || ''))) {
+          row.status = 'queued';
+          row.error = null;
+          row.attempts = 0;
+          row.package = null;
+          row.nextAttemptDay = currentDay;
+          count += 1;
+        }
+      }
+      requeuedTotal += count;
+      return count;
+    },
+    seoCounts: async () => {
+      const statuses = {};
+      for (const row of rows) statuses[row.status] = (statuses[row.status] || 0) + 1;
+      return { statuses, attemptedToday: rows.filter((row) => row.lastAttemptDay === currentDay).length };
+    },
+    claimSeoVideo: async () => {
+      const row = rows.find((candidate) => candidate.status === 'queued' ||
+        candidate.status === 'retry' && candidate.nextAttemptDay <= currentDay ||
+        candidate.status === 'generating' && candidate.claimedDay < currentDay);
+      if (!row) return null;
+      row.status = 'generating';
+      row.attempts += 1;
+      row.claimedDay = currentDay;
+      row.lastAttemptDay = currentDay;
+      row.claimToken = row.videoId + '-' + row.attempts;
+      return { videoId: row.videoId, source: row.source, context: row.context,
+        attempts: row.attempts, claimToken: row.claimToken };
+    },
+    finishSeoVideo: async (videoId, claimToken, generatedPackage, error) => {
+      const row = rows.find((candidate) => candidate.videoId === videoId);
+      assert.equal(row.claimToken, claimToken);
+      row.claimToken = null;
+      row.claimedDay = null;
+      if (generatedPackage) {
+        row.package = generatedPackage;
+        row.status = generatedPackage.missingEvidence.length ? 'needs_review' : 'ready';
+        row.error = null;
+      } else {
+        row.package = null;
+        row.status = error.retry ? 'retry' : 'failed';
+        row.error = error.message;
+        if (error.retry) row.nextAttemptDay = currentDay + 1;
+      }
+    }
+  };
+  const youtube = { isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner' }) };
+  const createWorker = () => createSeoWorker({
+    store, youtube, env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'two-year-simulation',
+      SEO_DAILY_LIMIT: '200' }, logger: { info() {}, warn() {}, error() {} },
+    generate: async (videoSource, videoContext) => {
+      const index = Number(videoSource.title.match(/\d+$/)?.[0] || 0);
+      const candidateCount = 3 + (index % 13);
+      const candidates = [];
+      if (index % 11 !== 0) candidates.push(keyword);
+      for (let tagIndex = 0; candidates.length < candidateCount; tagIndex += 1) {
+        candidates.push('NARAKA term ' + index + '-' + tagIndex);
+      }
+      return validatePackage({ ...generated, tags: candidates }, videoSource, videoContext,
+        { summary: 'Observed gameplay from this video' });
+    }
+  });
+  let worker = createWorker();
+  let drainedAfterDay = null;
+  for (let day = 0; day < days; day += 1) {
+    currentDay = day;
+    if (day === 365) worker = createWorker();
+    await worker.run();
+    const active = rows.filter((row) => ['queued', 'retry', 'generating'].includes(row.status)).length;
+    if (drainedAfterDay === null && active === 0) drainedAfterDay = day + 1;
+  }
+
+  const counts = {};
+  for (const row of rows) counts[row.status] = (counts[row.status] || 0) + 1;
+  assert.equal(rows.length, 2572);
+  assert.equal(recoveryCalls, 2);
+  assert.equal(requeuedTotal, 3);
+  assert.equal(drainedAfterDay, 13);
+  assert.equal(counts.ready, 2441);
+  assert.equal(counts.needs_review, 130);
+  assert.equal(counts.failed, 1);
+  assert.equal(counts.queued || 0, 0);
+  assert.equal(counts.retry || 0, 0);
+  assert.equal(counts.generating || 0, 0);
+  assert.ok(rows.every((row) => row.source.privacyStatus === source.privacyStatus));
+});
+
