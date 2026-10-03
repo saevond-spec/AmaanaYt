@@ -637,7 +637,7 @@ test('two-year queue simulation drains the active backlog and requeues only lega
   const rows = [];
   const makeRow = (index, status, error = null, attempts = 0) => ({
     videoId: 'video-' + index,
-    source: { ...source, title: 'NARAKA BLADEPOINT match ' + index },
+    source: { ...source, title: 'NARAKA BLADEPOINT match ' + index, privacyStatus: 'public' },
     context,
     status, error, attempts, nextAttemptDay: status === 'retry' ? 1 : 0,
     claimedDay: status === 'generating' ? -1 : null,
@@ -758,7 +758,7 @@ test('two-year queue simulation drains the active backlog and requeues only lega
   assert.equal(counts.retry || 0, 0);
   assert.equal(counts.generating || 0, 0);
   assert.ok(rows.filter((row) => !['video-2572', 'video-2573'].includes(row.videoId))
-    .every((row) => row.source.privacyStatus === source.privacyStatus));
+    .every((row) => row.source.privacyStatus === 'public'));
   assert.equal(rows.find((row) => row.videoId === 'video-2572').status, 'failed');
   assert.equal(rows.find((row) => row.videoId === 'video-2573').status, 'failed');
 });
