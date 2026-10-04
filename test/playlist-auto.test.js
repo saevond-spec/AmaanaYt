@@ -125,7 +125,7 @@ test('unmatched metadata is placed in a private review playlist', async () => {
   assert.equal(created.length, 1);
   assert.equal(created[0].privacyStatus, 'private');
   assert.deepEqual(additions, [{ playlistId: 'PL-review', videoId: 'abcdefghijk' }]);
-  assert.deepEqual(reservations[0], ['private', 20, '2026-10-04']);
+  assert.deepEqual(reservations[0], ['private', 30, '2026-10-04']);
 });
 
 test('playlist coverage audit compares every channel upload with all owned playlists', async () => {
