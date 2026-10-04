@@ -181,3 +181,59 @@ test('playlist coverage audit does not queue repairs until the catalog scan is c
   assert.equal(report.requeuedCount, 0);
   assert.equal(requeueCalls, 0);
 });
+
+
+test('playlist repair uses a 30-per-privacy-bucket cap and a 50-item batch', async () => {
+  let requestedBatchSize = null;
+  const assigner = createPlaylistAutoAssigner({
+    env: { YOUTUBE_AUTO_PLAYLIST_DAILY_LIMIT: '999' },
+    store: {
+      listSeoNeedsPlaylist: async (limit) => { requestedBatchSize = limit; return []; },
+      markSeoPlaylistResult: async () => {}
+    },
+    youtube: { listOwnedPlaylists: async () => [] }
+  });
+  assert.equal(assigner.dailyLimit, 30);
+  const result = await assigner.assignCatalogBacklog();
+  assert.equal(requestedBatchSize, 50);
+  assert.deepEqual(result, { attempted: 0, assigned: 0 });
+});
+
+test('a full public playlist quota does not block private playlist repairs', async () => {
+  const reservations = [];
+  const additions = [];
+  const marked = [];
+  const candidates = [
+    { videoId: 'abcdefghijk', source: { title: 'ARC Raiders extraction',
+      tags: ['ARC Raiders'], privacyStatus: 'public' } },
+    { videoId: 'lmnopqrstuv', source: { title: 'ARC Raiders extraction',
+      tags: ['ARC Raiders'], privacyStatus: 'private' } }
+  ];
+  const assigner = createPlaylistAutoAssigner({
+    env: { YOUTUBE_AUTO_PLAYLIST_DAILY_LIMIT: '1' },
+    store: {
+      listSeoNeedsPlaylist: async () => candidates,
+      markSeoPlaylistResult: async (id, result) => marked.push([id, result]),
+      reservePlaylistAutoSlot: async (bucket) => {
+        reservations.push(bucket);
+        return { allowed: bucket === 'private' };
+      }
+    },
+    youtube: {
+      listOwnedPlaylists: async () => [
+        { id: 'PL_PUBLIC', title: 'ARC Raiders', privacyStatus: 'public' },
+        { id: 'PL_PRIVATE', title: 'ARC Raiders', privacyStatus: 'private' }
+      ],
+      addVideoToPlaylist: async (input) => {
+        additions.push(input);
+        return { alreadyAdded: false };
+      }
+    }
+  });
+  const result = await assigner.assignCatalogBacklog();
+  assert.deepEqual(reservations, ['public', 'private']);
+  assert.equal(result.attempted, 1);
+  assert.equal(result.assigned, 1);
+  assert.deepEqual(additions, [{ playlistId: 'PL_PRIVATE', videoId: 'lmnopqrstuv' }]);
+  assert.deepEqual(marked.map(([id]) => id), ['lmnopqrstuv']);
+});
