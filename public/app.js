@@ -596,11 +596,18 @@ async function loadSeo() {
     seoEnabled = status.enabled !== false;
     const counts = status.statuses || {};
     const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
+    const coverage = status.playlistCoverageAudit;
+    const coverageStatus = coverage
+      ? coverage.complete && coverage.catalogScanComplete
+        ? `Playlist coverage ${coverage.coveredCount || 0}/${coverage.catalogCount || 0}; ${coverage.missingCount || 0} missing${coverage.requeuedCount ? `; ${coverage.requeuedCount} queued for repair` : ''}`
+        : `Playlist coverage audit incomplete; ${coverage.failedPlaylistCount || 0} playlists unread`
+      : status.completed ? 'Playlist coverage audit pending' : null;
     seoStatus.textContent = [
       status.channelTitle ? `Connected channel: ${status.channelTitle}` : 'Waiting for channel connection',
       `${total} videos found; ${counts.ready || 0} ready, ${counts.needs_review || 0} need review, ${counts.queued || 0} queued, ${counts.retry || 0} retry, ${counts.generating || 0} generating, ${counts.failed || 0} failed`,
       `${status.appliedTotal || 0} public videos updated by Amaana`,
       status.completed ? 'Catalog scan complete' : 'Catalog scan in progress',
+      coverageStatus,
       status.providerConfigured ? `${status.attemptedToday}/${status.dailyLimit} AI attempts today (UTC)`
         : 'Configure SEO_AI_API_KEY and SEO_AI_MODEL to create packages',
       status.videoAnalysisEnabled ? 'Video analysis on for public videos' : 'Video analysis off',
