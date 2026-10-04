@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { normalizePlaylistInput, canAddVideoToPlaylist, createYouTubePlaylistClient } = require('../src/youtube-playlists');
+const youtube = require('../src/youtube');
 
 test('playlist creation defaults to private and validates privacy and input limits', () => {
   assert.deepEqual(normalizePlaylistInput({ title: '  ARC Raiders  ' }),
@@ -116,4 +117,8 @@ test('playlist video listing paginates and deduplicates playlist memberships', a
     ['abcdefghijk', 'lmnopqrstuv', 'zyxwvutsrqp']);
   assert.deepEqual(calls.map((call) => call.pageToken || null), [null, 'page-2']);
   assert.ok(calls.every((call) => call.maxResults === 50));
+});
+
+test('YouTube module exposes playlist membership listing for full coverage audits', () => {
+  assert.equal(typeof youtube.listPlaylistVideoIds, 'function');
 });
