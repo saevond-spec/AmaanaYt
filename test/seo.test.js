@@ -848,6 +848,36 @@ test('automatically audits completed catalog coverage and retries repairs daily'
   assert.equal(assignmentCalls, 3);
 });
 
+test('default catalog scan processes twenty older uploads per run', async () => {
+  let state = { cursor: 'page-1', completed: false, enabled: true,
+    recentAt: new Date().toISOString() };
+  const pages = [];
+  const store = {
+    getSeoSyncState: async () => state,
+    saveSeoSyncState: async (next) => { state = next; },
+    upsertSeoVideo: async () => {}
+  };
+  const youtube = {
+    isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner', uploads: 'uploads-1' }),
+    uploadsPage: async (_playlistId, cursor) => {
+      pages.push(cursor);
+      const page = Number(cursor.split('-')[1]);
+      return { ids: [], nextPageToken: page < 30 ? `page-${page + 1}` : null };
+    },
+    videoMetadata: async () => []
+  };
+  const worker = createSeoWorker({ store, youtube, env: {}, logger: { info() {} } });
+
+  await worker.run();
+
+  assert.equal(pages.length, 20);
+  assert.equal(pages[0], 'page-1');
+  assert.equal(pages.at(-1), 'page-20');
+  assert.equal(state.cursor, 'page-21');
+  assert.equal(state.completed, false);
+});
+
 test('catalog scan processes a bounded batch of older uploads per run', async () => {
   let state = { cursor: null, completed: false, enabled: true };
   const pages = [];
