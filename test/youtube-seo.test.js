@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const { google } = require('googleapis');
 const store = require('../src/store');
 const youtube = require('../src/youtube');
@@ -26,7 +27,7 @@ test('video metadata update sends only snippet, retains category/language, and u
   const current = {
     etag: '"etag-before-change"',
     snippet: { title: 'Before', description: 'Description', tags: ['old'],
-      categoryId: '20', defaultLanguage: 'ja', channelId: 'channel-1' },
+      categoryId: '20', defaultLanguage: 'ja', defaultAudioLanguage: 'en', channelId: 'channel-1' },
     status: { privacyStatus: 'public', selfDeclaredMadeForKids: false }
   };
   await assert.rejects(youtube.updateVideoSeo('abcdefghijk', { ...current, etag: undefined },
@@ -39,7 +40,7 @@ test('video metadata update sends only snippet, retains category/language, and u
   assert.deepEqual(request.params.requestBody, {
     id: 'abcdefghijk',
     snippet: { title: 'After', description: 'Better description', tags: ['new'],
-      categoryId: '20', defaultLanguage: 'ja' }
+      categoryId: '20', defaultLanguage: 'ja', defaultAudioLanguage: 'en' }
   });
   assert.equal(request.options.headers['If-Match'], current.etag);
   assert.equal(Object.hasOwn(request.params.requestBody, 'status'), false);
@@ -202,4 +203,73 @@ test('market search ranks recent examples by age-adjusted views per day', async 
   const items = await youtube.recentGameVideos('ARC Raiders', { now: Date.parse('2026-10-07T12:00:00Z') });
   assert.deepEqual(items.map((item) => item.id), ['newer-lower-total', 'older-high-total']);
   assert.deepEqual(items.map((item) => item.estimatedViewsPerDay), [250, 200]);
+});
+
+
+test('private uploads set spoken-audio language separately and allow no-speech videos', async (t) => {
+  const oldYoutube = google.youtube;
+  const oldTokens = store.getTokens;
+  const oldBaseUrl = process.env.BASE_URL;
+  const oldLanguage = process.env.YOUTUBE_DEFAULT_AUDIO_LANGUAGE;
+  const oldCreateReadStream = fs.createReadStream;
+  t.after(() => {
+    google.youtube = oldYoutube;
+    store.getTokens = oldTokens;
+    process.env.BASE_URL = oldBaseUrl;
+    process.env.YOUTUBE_DEFAULT_AUDIO_LANGUAGE = oldLanguage;
+    fs.createReadStream = oldCreateReadStream;
+  });
+  process.env.BASE_URL = 'https://amaana.example.test';
+  process.env.YOUTUBE_DEFAULT_AUDIO_LANGUAGE = 'en';
+  store.getTokens = async () => ({ access_token: 'unit-test', expiry_date: Date.now() + 3600000 });
+  fs.createReadStream = () => ({ mockedVideoStream: true });
+  const requests = [];
+  google.youtube = () => ({ videos: { insert: async (params) => {
+    requests.push(params);
+    return { data: { id: 'abcdefghijk' } };
+  } } });
+
+  await youtube.uploadPrivate({ filePath: '/not-read.mp4', title: 'Gameplay',
+    description: 'English metadata', tags: ['gameplay'], audioLanguage: 'pt-br' });
+  await youtube.uploadPrivate({ filePath: '/not-read.mp4', title: 'Silent gameplay',
+    description: 'English metadata', tags: ['gameplay'], audioLanguage: 'none' });
+
+  assert.equal(requests[0].requestBody.snippet.defaultLanguage, 'en');
+  assert.equal(requests[0].requestBody.snippet.defaultAudioLanguage, 'pt-BR');
+  assert.equal(Object.hasOwn(requests[1].requestBody.snippet, 'defaultAudioLanguage'), false);
+  await assert.rejects(youtube.uploadPrivate({ filePath: '/not-read.mp4', title: 'Bad language',
+    description: '', tags: [], audioLanguage: 'en_US' }), /valid BCP-47/);
+});
+
+test('existing-video audio-language updates preserve metadata and use the current ETag', async (t) => {
+  const oldYoutube = google.youtube;
+  const oldTokens = store.getTokens;
+  const oldBaseUrl = process.env.BASE_URL;
+  t.after(() => {
+    google.youtube = oldYoutube;
+    store.getTokens = oldTokens;
+    process.env.BASE_URL = oldBaseUrl;
+  });
+  process.env.BASE_URL = 'https://amaana.example.test';
+  store.getTokens = async () => ({ access_token: 'unit-test', expiry_date: Date.now() + 3600000 });
+  let request;
+  google.youtube = () => ({ videos: { update: async (params, options) => {
+    request = { params, options };
+    return { data: { id: 'abcdefghijk', snippet: params.requestBody.snippet } };
+  } } });
+  const current = {
+    etag: '"audio-etag"',
+    snippet: { title: 'Current title', description: 'Keep this description', tags: ['keep'],
+      categoryId: '20', defaultLanguage: 'en', defaultAudioLanguage: 'en' }
+  };
+
+  await youtube.setVideoAudioLanguage('abcdefghijk', current, 'ja');
+  assert.deepEqual(request.params.part, ['snippet']);
+  assert.deepEqual(request.params.requestBody, {
+    id: 'abcdefghijk',
+    snippet: { title: 'Current title', description: 'Keep this description', tags: ['keep'],
+      categoryId: '20', defaultAudioLanguage: 'ja', defaultLanguage: 'en' }
+  });
+  assert.equal(request.options.headers['If-Match'], current.etag);
+  await assert.rejects(youtube.setVideoAudioLanguage('abcdefghijk', current, 'en_US'), /valid BCP-47/);
 });

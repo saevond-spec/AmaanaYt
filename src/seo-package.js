@@ -47,6 +47,8 @@ function normalizeSource(video) {
     title: clean(video.snippet?.title, 200),
     description: String(video.snippet?.description || '').slice(0, MAX_DESCRIPTION),
     tags: Array.isArray(video.snippet?.tags) ? video.snippet.tags.slice(0, 30).map((tag) => clean(tag, 60)) : [],
+    defaultLanguage: video.snippet?.defaultLanguage || null,
+    defaultAudioLanguage: video.snippet?.defaultAudioLanguage || null,
     channelId: video.snippet?.channelId || null,
     publishedAt: video.snippet?.publishedAt || null,
     privacyStatus: video.status?.privacyStatus || null,
