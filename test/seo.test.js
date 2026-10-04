@@ -774,3 +774,29 @@ test('two-year queue simulation drains the active backlog and requeues only lega
   assert.equal(rows.find((row) => row.videoId === 'video-2573').status, 'failed');
 });
 
+test('restarting a catalog backfill requeues unmatched playlist results', async () => {
+  let state = { cursor: 'older-page', completed: true, recentAt: '2026-10-03T00:00:00.000Z',
+    enabled: true, providerBlockedUntil: '2026-10-04T00:00:00.000Z', providerError: 'quotaExceeded' };
+  let resetCalls = 0;
+  let saved;
+  const log = [];
+  const store = {
+    getSeoSyncState: async () => state,
+    resetSeoPlaylistResults: async () => { resetCalls += 1; return 7; },
+    saveSeoSyncState: async (next) => { saved = next; state = next; }
+  };
+  const worker = createSeoWorker({ store, youtube: {}, env: {},
+    logger: { info: (message) => log.push(message) } });
+
+  const updated = await worker.setBackfill(false, true);
+
+  assert.equal(resetCalls, 1);
+  assert.equal(saved.cursor, null);
+  assert.equal(saved.completed, false);
+  assert.equal(saved.recentAt, null);
+  assert.equal(saved.enabled, false);
+  assert.equal(saved.providerBlockedUntil, '2026-10-04T00:00:00.000Z');
+  assert.equal(saved.providerError, 'quotaExceeded');
+  assert.equal(updated, saved);
+  assert.deepEqual(log, ['Requeued 7 videos for automatic playlist matching']);
+});

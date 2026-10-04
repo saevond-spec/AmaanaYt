@@ -308,7 +308,15 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   async function setBackfill(enabled, restart = false) {
     const state = await store.getSeoSyncState();
     const updated = { ...state, enabled };
-    if (restart) { updated.cursor = null; updated.completed = false; updated.recentAt = null; }
+    if (restart) {
+      updated.cursor = null;
+      updated.completed = false;
+      updated.recentAt = null;
+      if (typeof store.resetSeoPlaylistResults === 'function') {
+        const requeued = await store.resetSeoPlaylistResults();
+        if (requeued) logger.info?.(`Requeued ${requeued} videos for automatic playlist matching`);
+      }
+    }
     if (enabled) { updated.providerBlockedUntil = null; updated.providerError = null; }
     await store.saveSeoSyncState(updated);
     if (enabled) schedule(true);
