@@ -21,6 +21,9 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
   const enabled = env.YOUTUBE_AUTO_PLAYLISTS !== 'false';
   const dailyLimit = setting(env.YOUTUBE_AUTO_PLAYLIST_DAILY_LIMIT, 20, 20);
   const batchSize = setting(env.YOUTUBE_AUTO_PLAYLIST_BATCH_SIZE, 20, 50);
+  const reviewPlaylistTitle = String(env.YOUTUBE_AUTO_PLAYLIST_REVIEW_TITLE || 'Needs Playlist Review')
+    .trim().slice(0, 150) || 'Needs Playlist Review';
+  const reviewPlaylistDescription = 'Private review queue for videos that did not confidently match an existing playlist. Video visibility remains unchanged.';
   let playlistsCache = null;
   let playlistsCacheAt = 0;
 
@@ -40,29 +43,140 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
       return { state: 'ineligible', reason: 'unknown_video_privacy' };
     }
 
-    const slot = await store.reservePlaylistAutoSlot(privacyStatus, dailyLimit,
-      youtubeQuotaDate(now()));
-    if (!slot?.allowed) return { state: 'daily_limit', privacyStatus, limit: dailyLimit };
-
     try {
       const playlists = await getOwnedPlaylists();
       const selected = chooseAutoPlaylist({ ...video, id: videoId, privacyStatus }, playlists);
-      if (!selected.playlist) return { state: selected.state, reason: selected.reason };
-      const result = await youtube.addVideoToPlaylist({
-        playlistId: selected.playlist.id, videoId
-      });
+      let playlist = selected.playlist;
+      const needsReview = !playlist;
+      if (needsReview) {
+        playlist = playlists.find((item) => item.privacyStatus === 'private' &&
+          String(item.title || '').trim().toLowerCase() === reviewPlaylistTitle.toLowerCase()) || null;
+        if (!playlist && typeof youtube.createPlaylist !== 'function') {
+          return { state: selected.state, reason: selected.reason };
+        }
+      }
+
+      const quotaBucket = playlist?.privacyStatus === 'public' ? 'public' : 'private';
+      const slot = await store.reservePlaylistAutoSlot(quotaBucket, dailyLimit, youtubeQuotaDate(now()));
+      if (!slot?.allowed) return { state: 'daily_limit', privacyStatus: quotaBucket, limit: dailyLimit };
+
+      if (!playlist) {
+        playlist = await youtube.createPlaylist({
+          title: reviewPlaylistTitle,
+          description: reviewPlaylistDescription,
+          privacyStatus: 'private'
+        });
+        playlists.push(playlist);
+      }
+
+      const result = await youtube.addVideoToPlaylist({ playlistId: playlist.id, videoId });
       return {
-        state: result.alreadyAdded ? 'already_added' : 'added',
-        playlistId: selected.playlist.id,
-        playlistTitle: selected.playlist.title,
-        privacyStatus: selected.playlist.privacyStatus,
-        score: selected.score
+        state: needsReview
+          ? (result.alreadyAdded ? 'fallback_already_added' : 'fallback_added')
+          : (result.alreadyAdded ? 'already_added' : 'added'),
+        playlistId: playlist.id,
+        playlistTitle: playlist.title,
+        privacyStatus: playlist.privacyStatus || 'private',
+        score: selected.score,
+        ...(needsReview ? { needsReview: true, matchState: selected.state, reason: selected.reason } : {})
       };
     } catch (error) {
       logger.warn?.('Automatic playlist assignment failed for ' + videoId + ': ' + error.message);
       return { state: 'retry', reason: String(error.message || 'YouTube request failed').slice(0, 300),
         at: new Date(now()).toISOString() };
     }
+  }
+
+  async function auditCatalogCoverage() {
+    if (typeof youtube.ownedChannel !== 'function' || typeof youtube.uploadsPage !== 'function' ||
+        typeof youtube.listPlaylistVideoIds !== 'function') {
+      throw new Error('YouTube playlist coverage audit is unavailable');
+    }
+    const [channel, syncState] = await Promise.all([
+      youtube.ownedChannel(),
+      typeof store.getSeoSyncState === 'function' ? store.getSeoSyncState() : Promise.resolve({})
+    ]);
+    if (syncState.channelId && syncState.channelId !== channel.id) {
+      throw new Error('YouTube channel changed; playlist coverage audit stopped to avoid mixing channels');
+    }
+    if (!channel.uploads) throw new Error('The connected YouTube account has no uploads playlist');
+
+    const catalogIds = new Set();
+    const seenTokens = new Set();
+    let pageToken = null;
+    let catalogPages = 0;
+    do {
+      const page = await youtube.uploadsPage(channel.uploads, pageToken);
+      catalogPages += 1;
+      for (const videoId of page.ids || []) {
+        if (/^[A-Za-z0-9_-]{11}$/.test(videoId)) catalogIds.add(videoId);
+      }
+      const nextPageToken = page.nextPageToken || null;
+      if (nextPageToken && seenTokens.has(nextPageToken)) {
+        throw new Error('YouTube uploads pagination repeated a page token');
+      }
+      if (nextPageToken) seenTokens.add(nextPageToken);
+      pageToken = nextPageToken;
+    } while (pageToken);
+
+    const playlists = await getOwnedPlaylists();
+    const playlistVideoIds = new Set();
+    const publicPlaylistVideoIds = new Set();
+    const playlistSummaries = [];
+    const failedPlaylists = [];
+    let membershipCount = 0;
+    for (const playlist of playlists) {
+      try {
+        const ids = await youtube.listPlaylistVideoIds(playlist.id);
+        const videoIds = Array.isArray(ids) ? ids : [];
+        membershipCount += videoIds.length;
+        for (const videoId of videoIds) {
+          playlistVideoIds.add(videoId);
+          if (playlist.privacyStatus === 'public') publicPlaylistVideoIds.add(videoId);
+        }
+        playlistSummaries.push({
+          title: playlist.title,
+          privacyStatus: playlist.privacyStatus,
+          videoCount: videoIds.length,
+          catalogVideoCount: videoIds.filter((videoId) => catalogIds.has(videoId)).length
+        });
+      } catch (error) {
+        failedPlaylists.push({
+          title: playlist.title,
+          error: String(error.message || 'Playlist could not be read').slice(0, 200)
+        });
+      }
+    }
+    const missingVideoIds = [...catalogIds].filter((videoId) => !playlistVideoIds.has(videoId));
+    const coveredCount = catalogIds.size - missingVideoIds.length;
+    const publicCoverageCount = [...catalogIds].filter((videoId) => publicPlaylistVideoIds.has(videoId)).length;
+    return {
+      channelId: channel.id,
+      channelTitle: channel.title || '',
+      checkedAt: new Date(now()).toISOString(),
+      catalogPages,
+      catalogCount: catalogIds.size,
+      playlistCount: playlists.length,
+      membershipCount,
+      coveredCount,
+      publicCoverageCount,
+      missingCount: missingVideoIds.length,
+      missingVideoIds,
+      playlists: playlistSummaries,
+      failedPlaylists,
+      complete: failedPlaylists.length === 0,
+      catalogScanComplete: syncState.completed === true
+    };
+  }
+
+  async function reconcilePlaylistCoverage() {
+    const report = await auditCatalogCoverage();
+    let requeuedCount = 0;
+    if (report.complete && report.catalogScanComplete && report.missingVideoIds.length &&
+        typeof store.requeueSeoPlaylistResults === 'function') {
+      requeuedCount = await store.requeueSeoPlaylistResults(report.missingVideoIds);
+    }
+    return { ...report, requeuedCount };
   }
 
   async function assignCatalogBacklog() {
@@ -80,13 +194,14 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
       });
       if (result.state === 'daily_limit') break;
       attempted += 1;
-      if (result.state === 'added' || result.state === 'already_added') assigned += 1;
+      if (['added', 'already_added', 'fallback_added', 'fallback_already_added'].includes(result.state)) assigned += 1;
       await store.markSeoPlaylistResult(candidate.videoId, result);
     }
     return { attempted, assigned };
   }
 
-  return { enabled, dailyLimit, assign, assignCatalogBacklog, assignPublicBacklog: assignCatalogBacklog,
+  return { enabled, dailyLimit, assign, assignCatalogBacklog, auditCatalogCoverage, reconcilePlaylistCoverage,
+    assignPublicBacklog: assignCatalogBacklog,
     invalidatePlaylists: () => { playlistsCache = null; playlistsCacheAt = 0; } };
 }
 
