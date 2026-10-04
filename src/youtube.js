@@ -328,5 +328,6 @@ module.exports = { isConnected, canApprove, authorizationUrl, exchangeCode, uplo
   getVideoViews, ownedChannel, uploadsPage, videoMetadata,
   listOwnedBroadcasts, enablePublicBroadcastAds, recentGameVideos,
   listOwnedPlaylists: playlistClient.listOwnedPlaylists,
+  listPlaylistVideoIds: playlistClient.listPlaylistVideoIds,
   createPlaylist: playlistClient.createPlaylist,
   addVideoToPlaylist: playlistClient.addVideoToPlaylist };
