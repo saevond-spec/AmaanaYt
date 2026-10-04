@@ -25,6 +25,8 @@ const seoStatus = document.querySelector('#seoStatus');
 const seoToggle = document.querySelector('#seoToggle');
 const seoPrevious = document.querySelector('#seoPrevious');
 const seoNext = document.querySelector('#seoNext');
+const seoPlaylistAudit = document.querySelector('#seoPlaylistAudit');
+const seoPlaylistAuditStatus = document.querySelector('#seoPlaylistAuditStatus');
 const seoPage = document.querySelector('#seoPage');
 const seoChannel = document.querySelector('#seoChannel');
 let seoOffset = 0;
@@ -195,6 +197,8 @@ function playlistAssignmentText(result) {
   const title = result.playlistTitle || 'matching playlist';
   if (result.state === 'added') return 'added to ' + title;
   if (result.state === 'already_added') return 'already in ' + title;
+  if (result.state === 'fallback_added') return 'needs review; added to private ' + title;
+  if (result.state === 'fallback_already_added') return 'needs review; already in private ' + title;
   if (result.state === 'no_match') return 'no confident metadata match; left unassigned';
   if (result.state === 'ambiguous') return 'multiple playlists matched; left unassigned';
   if (result.state === 'daily_limit') return 'waiting for the daily playlist quota';
@@ -767,6 +771,25 @@ document.querySelector('#seoRescan').addEventListener('click', async () => {
     showNotice('Channel rescan started; existing packages are preserved.');
     await loadSeo();
   } catch (error) { showNotice(error.message, true); }
+});
+seoPlaylistAudit.addEventListener('click', async () => {
+  seoPlaylistAudit.disabled = true;
+  seoPlaylistAuditStatus.textContent = 'Reading channel uploads and playlist contents…';
+  try {
+    const report = await api('/api/seo/playlist-coverage/reconcile', { method: 'POST' });
+    const scan = report.catalogScanComplete ? 'catalog scan complete' : 'catalog scan still running';
+    const read = report.complete ? 'all playlists checked' : 'some playlists could not be read';
+    const queued = report.requeuedCount || 0;
+    seoPlaylistAuditStatus.textContent =
+      `Playlist coverage: ${report.coveredCount}/${report.catalogCount} videos in any playlist; ${report.publicCoverageCount} in public playlists; ${report.missingCount} missing. ${queued} missing videos queued for repair; ${scan}; ${read}.`;
+    showNotice(`Playlist audit checked ${report.catalogCount} channel videos across ${report.playlistCount} playlists. ${report.missingCount} videos lack playlist coverage; ${queued} queued for automatic matching and private review fallback.`);
+    await loadSeo();
+  } catch (error) {
+    seoPlaylistAuditStatus.textContent = error.message;
+    showNotice(error.message, true);
+  } finally {
+    seoPlaylistAudit.disabled = false;
+  }
 });
 seoPrevious.addEventListener('click', () => { seoOffset = Math.max(0, seoOffset - 50); loadSeo(); });
 seoNext.addEventListener('click', () => { seoOffset += 50; loadSeo(); });
