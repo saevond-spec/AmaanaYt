@@ -353,6 +353,19 @@ async function resetSeoPlaylistResults() {
   return result.rowCount;
 }
 
+async function requeueSeoPlaylistResults(videoIds = []) {
+  await init();
+  if (!Array.isArray(videoIds)) throw new Error('Video IDs must be an array');
+  const ids = [...new Set(videoIds.filter((videoId) => /^[A-Za-z0-9_-]{11}$/.test(String(videoId || ''))))];
+  if (ids.length > 5000) throw new Error('Playlist coverage repair is limited to 5,000 videos per request');
+  if (!ids.length) return 0;
+  const result = await pool.query(`UPDATE amaana_seo_packages
+    SET playlist_result = NULL, updated_at = NOW()
+    WHERE video_id = ANY($1::text[])
+      AND source->>'privacyStatus' IN ('public', 'private', 'unlisted')`, [ids]);
+  return result.rowCount;
+}
+
 async function getVideoAnalysis(videoId) {
   await init();
   const result = await pool.query(`SELECT analysis, model, analyzed_at AS "analyzedAt"
@@ -548,6 +561,7 @@ module.exports = {
   listSeoNeedsPlaylist,
   markSeoPlaylistResult,
   resetSeoPlaylistResults,
+  requeueSeoPlaylistResults,
   getVideoAnalysis,
   saveVideoAnalysis,
   seoCounts,
