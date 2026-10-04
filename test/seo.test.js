@@ -639,8 +639,8 @@ test('analysis backfill queues a bounded batch of public videos in one run', asy
   assert.deepEqual(queued, ['public-0', 'public-1', 'public-2', 'public-3', 'public-4']);
 });
 
-test('two-year queue simulation drains the active backlog and requeues only legacy tag failures once', async () => {
-  const days = 730;
+test('five-year queue simulation drains the active backlog and requeues only legacy tag failures once', async () => {
+  const days = 365 * 5;
   let currentDay = 0;
   let tagRecoveryDone = false;
   let recoveryCalls = 0;
@@ -750,7 +750,7 @@ test('two-year queue simulation drains the active backlog and requeues only lega
   let drainedAfterDay = null;
   for (let day = 0; day < days; day += 1) {
     currentDay = day;
-    if (day === 365) worker = createWorker();
+    if (day > 0 && day % 365 === 0) worker = createWorker();
     await worker.run();
     const active = rows.filter((row) => ['queued', 'retry', 'generating'].includes(row.status)).length;
     if (drainedAfterDay === null && active === 0) drainedAfterDay = day + 1;
@@ -759,7 +759,7 @@ test('two-year queue simulation drains the active backlog and requeues only lega
   const counts = {};
   for (const row of rows) counts[row.status] = (counts[row.status] || 0) + 1;
   assert.equal(rows.length, 2574);
-  assert.equal(recoveryCalls, 2);
+  assert.equal(recoveryCalls, 5);
   assert.equal(requeuedTotal, 3);
   assert.equal(drainedAfterDay, 13);
   assert.equal(counts.ready, 2441);
