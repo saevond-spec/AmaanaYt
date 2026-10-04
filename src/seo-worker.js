@@ -8,6 +8,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   let scheduled = false;
   let rerunRequested = false;
   let lastRun = 0;
+  let catalogScanIncomplete = false;
   let lastDiagnostic = null;
   let legacyTagRecoveryChecked = false;
   const configuredLimit = Number(env.SEO_DAILY_LIMIT);
@@ -17,7 +18,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     ? Math.min(50, configuredAnalysisBatch) : 20;
   const configuredCatalogPages = Number(env.SEO_CATALOG_PAGES_PER_RUN);
   const catalogPagesPerRun = Number.isSafeInteger(configuredCatalogPages) && configuredCatalogPages >= 1
-    ? Math.min(20, configuredCatalogPages) : 10;
+    ? Math.min(20, configuredCatalogPages) : 20;
   const circuitBreaker = createModelCircuitBreaker();
   const analysisCircuitBreaker = createModelCircuitBreaker();
   const analysisEnabled = env.ENABLE_VIDEO_ANALYSIS === 'true';
@@ -167,6 +168,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
         logger.info?.('SEO backfill resumed by one-time owner approval');
       }
       state = { ...state, channelId: channel.id, channelTitle: channel.title };
+      catalogScanIncomplete = state.enabled !== false && !state.completed;
       const diagnostic = JSON.stringify({ channelId: channel.id, backfillEnabled: state.enabled !== false,
         autoPublishEnabled, providerConfigured: Boolean(env.SEO_AI_API_KEY && env.SEO_AI_MODEL),
         videoAnalysisEnabled: analysisEnabled,
@@ -193,6 +195,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           await store.saveSeoSyncState(state);
         }
       }
+      catalogScanIncomplete = state.enabled !== false && !state.completed;
       await assignCatalogPlaylists();
       const coverageAudit = await auditPlaylistCoverage(state);
       if (coverageAudit?.requeuedCount) await assignCatalogPlaylists();
@@ -319,13 +322,17 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
 
   function schedule(force = false) {
     if (running) { if (force) rerunRequested = true; return; }
-    if (scheduled || !force && Date.now() - lastRun < 60 * 60 * 1000) return;
+    const minimumInterval = catalogScanIncomplete ? 5 * 60 * 1000 : 60 * 60 * 1000;
+    if (scheduled || !force && Date.now() - lastRun < minimumInterval) return;
     scheduled = true;
     setImmediate(async () => {
       scheduled = false;
       try { await run(); } catch (error) { logger.error('SEO backfill failed:', error.message); }
     });
   }
+
+  const scanTimer = setInterval(() => schedule(), 5 * 60 * 1000);
+  scanTimer.unref?.();
 
   async function registerUpload(videoId, fields) {
     // Record the video immediately; YouTube's read API may not expose an upload while it processes.
