@@ -128,23 +128,7 @@
           <label for="tags">Tags</label>
           <input id="tags" name="tags" placeholder="NARAKA BLADEPOINT, gaming, shorts">
 
-          <label for="audioLanguage">Original spoken audio language</label>
-          <input id="audioLanguage" name="audioLanguage" type="text" maxlength="35" list="audioLanguages"
-            value="en" placeholder="en, ja, ko, es, pt-BR, fr" autocomplete="off">
-          <datalist id="audioLanguages">
-            <option value="en">English</option><option value="ja">Japanese</option>
-            <option value="ko">Korean</option><option value="es">Spanish</option>
-            <option value="pt-BR">Portuguese (Brazil)</option><option value="fr">French</option>
-            <option value="de">German</option><option value="hi">Hindi</option>
-            <option value="id">Indonesian</option><option value="it">Italian</option>
-            <option value="ar">Arabic</option><option value="bn">Bengali</option>
-            <option value="nl">Dutch</option><option value="zh">Chinese</option>
-            <option value="fa">Persian</option><option value="ru">Russian</option>
-            <option value="ta">Tamil</option><option value="te">Telugu</option>
-            <option value="uk">Ukrainian</option><option value="vi">Vietnamese</option>
-            <option value="none">No speech / music only</option>
-          </datalist>
-          <p class="fine-print">Set the language actually spoken in the original audio. Use “none” for videos without speech.</p>
+          <p class="fine-print">YouTube handles spoken-language detection and automatic dubbing. After upload, verify the video's source language and generated tracks in YouTube Studio.</p>
 
           <label for="topic">Video topic (optional)</label>
           <input id="topic" name="topic" maxlength="200" placeholder="What happens in this video?">
@@ -176,7 +160,7 @@
           <button id="seoRefresh" class="ghost" type="button">Refresh SEO</button>
         </div>
         <p class="muted">Amaana detects metadata gaps and applies grounded SEO titles, descriptions, and tags to videos that are already public. Private, unlisted, and unpublished videos remain untouched. Existing links and disclosures are preserved. Channel keywords follow topics from analyzed public videos.</p>
-        <p class="muted">YouTube handles auto dubbing. Amaana records the original spoken-audio language and lets you correct it on existing public videos. Check <a href="https://studio.youtube.com" target="_blank" rel="noopener noreferrer">YouTube Studio → Languages</a> for actual dub generation and review status.</p>
+        <p class="muted">Amaana reads YouTube's spoken-audio language when available, but the public YouTube Data API cannot set it or report generated dubbing tracks. Use <a href="https://studio.youtube.com" target="_blank" rel="noopener noreferrer">YouTube Studio → Languages</a> to verify generated audio and Settings → Channel → Advanced settings for channel dubbing preferences.</p>
         <p id="seoStatus" class="draft-meta">Checking the catalog…</p>
         <div class="seo-field">
           <h3>Channel SEO</h3>

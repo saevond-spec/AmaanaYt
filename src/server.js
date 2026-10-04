@@ -521,36 +521,6 @@ app.post('/api/seo/backfill', admin, async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.put('/api/seo/videos/:id/audio-language', admin, async (req, res, next) => {
-  try {
-    const videoId = req.params.id;
-    if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
-      return res.status(400).json({ error: 'Invalid video ID' });
-    }
-    let audioLanguage;
-    try { audioLanguage = youtube.normalizeAudioLanguage(req.body?.audioLanguage); }
-    catch (error) { return res.status(400).json({ error: error.message }); }
-
-    const current = await store.getSeoVideo(videoId);
-    if (!current) return res.status(404).json({ error: 'Video not found in the channel catalog' });
-    if (current.source?.privacyStatus !== 'public') {
-      return res.status(409).json({ error: 'Only public catalog videos can be updated here' });
-    }
-    const [channel, state, video] = await Promise.all([
-      youtube.ownedChannel(), store.getSeoSyncState(), youtube.getVideo(videoId)
-    ]);
-    if (state.channelId !== channel.id) {
-      return res.status(409).json({ error: 'Connected channel differs from the SEO catalog; rescan before editing' });
-    }
-    if (!video) return res.status(404).json({ error: 'YouTube video not found' });
-    await youtube.assertTargetChannel(channel.id);
-    assertVideoMatchesCatalog(video, channel.id, current);
-    await youtube.setVideoAudioLanguage(videoId, video, audioLanguage);
-    await store.upsertSeoVideo(videoId, { ...current.source, defaultAudioLanguage: audioLanguage });
-    res.json({ success: true, videoId, audioLanguage });
-  } catch (error) { next(error); }
-});
-
 app.put('/api/seo/videos/:id/context', admin, async (req, res, next) => {
   try {
     if (!/^[a-zA-Z0-9_-]{11}$/.test(req.params.id)) return res.status(400).json({ error: 'Invalid video ID' });
@@ -809,6 +779,10 @@ app.get('/api/drafts/:id/tiktok-status', admin, async (req, res, next) => {
 app.post('/api/drafts', agentOrAdmin, upload.single('video'), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'A video file is required' });
+    if (req.body.audioLanguage !== undefined && String(req.body.audioLanguage).trim()) {
+      unlinkQuietly(req.file.path);
+      return res.status(422).json({ error: 'YouTube Data API cannot set original spoken-audio language. Upload without audioLanguage, then verify or correct it in YouTube Studio.' });
+    }
     const title = String(req.body.title || '').trim();
     if (!title || title.length > 100) {
       unlinkQuietly(req.file.path);
@@ -834,9 +808,7 @@ app.post('/api/drafts', agentOrAdmin, upload.single('video'), async (req, res, n
       title,
       description: String(req.body.description || ''),
       tags,
-      madeForKids: req.body.madeForKids === 'true',
-      audioLanguage: String(req.body.audioLanguage || '').trim().toLowerCase() === 'none'
-        ? null : req.body.audioLanguage || undefined
+      madeForKids: req.body.madeForKids === 'true'
     });
     const playlistAssignment = await autoAssignPlaylist({
       id: uploaded.id, privacyStatus: 'private', title,
