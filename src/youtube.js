@@ -63,33 +63,12 @@ async function service() {
 
 const playlistClient = createYouTubePlaylistClient(service);
 
-function normalizeAudioLanguage(value) {
-  const language = String(value ?? '').trim();
-  let normalized;
-  try { [normalized] = Intl.getCanonicalLocales(language); }
-  catch { /* Report a concise input error below. */ }
-  if (!normalized || normalized.length > 35) {
-    throw new Error('Audio language must be a valid BCP-47 language tag, such as en or pt-BR');
-  }
-  return normalized;
-}
-
-function uploadAudioLanguage(value) {
-  if (value === undefined) {
-    return normalizeAudioLanguage(process.env.YOUTUBE_DEFAULT_AUDIO_LANGUAGE || 'en');
-  }
-  if (value === null || String(value).trim().toLowerCase() === 'none') return null;
-  return normalizeAudioLanguage(value);
-}
-
-async function uploadPrivate({ filePath, title, description, tags, madeForKids = false, audioLanguage }) {
-  const spokenLanguage = uploadAudioLanguage(audioLanguage);
+async function uploadPrivate({ filePath, title, description, tags, madeForKids = false }) {
   const youtube = await service();
   const response = await youtube.videos.insert({
     part: ['snippet', 'status'],
     requestBody: {
-      snippet: { title, description, tags, categoryId: '20', defaultLanguage: 'en',
-        ...(spokenLanguage ? { defaultAudioLanguage: spokenLanguage } : {}) },
+      snippet: { title, description, tags, categoryId: '20', defaultLanguage: 'en' },
       status: { privacyStatus: 'private', selfDeclaredMadeForKids: Boolean(madeForKids) }
     },
     media: { body: fs.createReadStream(filePath) }
@@ -144,40 +123,8 @@ async function updateVideoSeo(videoId, video, edit) {
     categoryId: video.snippet.categoryId
   };
   if (video.snippet.defaultLanguage) snippet.defaultLanguage = video.snippet.defaultLanguage;
-  if (video.snippet.defaultAudioLanguage) snippet.defaultAudioLanguage = video.snippet.defaultAudioLanguage;
   const response = await youtube.videos.update({
     part: ['snippet'], requestBody: { id: videoId, snippet }
-  }, { headers: { 'If-Match': video.etag } });
-  return response.data;
-}
-
-async function setVideoAudioLanguage(videoId, video, audioLanguage) {
-  if (!/^[A-Za-z0-9_-]{11}$/.test(String(videoId || ''))) {
-    throw new Error('A valid YouTube video ID is required to set its audio language');
-  }
-  if (!video?.etag) {
-    const error = new Error('YouTube did not return a video version; refresh before saving');
-    error.status = 409;
-    throw error;
-  }
-  if (!video.snippet?.title || !video.snippet?.categoryId) {
-    const error = new Error('YouTube video metadata is incomplete; refresh before saving');
-    error.status = 409;
-    throw error;
-  }
-  const language = normalizeAudioLanguage(audioLanguage);
-  const snippet = {
-    title: video.snippet.title,
-    description: video.snippet.description || '',
-    tags: Array.isArray(video.snippet.tags) ? video.snippet.tags : [],
-    categoryId: video.snippet.categoryId,
-    defaultAudioLanguage: language
-  };
-  if (video.snippet.defaultLanguage) snippet.defaultLanguage = video.snippet.defaultLanguage;
-  const youtube = await service();
-  const response = await youtube.videos.update({
-    part: ['snippet'],
-    requestBody: { id: videoId, snippet }
   }, { headers: { 'If-Match': video.etag } });
   return response.data;
 }
@@ -377,7 +324,7 @@ async function enablePublicBroadcastAds(broadcast) {
 }
 
 module.exports = { isConnected, canApprove, authorizationUrl, exchangeCode, uploadPrivate, setThumbnail, publish,
-  getVideo, updateVideoSeo, setVideoAudioLanguage, normalizeAudioLanguage, channelSeo, updateChannelSeo, assertTargetChannel,
+  getVideo, updateVideoSeo, channelSeo, updateChannelSeo, assertTargetChannel,
   getVideoViews, ownedChannel, uploadsPage, videoMetadata,
   listOwnedBroadcasts, enablePublicBroadcastAds, recentGameVideos,
   listOwnedPlaylists: playlistClient.listOwnedPlaylists,
