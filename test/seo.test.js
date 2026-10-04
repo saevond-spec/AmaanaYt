@@ -776,7 +776,8 @@ test('two-year queue simulation drains the active backlog and requeues only lega
 
 test('restarting a catalog backfill requeues unmatched playlist results', async () => {
   let state = { cursor: 'older-page', completed: true, recentAt: '2026-10-03T00:00:00.000Z',
-    enabled: true, providerBlockedUntil: '2026-10-04T00:00:00.000Z', providerError: 'quotaExceeded' };
+    enabled: true, providerBlockedUntil: '2026-10-04T00:00:00.000Z', providerError: 'quotaExceeded',
+    playlistCoverageAudit: { complete: true, missingCount: 0 } };
   let resetCalls = 0;
   let saved;
   const log = [];
@@ -794,11 +795,57 @@ test('restarting a catalog backfill requeues unmatched playlist results', async 
   assert.equal(saved.cursor, null);
   assert.equal(saved.completed, false);
   assert.equal(saved.recentAt, null);
+  assert.equal(saved.playlistCoverageAudit, null);
   assert.equal(saved.enabled, false);
   assert.equal(saved.providerBlockedUntil, '2026-10-04T00:00:00.000Z');
   assert.equal(saved.providerError, 'quotaExceeded');
   assert.equal(updated, saved);
   assert.deepEqual(log, ['Requeued 7 videos for automatic playlist matching']);
+});
+
+
+test('automatically audits completed catalog coverage and retries repairs daily', async () => {
+  let state = { channelId: 'channel-1', channelTitle: 'Owner', cursor: null, completed: true,
+    recentAt: new Date().toISOString(), enabled: true };
+  let auditCalls = 0;
+  let assignmentCalls = 0;
+  const store = {
+    getSeoSyncState: async () => state,
+    saveSeoSyncState: async (next) => { state = next; }
+  };
+  const youtube = {
+    isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner', uploads: 'uploads-1' })
+  };
+  const playlistAuto = {
+    enabled: true,
+    assignCatalogBacklog: async () => { assignmentCalls += 1; return { attempted: 0, assigned: 0 }; },
+    reconcilePlaylistCoverage: async () => {
+      auditCalls += 1;
+      return {
+        channelId: 'channel-1', channelTitle: 'Owner', checkedAt: new Date().toISOString(),
+        catalogPages: 52, catalogCount: 2572, playlistCount: 18, membershipCount: 2570,
+        coveredCount: 2570, publicCoverageCount: 2100, missingCount: 2,
+        failedPlaylists: [], complete: true, catalogScanComplete: true, requeuedCount: 2
+      };
+    }
+  };
+  const worker = createSeoWorker({ store, youtube, playlistAuto, env: {},
+    logger: { info() {}, warn() {} } });
+
+  await worker.run();
+
+  assert.equal(auditCalls, 1);
+  assert.equal(assignmentCalls, 2);
+  assert.equal(state.playlistCoverageAudit.catalogCount, 2572);
+  assert.equal(state.playlistCoverageAudit.coveredCount, 2570);
+  assert.equal(state.playlistCoverageAudit.missingCount, 2);
+  assert.equal(state.playlistCoverageAudit.requeuedCount, 2);
+
+  await worker.run();
+
+  assert.equal(auditCalls, 1);
+  assert.equal(assignmentCalls, 3);
 });
 
 test('catalog scan processes a bounded batch of older uploads per run', async () => {
