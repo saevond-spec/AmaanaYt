@@ -190,6 +190,51 @@ function renderPlaylistAdder(videoId, videoPrivacyStatus = 'private') {
     'Create a private playlist to organize this private or unlisted video.'));
   return box;
 }
+function renderAudioLanguageEditor(item) {
+  if (item.source?.privacyStatus !== 'public') return null;
+  const currentLanguage = String(item.source.defaultAudioLanguage || '');
+  const box = element('div', 'playlist-adder');
+  const label = element('label', '', 'Original spoken audio language');
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.maxLength = 35;
+  input.autocomplete = 'off';
+  input.placeholder = 'en, ja, ko, es, pt-BR, fr';
+  input.value = currentLanguage;
+  const save = element('button', 'ghost', 'Save audio language');
+  save.type = 'button';
+  const updateButton = () => {
+    const language = input.value.trim();
+    save.disabled = !language || language === currentLanguage;
+  };
+  input.addEventListener('input', updateButton);
+  save.addEventListener('click', async () => {
+    const language = input.value.trim();
+    if (!language) return;
+    save.disabled = true;
+    save.textContent = 'Saving…';
+    try {
+      const result = await api('/api/seo/videos/' + encodeURIComponent(item.videoId) + '/audio-language', {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ audioLanguage: language })
+      });
+      showNotice('Original audio language set to ' + result.audioLanguage + '. Check YouTube Studio → Languages for dubbing status.');
+      await loadSeo();
+    } catch (error) {
+      showNotice(error.message, true);
+      save.disabled = false;
+      save.textContent = 'Save audio language';
+    }
+  });
+  box.append(label, input,
+    element('p', 'draft-meta', currentLanguage
+      ? 'Current: ' + currentLanguage + '. Enter the language actually spoken.'
+      : 'Not set. Enter the language actually spoken.'));
+  box.append(save);
+  updateButton();
+  return box;
+}
+
 function playlistAssignmentText(result) {
   if (!result) return '';
   const title = result.playlistTitle || 'matching playlist';
@@ -462,6 +507,8 @@ function renderSeoVideo(item) {
     'Automatic playlist: ' + playlistAssignmentText(item.playlistResult)));
   const playlistControl = renderPlaylistAdder(item.videoId, item.source.privacyStatus || 'unknown');
   if (playlistControl) card.append(playlistControl);
+  const audioLanguageControl = renderAudioLanguageEditor(item);
+  if (audioLanguageControl) card.append(audioLanguageControl);
   if (item.applied) card.append(element('p', 'draft-meta',
     `SEO applied to this video on ${new Date(item.applied.at).toLocaleString()}.`));
   if (item.autoResult?.state === 'skipped') card.append(element('p', 'draft-meta',

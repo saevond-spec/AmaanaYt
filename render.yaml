@@ -19,6 +19,8 @@ services:
         sync: false
       - key: YOUTUBE_CHANNEL_HANDLE
         value: '@saevond'
+      - key: YOUTUBE_DEFAULT_AUDIO_LANGUAGE
+        value: en
       - key: TWITCH_CLIENT_ID
         sync: false
       - key: TWITCH_CLIENT_SECRET

@@ -253,6 +253,7 @@ curl -X POST "$AMAANA_YT_URL/api/drafts" \
   -F "title=Your title" \
   -F "description=Your description" \
   -F "tags=NARAKA BLADEPOINT,gaming,shorts" \
+  -F "audioLanguage=en" \
   -F "madeForKids=false"
 ```
 
@@ -279,6 +280,14 @@ curl -X POST "$AMAANA_YT_URL/api/drafts/DRAFT_ID/approve" \
   -H "x-admin-key: YOUR_ADMIN_KEY" \
   -d '{"publishAt":"2026-09-20T18:00:00-04:00"}'
 ```
+
+## Auto dubbing and spoken-audio language
+
+YouTube can generate automatic dubs for eligible videos; they follow the video's publication settings, and creators can choose manual review. Amaana sets the original spoken-audio language separately from the title and description language. The private upload form uses its **Original spoken audio language** field; API uploads can pass `audioLanguage=en` (or another BCP-47 code). If omitted, Amaana uses `YOUTUBE_DEFAULT_AUDIO_LANGUAGE`, which defaults to `en`. Use `audioLanguage=none` or choose **No speech / music only** when there is no spoken audio.
+
+The dashboard's SEO catalog rechecks the source-audio language for existing uploads and lets the owner correct it on public videos without changing visibility. Use the language actually spoken in the original track. A correct source language can help YouTube avoid mistranslation and regenerate dubs when its original-language setting was wrong. YouTube may skip videos over 120 minutes, with little or no speech, unsupported source languages, unclear source-language detection, or speech that is too fast. Amaana cannot see whether YouTube has generated a dub; check **YouTube Studio → Languages** for generated tracks, publication status, and manual-review queue. Channel-wide auto-dubbing and whether dubs publish automatically are managed in YouTube Studio **Settings → Channel → Advanced settings**.
+
+Market research: YouTube says auto dubbing supports 27 languages and reported more than six million daily viewers watching at least ten minutes of auto-dubbed content in December 2025 ([YouTube auto dubbing update](https://blog.youtube/news-and-events/youtube-auto-dubbing-expressive-speech/)). Creators who added multi-language audio tracks saw more than 25% of watch time from views in a non-primary language on average (July 2025 data); that figure concerns creator-uploaded tracks rather than auto dubs ([multi-language audio data](https://blog.youtube/news-and-events/multi-language-audio/)). Focus initial review on the channel's priority languages (Japanese, Korean, Spanish, Brazilian Portuguese, and French), then use Studio's audio-language analytics to decide where to expand.
 
 ## Shorts requirements
 

@@ -40,6 +40,17 @@ const generated = {
   clipHooks: ['The final fight starts here.', 'Watch the reaction at the end.']
 };
 
+test('normalizes text and spoken-audio languages separately', () => {
+  const normalized = normalizeSource({
+    snippet: { title: 'Audio metadata', description: 'English description',
+      defaultLanguage: 'en', defaultAudioLanguage: 'ja' },
+    contentDetails: { duration: 'PT30S' },
+    status: { privacyStatus: 'public' }
+  });
+  assert.equal(normalized.defaultLanguage, 'en');
+  assert.equal(normalized.defaultAudioLanguage, 'ja');
+});
+
 test('uses only supplied markers for chapters and clips', () => {
   const pkg = validatePackage(generated, source, context);
   assert.equal(pkg.hook.length, 141);
