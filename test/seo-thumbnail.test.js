@@ -114,6 +114,32 @@ function makeHarness(count, options = {}) {
   };
 }
 
+test('rates all concepts and applies the highest grounded thumbnail option', async () => {
+  const h = makeHarness(1);
+  const row = h.rows.get('thumb000000');
+  row.source.description += ' The Seed Vault fight follows the floating raider during extraction.';
+  row.source.tags.push('Seed Vault');
+  row.package.thumbnails = [
+    { visual: 'Blueprint close-up', overlay: 'RAREST BLUEPRINT',
+      palette: 'Gold and black', hook: 'Rare blueprint found' },
+    { visual: 'Seed Vault extraction scene', overlay: 'SEED VAULT',
+      palette: 'Bright amber against dark blue', hook: 'The fight reaches the Seed Vault' },
+    { visual: 'Floating raider gameplay', overlay: 'FLOATING RAIDER',
+      palette: 'Cyan and amber', hook: 'Unexpected movement' }
+  ];
+  Object.assign(h.live.get('thumb000000').snippet, row.source);
+
+  const result = await h.publisher.publishVideo(row.videoId);
+
+  assert.equal(result.thumbnailState, 'applied');
+  assert.equal(result.thumbnailHeadline, 'SEED VAULT');
+  assert.equal(result.thumbnailSelection.option, 2);
+  assert.equal(result.thumbnailSelection.method, 'evidence_readability_heuristic');
+  assert.ok(result.thumbnailSelection.score >= 60);
+  assert.equal(h.thumbnailWrites, 1);
+  assert.equal(row.source.privacyStatus, 'public');
+});
+
 test('legacy context skips are rechecked and long public descriptions receive SEO plus a grounded thumbnail', async () => {
   const row = makeItem(0);
   row.autoResult = {

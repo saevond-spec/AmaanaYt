@@ -16,6 +16,12 @@ Run `npm run simulate:five-years` to estimate pipeline volume, SEO analysis back
 
 The simulator forecasts operational capacity only; it does not predict views, revenue, or ranking. Quota values follow the [YouTube API quota calculator](https://developers.google.com/youtube/v3/determine_quota_cost). It includes the separate 100-per-day YouTube `videos.insert` and `search.list` request buckets, then accounts for a 1-unit pre-publish `videos.list` and 50-unit `videos.update` for each generated video. Set `SIM_START_DATE`, `SIM_STREAMS_PER_DAY`, `SIM_HOURS_PER_STREAM`, `SIM_MOMENTS_PER_STREAM`, `SIM_PUBLIC_VIDEO_COHORT`, and `SIM_MISSING_ANALYSIS_SHARE` to model another scenario. Actual project quota can differ.
 
+## Thumbnail ratings and two-year simulation
+
+Amaana rates the three generated thumbnail concepts for exact phrase support in the video evidence, short readable overlay text, specific overlap with grounded topics, and wording that complements the current title. It selects the highest-scoring grounded concept at or above 60/100; otherwise it uses a safe title-derived fallback or skips the thumbnail. The score ranks text concepts only: it does not inspect image pixels, estimate CTR, predict views, or replace YouTube Studio's watch-time experiment.
+
+Run `npm run simulate:two-years` for a 730-day capacity and recovery simulation. Defaults model 1,000 public videos in the starting queue, one new public video per day, three concepts per video, a 50-video daily processing cap, and one synthetic thumbnail rate limit per 37 videos. Private and unlisted cohorts are excluded. These are test assumptions, not channel or view forecasts.
+
 ## Security model
 
 - Google passwords are never collected.
