@@ -101,6 +101,46 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     }
   }
 
+  async function auditPlaylistCoverage(state) {
+    if (!playlistAuto?.enabled || !state.completed ||
+        typeof playlistAuto.reconcilePlaylistCoverage !== 'function') return null;
+    const previous = state.playlistCoverageAudit || null;
+    if (previous?.complete && previous.catalogScanComplete && previous.missingCount === 0) return null;
+    const checkedAt = Date.parse(previous?.checkedAt || '');
+    const intervalMs = previous?.complete && previous.catalogScanComplete
+      ? 24 * 60 * 60 * 1000 : 15 * 60 * 1000;
+    if (Number.isFinite(checkedAt) && Date.now() - checkedAt < intervalMs) return null;
+    try {
+      const report = await playlistAuto.reconcilePlaylistCoverage();
+      const audit = {
+        checkedAt: report.checkedAt || new Date().toISOString(),
+        channelId: report.channelId || state.channelId,
+        channelTitle: report.channelTitle || state.channelTitle,
+        catalogPages: report.catalogPages || 0,
+        catalogCount: report.catalogCount || 0,
+        playlistCount: report.playlistCount || 0,
+        membershipCount: report.membershipCount || 0,
+        coveredCount: report.coveredCount || 0,
+        publicCoverageCount: report.publicCoverageCount || 0,
+        missingCount: report.missingCount || 0,
+        failedPlaylistCount: (report.failedPlaylists || []).length,
+        complete: report.complete === true,
+        catalogScanComplete: report.catalogScanComplete === true,
+        requeuedCount: report.requeuedCount || 0
+      };
+      state.playlistCoverageAudit = audit;
+      await store.saveSeoSyncState(state);
+      logger.info?.('Automatic playlist coverage audit: ' + audit.coveredCount + '/' +
+        audit.catalogCount + ' in a playlist; missing=' + audit.missingCount +
+        '; requeued=' + audit.requeuedCount + '; complete=' +
+        (audit.complete && audit.catalogScanComplete));
+      return audit;
+    } catch (error) {
+      logger.warn?.('Automatic playlist coverage audit failed:', error.message);
+      return null;
+    }
+  }
+
   async function run() {
     if (running) return;
     running = true;
@@ -154,6 +194,8 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
         }
       }
       await assignCatalogPlaylists();
+      const coverageAudit = await auditPlaylistCoverage(state);
+      if (coverageAudit?.requeuedCount) await assignCatalogPlaylists();
       if (publisher && state.enabled !== false) {
         await publisher.publishPending().catch((error) => logger.warn?.('SEO auto publish scan failed:', error.message));
         await publisher.updateChannel().catch((error) => logger.warn?.('SEO channel update failed:', error.message));
@@ -317,6 +359,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       updated.cursor = null;
       updated.completed = false;
       updated.recentAt = null;
+      updated.playlistCoverageAudit = null;
       if (typeof store.resetSeoPlaylistResults === 'function') {
         const requeued = await store.resetSeoPlaylistResults();
         if (requeued) logger.info?.(`Requeued ${requeued} videos for automatic playlist matching`);
