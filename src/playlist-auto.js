@@ -19,8 +19,8 @@ function youtubeQuotaDate(timestamp) {
 function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger = console, now = Date.now }) {
   if (!store || !youtube) throw new TypeError('Store and YouTube clients are required');
   const enabled = env.YOUTUBE_AUTO_PLAYLISTS !== 'false';
-  const dailyLimit = setting(env.YOUTUBE_AUTO_PLAYLIST_DAILY_LIMIT, 20, 20);
-  const batchSize = setting(env.YOUTUBE_AUTO_PLAYLIST_BATCH_SIZE, 20, 50);
+  const dailyLimit = setting(env.YOUTUBE_AUTO_PLAYLIST_DAILY_LIMIT, 30, 30);
+  const batchSize = setting(env.YOUTUBE_AUTO_PLAYLIST_BATCH_SIZE, 50, 50);
   const reviewPlaylistTitle = String(env.YOUTUBE_AUTO_PLAYLIST_REVIEW_TITLE || 'Needs Playlist Review')
     .trim().slice(0, 150) || 'Needs Playlist Review';
   const reviewPlaylistDescription = 'Private review queue for videos that did not confidently match an existing playlist. Video visibility remains unchanged.';
@@ -192,7 +192,7 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
         context: candidate.context || {},
         package: candidate.package || null
       });
-      if (result.state === 'daily_limit') break;
+      if (result.state === 'daily_limit') continue;
       attempted += 1;
       if (['added', 'already_added', 'fallback_added', 'fallback_already_added'].includes(result.state)) assigned += 1;
       await store.markSeoPlaylistResult(candidate.videoId, result);
