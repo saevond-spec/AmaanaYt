@@ -514,6 +514,15 @@ app.get('/api/seo/channel', admin, async (_req, res, next) => {
   } catch (error) { next(error); }
 });
 
+app.post('/api/seo/playlist-coverage/reconcile', admin, async (_req, res, next) => {
+  try {
+    const report = await playlistAuto.reconcilePlaylistCoverage();
+    if (report.requeuedCount) seo.schedule(true);
+    res.set('Cache-Control', 'no-store');
+    res.json(report);
+  } catch (error) { next(error); }
+});
+
 app.post('/api/seo/backfill', admin, async (req, res, next) => {
   try {
     if (typeof req.body?.enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be true or false' });

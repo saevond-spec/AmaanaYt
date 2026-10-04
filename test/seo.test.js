@@ -800,3 +800,31 @@ test('restarting a catalog backfill requeues unmatched playlist results', async 
   assert.equal(updated, saved);
   assert.deepEqual(log, ['Requeued 7 videos for automatic playlist matching']);
 });
+
+test('catalog scan processes a bounded batch of older uploads per run', async () => {
+  let state = { cursor: null, completed: false, enabled: true };
+  const pages = [];
+  const store = {
+    getSeoSyncState: async () => state,
+    saveSeoSyncState: async (next) => { state = next; },
+    upsertSeoVideo: async () => {}
+  };
+  const youtube = {
+    isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner', uploads: 'uploads-1' }),
+    uploadsPage: async (_playlistId, cursor) => {
+      pages.push(cursor || 'recent');
+      const sequence = ['page-1', 'page-2', 'page-3', 'page-4'];
+      const current = cursor ? sequence.indexOf(cursor) : -1;
+      return { ids: [], nextPageToken: sequence[current + 1] || null };
+    },
+    videoMetadata: async () => []
+  };
+  const worker = createSeoWorker({ store, youtube, env: { SEO_CATALOG_PAGES_PER_RUN: '2' } });
+
+  await worker.run();
+
+  assert.deepEqual(pages, ['recent', 'page-1', 'page-2']);
+  assert.equal(state.cursor, 'page-3');
+  assert.equal(state.completed, false);
+});

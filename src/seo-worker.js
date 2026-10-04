@@ -15,6 +15,9 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   const configuredAnalysisBatch = Number(env.SEO_ANALYSIS_BATCH_SIZE);
   const analysisBatchSize = Number.isSafeInteger(configuredAnalysisBatch) && configuredAnalysisBatch >= 1
     ? Math.min(50, configuredAnalysisBatch) : 20;
+  const configuredCatalogPages = Number(env.SEO_CATALOG_PAGES_PER_RUN);
+  const catalogPagesPerRun = Number.isSafeInteger(configuredCatalogPages) && configuredCatalogPages >= 1
+    ? Math.min(20, configuredCatalogPages) : 10;
   const circuitBreaker = createModelCircuitBreaker();
   const analysisCircuitBreaker = createModelCircuitBreaker();
   const analysisEnabled = env.ENABLE_VIDEO_ANALYSIS === 'true';
@@ -143,10 +146,12 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
         await store.saveSeoSyncState(state);
       }
       if (state.enabled !== false && !state.completed && state.cursor) {
-        const page = await catalogPage(channel, state.cursor);
-        state.cursor = page.nextPageToken;
-        if (!state.cursor) state.completed = true;
-        await store.saveSeoSyncState(state);
+        for (let pageNumber = 0; pageNumber < catalogPagesPerRun && state.cursor; pageNumber += 1) {
+          const page = await catalogPage(channel, state.cursor);
+          state.cursor = page.nextPageToken;
+          if (!state.cursor) state.completed = true;
+          await store.saveSeoSyncState(state);
+        }
       }
       await assignCatalogPlaylists();
       if (publisher && state.enabled !== false) {
@@ -302,7 +307,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     const [state, counts] = await Promise.all([store.getSeoSyncState(), store.seoCounts()]);
     return { ...state, ...counts, dailyLimit, analysisBatchSize, videoAnalysisEnabled: analysisEnabled,
       providerConfigured: Boolean(env.SEO_AI_API_KEY && env.SEO_AI_MODEL), autoPublishEnabled,
-      running };
+      catalogPagesPerRun, running };
   }
 
   async function setBackfill(enabled, restart = false) {

@@ -134,6 +134,33 @@ function createYouTubePlaylistClient(getService) {
     return playlists;
   }
 
+  async function listPlaylistVideoIds(playlistId) {
+    const targetPlaylistId = String(playlistId || '').trim();
+    if (!targetPlaylistId || targetPlaylistId.length > 255) throw inputError('A valid playlist ID is required');
+    const youtube = await getService();
+    const videoIds = new Set();
+    const seenTokens = new Set();
+    let pageToken = null;
+    do {
+      const response = await youtube.playlistItems.list({
+        part: ['snippet'], playlistId: targetPlaylistId, maxResults: 50,
+        ...(pageToken ? { pageToken } : {}),
+        fields: 'nextPageToken,items(snippet(resourceId(videoId)))'
+      });
+      for (const item of response.data.items || []) {
+        const videoId = item.snippet?.resourceId?.videoId;
+        if (videoId) videoIds.add(videoId);
+      }
+      const nextPageToken = response.data.nextPageToken || null;
+      if (nextPageToken && seenTokens.has(nextPageToken)) {
+        throw new Error('YouTube playlist pagination repeated a page token');
+      }
+      if (nextPageToken) seenTokens.add(nextPageToken);
+      pageToken = nextPageToken;
+    } while (pageToken);
+    return [...videoIds];
+  }
+
   async function createPlaylist(input) {
     const playlist = normalizePlaylistInput(input);
     const youtube = await getService();
@@ -171,7 +198,7 @@ function createYouTubePlaylistClient(getService) {
     return { alreadyAdded: false, itemId: inserted.data?.id || null };
   }
 
-  return { listOwnedPlaylists, createPlaylist, addVideoToPlaylist };
+  return { listOwnedPlaylists, listPlaylistVideoIds, createPlaylist, addVideoToPlaylist };
 }
 
 module.exports = { normalizePlaylistInput, canAddVideoToPlaylist, chooseAutoPlaylist, createYouTubePlaylistClient };

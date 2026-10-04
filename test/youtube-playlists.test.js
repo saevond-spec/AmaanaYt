@@ -97,3 +97,23 @@ test('automatic playlist matching uses specific metadata and respects video priv
   }, [playlists[3]]);
   assert.equal(privateNoLeak.state, 'no_match');
 });
+
+test('playlist video listing paginates and deduplicates playlist memberships', async () => {
+  const calls = [];
+  const client = createYouTubePlaylistClient(async () => ({ playlistItems: { list: async (args) => {
+    calls.push(args);
+    return calls.length === 1
+      ? { data: { nextPageToken: 'page-2', items: [
+        { snippet: { resourceId: { videoId: 'abcdefghijk' } } },
+        { snippet: { resourceId: { videoId: 'lmnopqrstuv' } } }
+      ] } }
+      : { data: { items: [
+        { snippet: { resourceId: { videoId: 'abcdefghijk' } } },
+        { snippet: { resourceId: { videoId: 'zyxwvutsrqp' } } }
+      ] } };
+  } } }));
+  assert.deepEqual(await client.listPlaylistVideoIds('PL1'),
+    ['abcdefghijk', 'lmnopqrstuv', 'zyxwvutsrqp']);
+  assert.deepEqual(calls.map((call) => call.pageToken || null), [null, 'page-2']);
+  assert.ok(calls.every((call) => call.maxResults === 50));
+});
