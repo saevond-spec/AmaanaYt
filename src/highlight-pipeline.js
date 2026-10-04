@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { validateHighlightMoments, verifyCreatedClip } = require('./highlight-validation');
 
 function createBatchQueue(processJob, options = {}) {
   const schedule = options.schedule || setImmediate;
@@ -81,7 +82,7 @@ function createHighlightProcessor(dependencies) {
     uploadDir, store, twitch, video, youtube, seo, autoAssignPlaylist,
     buildHighlightTimeline, buildHighlightDescription, cleanText,
     idFactory = () => crypto.randomUUID(), logError = () => {},
-    maxAutoAttempts = 4, now = () => Date.now()
+    maxAutoAttempts = 12, autoPublish = true, now = () => Date.now()
   } = dependencies;
 
   async function registerSeo(draftId, videoId, payload, label, failures, noteFailure) {
@@ -105,6 +106,9 @@ function createHighlightProcessor(dependencies) {
           batch.status === 'awaiting_owner_approval' && batch.productionState === 'ready') return;
       if (!Array.isArray(batch.highlights) || !batch.highlights.length) {
         throw new Error('Highlight batch has no valid moments to produce');
+      }
+      if (batch.autoPublishEligible) {
+        validateHighlightMoments(batch.highlights, batch.vodDurationSeconds);
       }
 
       const attemptCount = (Number(batch.clipAttemptCount) || 0) + 1;
@@ -138,6 +142,10 @@ function createHighlightProcessor(dependencies) {
         const download = await twitch.waitForClipDownload({
           clipId: clip.id, broadcasterId: clip.broadcasterId, editorId: clip.editorId
         });
+        if (typeof twitch.getClip !== 'function') throw new Error('Twitch clip timestamp verification is unavailable');
+        const verifiedTimestamp = verifyCreatedClip(moment, await twitch.getClip(clip.id), batch.vodId);
+        twitchClips[index] = { ...twitchClips[index], timestampVerification: verifiedTimestamp };
+        await store.updateDraft(id, { twitchClips });
         const url = download.landscape_download_url || download.portrait_download_url;
         if (!url) throw new Error('Twitch clip media was unavailable');
         const source = path.join(directory, 'source-' + index + '.mp4');
@@ -149,6 +157,7 @@ function createHighlightProcessor(dependencies) {
       await store.updateDraft(id, { status: 'assembling_highlight_video' });
       const durations = await video.assembleHighlights(sources, montage, directory);
       const timeline = buildHighlightTimeline(batch.highlights, durations);
+      await video.validateHighlight(montage, timeline.durationSeconds);
       const description = batch.pipelineVersion >= 2
         ? buildHighlightDescription(batch.vodId, timeline)
         : 'Highlights from https://www.twitch.tv/videos/' + batch.vodId;
@@ -188,7 +197,8 @@ function createHighlightProcessor(dependencies) {
       });
       const highlightPatch = {
         status: 'creating_shorts', productionState: 'processing', youtubeVideoId: highlight.id,
-        title: highlightTitle, description, tags: highlightTags, duration: timeline.durationSeconds
+        title: highlightTitle, description, tags: highlightTags, duration: timeline.durationSeconds,
+        mediaValidation: 'passed'
       };
       if (batch.pipelineVersion >= 2) {
         Object.assign(highlightPatch, {
@@ -286,23 +296,28 @@ function createHighlightProcessor(dependencies) {
         const shortPath = path.join(directory, 'short-' + index + '.mp4');
         try {
           await video.shortFromHighlight(montage, offset, length, shortPath);
+          await video.validateShort(shortPath, length);
           const uploaded = await youtube.uploadPrivate({
             filePath: shortPath, title: moment.title, description: shortDescription, tags: shortTags
-          });
-          const playlist = await autoAssignPlaylist({
-            id: uploaded.id, privacyStatus: 'private', title: moment.title,
-            description: shortDescription, tags: shortTags,
-            context: { takeaways: moment.reason || moment.title, videoType: 'Gameplay' }
           });
           const shortDraft = {
             id: idFactory(), sourceType: 'twitch_highlight_short', parentId: id,
             highlightIndex: index, vodId: batch.vodId, title: moment.title,
             description: shortDescription, tags: shortTags, youtubeVideoId: uploaded.id,
-            playlistAssignment: playlist, status: 'clip_partial', productionState: 'processing',
-            seoRegistrationStatus: 'pending', createdAt: new Date().toISOString()
+            mediaValidation: 'passed', playlistAssignment: { state: 'pending' },
+            status: 'clip_partial', productionState: 'processing',
+            seoRegistrationStatus: 'pending', publicationStatus: 'pending',
+            createdAt: new Date().toISOString()
           };
+          // Record the YouTube ID before playlist and SEO work so a retry can reuse the Short.
           await store.addDraft(shortDraft);
           shortsByIndex.set(index, shortDraft);
+          const playlist = await autoAssignPlaylist({
+            id: uploaded.id, privacyStatus: 'private', title: moment.title,
+            description: shortDescription, tags: shortTags,
+            context: { takeaways: moment.reason || moment.title, videoType: 'Gameplay' }
+          });
+          await store.updateDraft(shortDraft.id, { playlistAssignment: playlist });
           const registered = await registerSeo(shortDraft.id, uploaded.id, {
             title: moment.title, description: shortDescription, tags: shortTags,
             durationSeconds: length,
@@ -325,23 +340,128 @@ function createHighlightProcessor(dependencies) {
       if (readyShortIndexes.size !== batch.highlights.length) {
         failures.push('shorts: ' + readyShortIndexes.size + ' of ' + batch.highlights.length + ' are complete');
       }
+      const finalBatch = await store.getDraft(id);
+      const finalShorts = (await store.listDrafts()).filter((draft) => draft.parentId === id)
+        .sort((left, right) => left.highlightIndex - right.highlightIndex);
+      const allOutputIdsPresent = Boolean(finalBatch?.youtubeVideoId) &&
+        finalShorts.length === batch.highlights.length &&
+        finalShorts.every((draft) => Boolean(draft.youtubeVideoId));
+      const seoReady = finalBatch?.seoRegistrationStatus === 'registered' &&
+        finalShorts.every((draft) => draft.seoRegistrationStatus === 'registered');
+      const mediaReady = !batch.autoPublishEligible ||
+        finalBatch?.mediaValidation === 'passed' &&
+        finalShorts.every((draft) => draft.mediaValidation === 'passed') &&
+        (finalBatch.twitchClips || []).length === batch.highlights.length &&
+        finalBatch.twitchClips.every((clip) => clip.timestampVerification?.verified === true);
       const productionReady = failures.length === 0 && readyShortIndexes.size === batch.highlights.length &&
+        allOutputIdsPresent && seoReady && mediaReady &&
         (batch.pipelineVersion < 2 || thumbnailStatus === 'applied');
-      const error = productionReady ? null : failures.slice(0, 8).join('; ');
-      const canAutoRetry = !productionReady && hasRetryableFailure && !hasPermanentFailure &&
-        attemptCount < (Number.isSafeInteger(maxAutoAttempts) && maxAutoAttempts > 0 ? maxAutoAttempts : 4);
+      const maxAttemptsAllowed = Number.isSafeInteger(maxAutoAttempts) && maxAutoAttempts > 0 ? maxAutoAttempts : 12;
       const retryDelay = Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attemptCount - 1)));
-      const nextClipAttemptAt = canAutoRetry ? new Date(now() + retryDelay).toISOString() : null;
-      await store.updateDraft(id, {
-        status: productionReady ? 'awaiting_owner_approval' : canAutoRetry ? 'clip_retry_wait' : 'clip_partial',
-        productionState: productionReady ? 'ready' : canAutoRetry ? 'retry_scheduled' : 'partial',
-        productionFailures: failures, error, nextClipAttemptAt, processedAt: new Date(now()).toISOString()
-      });
+      if (!productionReady) {
+        const canAutoRetry = hasRetryableFailure && !hasPermanentFailure && attemptCount < maxAttemptsAllowed;
+        const nextClipAttemptAt = canAutoRetry ? new Date(now() + retryDelay).toISOString() : null;
+        const error = failures.slice(0, 8).join('; ') || 'Production checks did not pass';
+        await store.updateDraft(id, {
+          status: canAutoRetry ? 'clip_retry_wait' : 'clip_partial',
+          productionState: canAutoRetry ? 'retry_scheduled' : 'partial',
+          productionFailures: failures.length ? failures : [error], error, nextClipAttemptAt,
+          processedAt: new Date(now()).toISOString()
+        });
+      } else if (!(autoPublish && batch.autoPublishEligible === true)) {
+        await store.updateDraft(id, {
+          status: 'awaiting_owner_approval', productionState: 'ready',
+          publicationStatus: 'pending', productionFailures: [], error: null,
+          nextClipAttemptAt: null, processedAt: new Date(now()).toISOString()
+        });
+      } else {
+        await store.updateDraft(id, {
+          status: 'clip_retry_wait', productionState: 'publishing',
+          publicationStatus: 'publishing', productionFailures: [], error: null,
+          nextClipAttemptAt: new Date(now()).toISOString()
+        });
+        const outputs = [finalBatch, ...finalShorts];
+        for (const output of outputs) {
+          if (output.publicationStatus === 'published') continue;
+          const label = output.id === id ? 'highlight publication' : 'Short ' + (output.highlightIndex + 1) + ' publication';
+          try {
+            if (typeof youtube.getVideo !== 'function' || typeof youtube.publish !== 'function') {
+              throw new Error('YouTube publication checks are unavailable');
+            }
+            const current = await youtube.getVideo(output.youtubeVideoId);
+            if (!current) {
+              const error = new Error('YouTube output is not available for publication checks yet');
+              error.status = 425;
+              throw error;
+            }
+            const processingStatus = current.processingDetails?.processingStatus;
+            if (processingStatus === 'failed' || processingStatus === 'terminated') {
+              const error = new Error('YouTube processing failed for this output');
+              error.status = 422;
+              throw error;
+            }
+            if (processingStatus !== 'succeeded') {
+              const error = new Error('YouTube is still processing this output');
+              error.status = 425;
+              throw error;
+            }
+            const privacyStatus = current.status?.privacyStatus;
+            if (privacyStatus === 'private') {
+              const published = await youtube.publish(output.youtubeVideoId);
+              if (published?.status?.privacyStatus !== 'public') {
+                const error = new Error('YouTube did not confirm public visibility');
+                error.status = 425;
+                throw error;
+              }
+            } else if (privacyStatus !== 'public') {
+              const error = new Error('Output visibility changed before automatic publication');
+              error.status = 409;
+              throw error;
+            }
+            const publishedAt = new Date(now()).toISOString();
+            await store.updateDraft(output.id, {
+              publicationStatus: 'published', publishedAt,
+              ...(output.id === id
+                ? {}
+                : { status: 'published', productionState: 'published' })
+            });
+          } catch (error) {
+            const reason = noteFailure(label, error, 250);
+            await store.updateDraft(output.id, {
+              publicationStatus: isTransientError(error) ? 'retry' : 'failed',
+              publicationError: reason
+            });
+            break;
+          }
+        }
+        const publishedBatch = await store.getDraft(id);
+        const publishedShorts = (await store.listDrafts()).filter((draft) => draft.parentId === id);
+        const publishedEverything = publishedBatch.publicationStatus === 'published' &&
+          publishedShorts.length === batch.highlights.length &&
+          publishedShorts.every((draft) => draft.publicationStatus === 'published');
+        if (publishedEverything) {
+          await store.updateDraft(id, {
+            status: 'completed', productionState: 'published',
+            publicationStatus: 'published', productionFailures: [], error: null,
+            nextClipAttemptAt: null, processedAt: new Date(now()).toISOString()
+          });
+        } else {
+          const canAutoRetry = hasRetryableFailure && !hasPermanentFailure && attemptCount < maxAttemptsAllowed;
+          await store.updateDraft(id, {
+            status: canAutoRetry ? 'clip_retry_wait' : 'awaiting_owner_approval',
+            productionState: canAutoRetry ? 'retry_scheduled' : 'ready',
+            publicationStatus: canAutoRetry ? 'retry' : 'failed',
+            productionFailures: failures, error: failures.slice(0, 8).join('; ') || 'Automatic publication stopped',
+            nextClipAttemptAt: canAutoRetry ? new Date(now() + retryDelay).toISOString() : null,
+            processedAt: new Date(now()).toISOString()
+          });
+        }
+      }
     } catch (error) {
       const message = cleanText(error.message || 'Highlight production failed', 500);
       const attemptCount = (Number(batch && batch.clipAttemptCount) || 0) + 1;
       const canAutoRetry = isTransientError(error) && attemptCount <
-        (Number.isSafeInteger(maxAutoAttempts) && maxAutoAttempts > 0 ? maxAutoAttempts : 4);
+        (Number.isSafeInteger(maxAutoAttempts) && maxAutoAttempts > 0 ? maxAutoAttempts : 12);
       const retryDelay = Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attemptCount - 1)));
       logError(id, error);
       await store.updateDraft(id, {

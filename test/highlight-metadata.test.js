@@ -38,7 +38,9 @@ test('short or too few segments remain timestamp links without a chapter heading
 });
 
 test('invalid clip durations or VOD identifiers are rejected', () => {
-  assert.throws(() => buildHighlightTimeline([{ title: 'Moment' }], [0]), /measured positive duration/);
+  assert.throws(() => buildHighlightTimeline([{ title: 'Moment' }], [0]), /measured duration between 5 and 60 seconds/);
+  assert.throws(() => buildHighlightTimeline([{ title: 'Moment' }], [4.99]), /measured duration between 5 and 60 seconds/);
+  assert.throws(() => buildHighlightTimeline([{ title: 'Moment' }], [60.01]), /measured duration between 5 and 60 seconds/);
   assert.throws(() => buildHighlightTimeline([{ title: 'Moment' }], []), /matching clip and duration lists/);
   assert.throws(() => buildHighlightDescription('not-a-vod', {
     timestamps: [{ time: '0:00', title: 'Moment' }], chapters: []

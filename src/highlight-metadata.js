@@ -22,8 +22,8 @@ function buildHighlightTimeline(highlights, segmentDurations) {
   let offset = 0;
   const timestamps = highlights.map((moment, index) => {
     const durationSeconds = Number(segmentDurations[index]);
-    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
-      throw new Error('Every highlight segment needs a measured positive duration');
+    if (!Number.isFinite(durationSeconds) || durationSeconds < 5 || durationSeconds > 60) {
+      throw new Error('Every highlight segment needs a measured duration between 5 and 60 seconds');
     }
     const startSeconds = Math.floor(offset + 1e-7);
     const timestamp = {

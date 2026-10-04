@@ -1,10 +1,10 @@
 # AmaanaYt
 
-Approval-based YouTube Shorts, TikTok inbox, and video SEO drafting service for **@saevond**.
+YouTube Shorts, TikTok inbox, and video SEO service for **@saevond**.
 
-AmaanaYt connects to YouTube and Twitch with OAuth. After SweatyClanker detects moments in an ended Twitch stream, Amaana assembles them into a landscape highlight video, then cuts vertical Shorts from that assembled video. The highlight and each Short become separate private YouTube drafts; an owner key is required to publish or schedule each one.
+AmaanaYt connects to YouTube and Twitch with OAuth. After SweatyClanker detects moments in an ended Twitch stream, Amaana checks candidate timestamps against the archive duration, creates the Twitch clips, then rechecks Twitch's returned VOD offsets and clip lengths. Twitch's VOD API supplies archive duration; its clip metadata exposes the created clip's VOD position for the recheck ([Get Videos](https://dev.twitch.tv/docs/api/videos), [API reference](https://dev.twitch.tv/docs/api/reference)). It assembles a landscape highlight and vertical Shorts, probes the rendered dimensions and durations, applies a thumbnail, and registers each output for SEO processing.
 
-For new Twitch highlight batches, Amaana derives moment timestamps from FFmpeg-measured clip durations. When there are at least three segments and each is at least 10 seconds, it adds YouTube chapter timestamps starting at 0:00; otherwise it adds clickable timestamps without calling them chapters. Amaana also creates a 16:9, high-contrast thumbnail from an actual highlight frame and applies it to the private landscape video. Shorts and all uploads remain private until owner approval.
+New highlight batches upload as private first. With `HIGHLIGHT_AUTO_PUBLISH` enabled (the default), Amaana publishes the parent video and every Short only after all media checks, the thumbnail, SEO registration, and YouTube processing checks pass. A transient failure retries from saved IDs; a permanent error returns the batch to owner review. Existing private and unlisted videos are never promoted by this flow. Batches created before the automatic-publish patch remain private for owner review. SweatyClanker still supplies candidate timestamps; Amaana validates timestamp accuracy against Twitch metadata but does not itself watch or interpret VOD footage.
 
 Generated Shorts can also be sent to the creator's TikTok inbox **one at a time after the creator previews and consents to each transfer**. The creator edits and completes each post in the TikTok app. TikTok delivery does not happen automatically at stream end.
 
@@ -14,7 +14,7 @@ Amaana can list and create the channel's YouTube playlists and automatically pla
 
 Run `npm run simulate:five-years` to estimate pipeline volume, SEO analysis backlog, safe write throughput, and YouTube API quota use over five years. The default scenario assumes one six-hour Twitch VOD per day, three selected moments per VOD, and a 1,000-video public-library stress cohort with 30% missing analysis. These are adjustable load-test assumptions, not channel measurements.
 
-The simulator forecasts operational capacity only; it does not predict views, revenue, or ranking. Set `SIM_START_DATE`, `SIM_STREAMS_PER_DAY`, `SIM_HOURS_PER_STREAM`, `SIM_MOMENTS_PER_STREAM`, `SIM_PUBLIC_VIDEO_COHORT`, and `SIM_MISSING_ANALYSIS_SHARE` to model another scenario. Quota inputs follow YouTube's published method costs and default daily allowance; actual project quota can differ.
+The simulator forecasts operational capacity only; it does not predict views, revenue, or ranking. Quota values follow the [YouTube API quota calculator](https://developers.google.com/youtube/v3/determine_quota_cost). It includes the separate 100-per-day YouTube `videos.insert` and `search.list` request buckets, then accounts for a 1-unit pre-publish `videos.list` and 50-unit `videos.update` for each generated video. Set `SIM_START_DATE`, `SIM_STREAMS_PER_DAY`, `SIM_HOURS_PER_STREAM`, `SIM_MOMENTS_PER_STREAM`, `SIM_PUBLIC_VIDEO_COHORT`, and `SIM_MISSING_ANALYSIS_SHARE` to model another scenario. Actual project quota can differ.
 
 ## Security model
 
@@ -22,7 +22,7 @@ The simulator forecasts operational capacity only; it does not predict views, re
 - OAuth credentials and refresh tokens are never committed to GitHub.
 - YouTube and Twitch tokens are encrypted with AES-256-GCM before database storage.
 - TikTok access and refresh tokens use the same encrypted database storage.
-- `AGENT_KEY` can upload private drafts but cannot publish them.
+- `AGENT_KEY` can submit Twitch highlight jobs. Those new jobs may publish after the configured quality gate; it cannot publish or change visibility on existing catalog videos.
 - `ADMIN_KEY` controls OAuth connection, draft review, publication, and scheduling.
 - New uploads always start as private.
 - TikTok delivery requires owner approval per Short. TikTok media URLs are signed and expire.
@@ -79,8 +79,12 @@ Required values:
 - `TWITCH_CLIENT_ID`: client ID for a dedicated Twitch application
 - `TWITCH_CLIENT_SECRET`: secret for that Twitch application
 - `TOKEN_ENCRYPTION_KEY`: exactly 64 hexadecimal characters
-- `AGENT_KEY`: long random upload-only secret
+- `AGENT_KEY`: long random key for workflow requests and private uploads
 - `ADMIN_KEY`: different owner-only secret
+
+`HIGHLIGHT_AUTO_PUBLISH` defaults to `true` for new, quality-checked Twitch highlight batches. Set it to `false` to keep new highlight videos and Shorts private for owner review. This switch does not affect any existing private or unlisted video.
+
+Transient production and YouTube-processing failures retry up to 12 times by default, with exponential backoff capped at 30 minutes. Set `HIGHLIGHT_MAX_AUTO_ATTEMPTS` to a positive integer from 1 to 24 to change the limit. Permanent processing or permission errors stop for owner review.
 
 Render generates `SESSION_SECRET`.
 
@@ -201,7 +205,7 @@ After deployment, Amaana reads the authenticated channel's uploads playlist in p
 
 If the provider reports insufficient balance (HTTP 402), or OpenAI returns a 429 with a credit, spend, or usage-limit code, Amaana keeps the affected video eligible for retry and pauses generation for two hours while catalog scanning continues. The dashboard shows the provider error and retry time. After restoring credits or resolving the limit, pause and resume SEO jobs from the dashboard to retry sooner. An ordinary 429 rate limit is handled separately from credit exhaustion.
 
-Each package contains three search titles, three curiosity titles, three hybrid titles (each under 60 characters), three thumbnail briefs, a 50–160 character keyword hook, description paragraphs, chapters where validated times exist, resource placeholders, three hashtags, 3–8 focused tags, a pinned comment draft, a community post teaser, and 2–3 clip recommendations when enough source moments exist. Automatic application selects a hybrid title, joins the evidence-backed hook and paragraphs with the existing description, and merges relevant tags. For eligible public videos, Amaana also composes a 1280×720 JPEG from the current YouTube thumbnail and a short overlay grounded in the title, description, tags, or video analysis, then uploads it as the custom thumbnail. It preserves the existing image if there is no usable YouTube thumbnail or supported text. It never sends resource placeholders, unverified chapters, comments, or Community posts. No SEO result or AI summary appearance is guaranteed.
+Each package contains three search titles, three curiosity titles, three hybrid titles (each under 60 characters), three thumbnail briefs, a 50–160 character keyword hook, description paragraphs, chapters where validated times exist, resource placeholders, three hashtags, 3–8 focused tags, a pinned comment draft, a community post teaser, and 2–3 clip recommendations when enough source moments exist. Automatic application selects a hybrid title, joins the evidence-backed hook and paragraphs with the existing description, and merges relevant tags. For eligible public videos, Amaana also composes a 1280×720 JPEG from the current YouTube thumbnail and a short overlay grounded in the title, description, tags, or video analysis, then uploads it as the custom thumbnail. It preserves the existing image if there is no usable YouTube thumbnail or supported text. It never sends resource placeholders, unverified chapters, comments, or Community posts. Title and thumbnail concepts stay specific to the footage and favor viewer satisfaction over click-through alone. YouTube's native title and thumbnail experiments judge outcomes by watch-time share; those experiments are not run by Amaana, and Shorts are not eligible for those experiments ([YouTube guidance](https://support.google.com/youtube/answer/16391400)). No SEO result or AI summary appearance is guaranteed.
 
 Amaana can sample recent public YouTube gameplay videos for ARC Raiders, NARAKA: BLADEPOINT, and other recognized games. The sample is cached for 24 hours, capped at three searches per UTC day, and shown to the owner at `GET /api/seo/market?game=ARC%20Raiders`. Each sample includes total public views and an age-adjusted estimated views/day value using a one-day age floor; this is rough view velocity, not a search-volume estimate, forecast, or evidence that an event happened in your footage. The generated copy stays grounded in the video's own analysis or owner notes. `SEO_MARKET_RESEARCH=false` disables these searches.
 

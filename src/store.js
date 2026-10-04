@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { Pool } = require('pg');
+const { prioritizeSeoAutoCandidates } = require('./seo-priority');
 
 function databaseConnectionString(value, production = false) {
   if (!production || !value) return value;
@@ -466,7 +467,13 @@ async function markSeoAutoResult(videoId, result) {
 
 async function listSeoAutoCandidates(limit = 20) {
   await init();
-  const result = await pool.query(`SELECT video_id AS "videoId" FROM amaana_seo_packages
+  const result = await pool.query(`SELECT video_id AS "videoId", status,
+      CASE WHEN status = 'ready' THEN 0
+        WHEN jsonb_typeof(package->'missingEvidence') = 'array'
+          THEN jsonb_array_length(package->'missingEvidence')
+        ELSE 2147483647 END AS "missingEvidenceCount",
+      generated_at AS "generatedAt"
+    FROM amaana_seo_packages
     WHERE status IN ('ready', 'needs_review')
       AND source->>'privacyStatus' = 'public'
       AND generated_at IS NOT NULL
@@ -477,8 +484,8 @@ async function listSeoAutoCandidates(limit = 20) {
         OR ((auto_result->>'packageGeneratedAt')::timestamptz = generated_at
           AND auto_result->>'thumbnailState' IS NULL)
         OR (auto_result->>'thumbnailState' = 'retry' AND (auto_result->>'at')::timestamptz < NOW() - INTERVAL '1 hour'))
-    ORDER BY generated_at ASC LIMIT $1`, [Math.max(1, Math.min(50, limit))]);
-  return result.rows;
+    ORDER BY generated_at ASC NULLS LAST, video_id ASC`);
+  return prioritizeSeoAutoCandidates(result.rows, limit);
 }
 
 async function seoUpdatesToday() {

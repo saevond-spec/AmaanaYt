@@ -41,8 +41,11 @@ function simulateProductionScenario({ days, streamsPerDay, momentsPerStream, att
     simulatedProcessRestarts: 0,
     transientFailures: {},
     permanentPermissionFailures: 0,
+    permanentPublicationFailures: 0,
     duplicateParentUploads: 0,
     generatedPublicVideos: 0,
+    prematurePublicVideos: 0,
+    publicationAttempts: 0,
     existingVisibilityMutations: 0
   };
 
@@ -60,6 +63,7 @@ function simulateProductionScenario({ days, streamsPerDay, momentsPerStream, att
         status: 'queued',
         clipCreated: Array(momentsPerStream).fill(false),
         shortUploaded: Array(momentsPerStream).fill(false),
+        published: Array(momentsPerStream + 1).fill(false),
         seoRegistered: new Set(),
         usedFaults: new Set(),
         parentUploaded: false,
@@ -71,7 +75,9 @@ function simulateProductionScenario({ days, streamsPerDay, momentsPerStream, att
           short429: every(serial, faults.short429Every),
           seo503: every(serial, faults.seo503Every),
           restart: every(serial, faults.restartEvery),
-          youtube403: every(serial, faults.youtube403Every)
+          youtube403: every(serial, faults.youtube403Every),
+          youtubePublish429: every(serial, faults.youtubePublish429Every),
+          youtubePublish403: every(serial, faults.youtubePublish403Every)
         }
       });
     }
@@ -128,6 +134,20 @@ function simulateProductionScenario({ days, streamsPerDay, momentsPerStream, att
       job.seoRegistered.add(index);
       metrics.seoRegistrations += 1;
     }
+    // All media, thumbnails, and SEO registrations have passed before visibility changes start.
+    const publicationCount = momentsPerStream + 1;
+    for (let index = 0; index < publicationCount; index += 1) {
+      if (job.published[index]) continue;
+      metrics.publicationAttempts += 1;
+      if (index === 0 && transient(job, 'youtubePublish429')) return { retry: true };
+      if (index === 1 && job.fault.youtubePublish403 && !job.usedFaults.has('youtubePublish403')) {
+        job.usedFaults.add('youtubePublish403');
+        metrics.permanentPublicationFailures += 1;
+        return { permanent: true };
+      }
+      job.published[index] = true;
+      metrics.generatedPublicVideos += 1;
+    }
     return { success: true };
   }
 
@@ -159,7 +179,7 @@ function simulateProductionScenario({ days, streamsPerDay, momentsPerStream, att
 
   metrics.queuedAtHorizon = queue.length;
   metrics.privateVideosProduced = metrics.parentPrivateUploads + metrics.shortPrivateUploads;
-  metrics.visibilityInvariant = metrics.generatedPublicVideos === 0 && metrics.existingVisibilityMutations === 0;
+  metrics.visibilityInvariant = metrics.prematurePublicVideos === 0 && metrics.existingVisibilityMutations === 0;
   return metrics;
 }
 
@@ -167,7 +187,7 @@ function simulateProductionHorizon(input, days) {
   const streamsPerDay = positiveInteger(input.streamsPerDay ?? process.env.SIM_STREAMS_PER_DAY, 1);
   const momentsPerStream = positiveInteger(input.momentsPerStream ?? process.env.SIM_MOMENTS_PER_STREAM, 3, 0);
   const attemptsPerDay = positiveInteger(input.productionAttemptsPerDay, 4);
-  const maxAttempts = positiveInteger(input.productionMaxAttempts, 8);
+  const maxAttempts = positiveInteger(input.productionMaxAttempts, 12);
   const supplied = input.productionFaults || {};
   const stressFaults = {
     duplicateWebhookEvery: interval(supplied.duplicateWebhookEvery, 7),
@@ -178,14 +198,16 @@ function simulateProductionHorizon(input, days) {
     short429Every: interval(supplied.short429Every, 67),
     seo503Every: interval(supplied.seo503Every, 73),
     restartEvery: interval(supplied.restartEvery, 89),
-    youtube403Every: interval(supplied.youtube403Every, 997)
+    youtube403Every: interval(supplied.youtube403Every, 997),
+    youtubePublish429Every: interval(supplied.youtubePublish429Every, 101),
+    youtubePublish403Every: interval(supplied.youtubePublish403Every, 991)
   };
   const noFaults = Object.fromEntries(Object.keys(stressFaults).map((key) => [key, 0]));
   return {
     assumptions: {
       modelDays: days, streamsPerDay, momentsPerStream, workerAttemptsPerDay: attemptsPerDay,
       maxAttemptsPerBatch: maxAttempts,
-      timestampSource: 'The simulation assumes an external detector supplies real VOD timestamps.',
+      timestampSource: 'SweatyClanker supplies candidate VOD timestamps; the app checks them against Twitch VOD and clip metadata.',
       stressSchedule: 'Deterministic fault intervals are repeatable test injections, not measured production failure rates.'
     },
     baseline: simulateProductionScenario({
@@ -227,6 +249,11 @@ function simulateFiveYears(input = {}) {
   const playlistInsertUnits = positiveInteger(input.playlistInsertUnits ?? process.env.SIM_PLAYLIST_ITEM_INSERT_UNITS, 50);
   const playlistCheckUnits = positiveInteger(input.playlistCheckUnits ?? process.env.SIM_PLAYLIST_ITEM_CHECK_UNITS, 1);
   const playlistListMaxPages = positiveInteger(input.playlistListMaxPages ?? process.env.SIM_PLAYLIST_LIST_MAX_PAGES, 20);
+  const videoListUnits = positiveInteger(input.videoListUnits ?? process.env.SIM_VIDEO_LIST_UNITS, 1, 0);
+  const marketSearchCallsPerDay = positiveInteger(input.marketSearchCallsPerDay ?? process.env.SIM_MARKET_SEARCH_CALLS_PER_DAY, 3, 0);
+  const marketSearchDailyLimit = positiveInteger(input.marketSearchDailyLimit ?? process.env.SIM_YOUTUBE_SEARCH_DAILY_LIMIT, 100);
+  const videoInsertDailyLimit = positiveInteger(input.videoInsertDailyLimit ?? process.env.SIM_YOUTUBE_VIDEO_INSERT_DAILY_LIMIT, 100);
+  const autoPublish = input.autoPublish !== false && String(process.env.SIM_AUTO_PUBLISH || 'true').toLowerCase() !== 'false';
 
   const streams = window.days * streamsPerDay;
   const missingAnalysisVideos = Math.ceil(publicVideos * missingAnalysisShare);
@@ -240,7 +267,12 @@ function simulateFiveYears(input = {}) {
   const playlistAutoAssignmentsPerDay = playlistAutoDailyLimit * 2;
   const playlistAutoDailyUnits = playlistAutoAssignmentsPerDay *
     (playlistInsertUnits + playlistCheckUnits + playlistListMaxPages);
-  const currentDailyUnits = seoWriteDailyLimit * updateUnits + streamsPerDay * thumbnailUnits + playlistAutoDailyUnits;
+  const uploadsPerStream = 1 + momentsPerStream;
+  const videoInsertCallsPerDay = streamsPerDay * uploadsPerStream;
+  const videoPublicationCallsPerDay = autoPublish ? videoInsertCallsPerDay : 0;
+  const publicationDailyUnits = videoPublicationCallsPerDay * (updateUnits + videoListUnits);
+  const currentDailyUnits = seoWriteDailyLimit * updateUnits + streamsPerDay * thumbnailUnits +
+    playlistAutoDailyUnits + publicationDailyUnits;
   const bulkThumbnailDailyUnits = thumbnailBackfillDailyLimit * thumbnailUnits;
   const totalWithBulkThumbnailBackfill = currentDailyUnits + bulkThumbnailDailyUnits;
   const candidateScanLimit = 20;
@@ -256,7 +288,7 @@ function simulateFiveYears(input = {}) {
     fiveYearPipeline: { streams, activeStreamHours: streams * hoursPerStream,
       privateLandscapeDrafts: streams, privateShortDrafts: streams * momentsPerStream,
       totalPrivateDrafts: streams * (1 + momentsPerStream),
-      visibilityRule: 'All generated highlight and Short drafts stay private until owner approval.' },
+      visibilityRule: 'New highlight and Short uploads start private and publish only after timestamp, render, thumbnail, SEO-registration, and YouTube-processing checks pass; existing private and unlisted videos are untouched.' },
     seoBackfill: { missingAnalysisVideos, currentQueueDays: Number(currentQueueDays.toFixed(2)),
       batchedQueueDays: Number(batchedQueueDays.toFixed(2)),
       bestCaseDaysToUpdatePublicCohortAtWriteLimit: Math.ceil(publicVideos / seoWriteDailyLimit),
@@ -267,7 +299,12 @@ function simulateFiveYears(input = {}) {
       behavior: 'Permanent permission/channel errors are skipped; quota and transient errors remain retryable.' },
     productionReliability: simulateProductionHorizon(input, window.days),
     youtubeApiQuota: { defaultDailyUnits: defaultQuota, videoUpdateUnits: updateUnits,
-      thumbnailSetUnits: thumbnailUnits, playlistItemInsertUnits: playlistInsertUnits,
+      videoListUnits, videoInsertCallsPerDay, videoInsertDailyLimit,
+      videoInsertQuotaFits: videoInsertCallsPerDay <= videoInsertDailyLimit,
+      marketSearchCallsPerDay, marketSearchDailyLimit,
+      marketSearchQuotaFits: marketSearchCallsPerDay <= marketSearchDailyLimit,
+      automaticPublicationEnabled: autoPublish, publicationVideoUpdatesPerDay: videoPublicationCallsPerDay,
+      publicationDailyQuotaUnits: publicationDailyUnits, playlistItemInsertUnits: playlistInsertUnits,
       playlistItemCheckUnits: playlistCheckUnits, ownedPlaylistListMaxPages: playlistListMaxPages,
       maxPlaylistAssignmentsPerDay: playlistAutoAssignmentsPerDay,
       automaticPlaylistDailyUnits: playlistAutoDailyUnits, currentPipelineDailyQuotaUnits: currentDailyUnits,

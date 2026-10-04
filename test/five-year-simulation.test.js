@@ -19,9 +19,14 @@ test('five-year simulation reports draft volume, queue throughput, and quota hea
   assert.equal(result.youtubeApiQuota.maxPlaylistAssignmentsPerDay, 40);
   assert.equal(result.youtubeApiQuota.ownedPlaylistListMaxPages, 20);
   assert.equal(result.youtubeApiQuota.automaticPlaylistDailyUnits, 2840);
-  assert.equal(result.youtubeApiQuota.currentPipelineDailyQuotaUnits, 5390);
-  assert.equal(result.youtubeApiQuota.combinedDailyQuotaUnitsWith50PerDayThumbnailBackfill, 7890);
-  assert.equal(result.youtubeApiQuota.headroomWithBulkThumbnailBackfillBeforeReads, 2110);
+  assert.equal(result.youtubeApiQuota.videoInsertCallsPerDay, 4);
+  assert.equal(result.youtubeApiQuota.videoInsertQuotaFits, true);
+  assert.equal(result.youtubeApiQuota.marketSearchCallsPerDay, 3);
+  assert.equal(result.youtubeApiQuota.marketSearchQuotaFits, true);
+  assert.equal(result.youtubeApiQuota.publicationDailyQuotaUnits, 204);
+  assert.equal(result.youtubeApiQuota.currentPipelineDailyQuotaUnits, 5594);
+  assert.equal(result.youtubeApiQuota.combinedDailyQuotaUnitsWith50PerDayThumbnailBackfill, 8094);
+  assert.equal(result.youtubeApiQuota.headroomWithBulkThumbnailBackfillBeforeReads, 1906);
 });
 
 test('five-year lifecycle simulation exercises baseline and deterministic recovery stress', () => {
@@ -32,22 +37,28 @@ test('five-year lifecycle simulation exercises baseline and deterministic recove
   const stress = reliability.recoveryStress;
 
   assert.equal(reliability.assumptions.modelDays, 1826);
-  assert.match(reliability.assumptions.timestampSource, /external detector/);
+  assert.match(reliability.assumptions.timestampSource, /SweatyClanker/);
   assert.match(reliability.assumptions.stressSchedule, /not measured production failure rates/);
   assert.equal(baseline.submittedBatches, 1826);
   assert.equal(baseline.completedBatches, 1826);
   assert.equal(baseline.privateVideosProduced, 7304);
+  assert.equal(baseline.generatedPublicVideos, 7304);
+  assert.equal(baseline.prematurePublicVideos, 0);
   assert.equal(baseline.automaticRetries, 0);
   assert.equal(baseline.visibilityInvariant, true);
   assert.equal(stress.submittedBatches, 1826);
-  assert.equal(stress.completedBatches, 1825);
-  assert.equal(stress.batchesNeedingManualRecovery, 1);
+  assert.equal(stress.completedBatches, 1824);
+  assert.equal(stress.batchesNeedingManualRecovery, 2);
   assert.equal(stress.queuedAtHorizon, 0);
   assert.equal(stress.duplicateWebhookDeliveries, 260);
   assert.ok(stress.automaticRetries > 0);
   assert.ok(stress.simulatedProcessRestarts > 0);
+  assert.ok(stress.transientFailures.youtubePublish429 > 0);
+  assert.equal(stress.publicationAttempts >= stress.generatedPublicVideos, true);
   assert.equal(stress.duplicateParentUploads, 0);
-  assert.equal(stress.generatedPublicVideos, 0);
+  assert.equal(stress.generatedPublicVideos, 7297);
+  assert.equal(stress.prematurePublicVideos, 0);
+  assert.equal(stress.permanentPublicationFailures, 1);
   assert.equal(stress.existingVisibilityMutations, 0);
   assert.equal(stress.visibilityInvariant, true);
   assert.equal(stress.parentPrivateUploads, 1825);
