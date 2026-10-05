@@ -13,6 +13,7 @@ const video = require('./video');
 const tiktok = require('./tiktok');
 const { createShortViewMonitor, TIKTOK_VIEW_THRESHOLD } = require('./short-views');
 const { createSeoWorker } = require('./seo-worker');
+const { createChannelTagWorker } = require('./channel-tag-worker');
 const { createMonetizationWorker } = require('./monetization-worker');
 const { createSeoMarket, detectGame } = require('./seo-market');
 const { normalizeContext } = require('./seo-package');
@@ -68,6 +69,8 @@ let clipWorkerRunning = false;
 const tiktokJobs = new Set();
 const market = createSeoMarket({ store, youtube });
 const playlistAuto = createPlaylistAutoAssigner({ store, youtube });
+const channelTagWorker = createChannelTagWorker({ store, youtube });
+setInterval(() => channelTagWorker.schedule(), 5 * 60 * 1000).unref?.();
 const seo = createSeoWorker({ store, youtube, market, playlistAuto });
 const monetization = createMonetizationWorker({ youtube });
 const configuredHighlightAttempts = Number(process.env.HIGHLIGHT_MAX_AUTO_ATTEMPTS);
@@ -307,12 +310,12 @@ async function processTwitchClipDraft(id) {
       filePath: shortPath,
       title: draft.title,
       description,
-      tags: ['Saevond', 'gaming', 'livestream highlights', 'Shorts'],
+      tags: ['@saevond', 'gaming', 'livestream highlights', 'Shorts'],
       madeForKids: false
     });
     const playlistAssignment = await autoAssignPlaylist({
       id: uploaded.id, privacyStatus: 'private', title: draft.title, description,
-      tags: ['Saevond', 'gaming', 'livestream highlights', 'Shorts'],
+      tags: ['@saevond', 'gaming', 'livestream highlights', 'Shorts'],
       context: { topic: draft.reason || draft.title, takeaways: draft.reason || draft.title, videoType: 'Gameplay' }
     });
     await store.updateDraft(id, {
@@ -323,7 +326,7 @@ async function processTwitchClipDraft(id) {
       processedAt: new Date().toISOString()
     });
     await seo.registerUpload(uploaded.id, {
-      title: draft.title, description, tags: ['Saevond', 'gaming', 'livestream highlights', 'Shorts'],
+      title: draft.title, description, tags: ['@saevond', 'gaming', 'livestream highlights', 'Shorts'],
       durationSeconds: draft.duration,
       context: { takeaways: draft.reason || draft.title, videoType: 'Gameplay' },
       markers: [{ kind: 'clip', startSeconds: 0, endSeconds: draft.duration,
@@ -394,6 +397,7 @@ app.get('/', (_req, res) => {
 app.get('/healthz', async (_req, res) => {
   try {
     await store.ping();
+    channelTagWorker.schedule();
     scheduleShortViewCheck();
     seo.schedule();
     monetization.schedule();
@@ -588,8 +592,12 @@ app.get('/oauth2/callback', async (req, res, next) => {
     if (!req.query.state || req.query.state !== req.session.oauthState) return res.status(400).send('Invalid OAuth state. Return to the dashboard and try connecting again.');
     if (!req.query.code) return res.status(400).send('Google did not return an authorization code.');
     await youtube.exchangeCode(req.query.code);
+    market.resetBackoff();
+    seo.resumeAfterYouTubeReconnect();
+    channelTagWorker.resumeAfterYouTubeReconnect();
     delete req.session.oauthState;
     seo.schedule(true);
+    market.schedule();
     res.redirect('/?youtube=connected');
   } catch (error) {
     next(error);
@@ -959,6 +967,7 @@ store.init()
       console.log(`AmaanaYt listening on port ${port}`);
       scheduleShortViewCheck();
       seo.schedule();
+      channelTagWorker.schedule();
       monetization.schedule();
       market.schedule();
       void scheduleDueHighlightRetries();

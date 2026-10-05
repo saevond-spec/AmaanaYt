@@ -1,5 +1,6 @@
 const MAX_DESCRIPTION = 5000;
 const { rateThumbnailBriefs } = require('./thumbnail-rating');
+const { ensureCreatorTag } = require('./channel-tags');
 
 function clean(value, max = 5000) {
   return String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -113,9 +114,10 @@ function focusedTags(rawTags, primaryKeyword) {
   if (keywordIndex >= 0) tags.splice(keywordIndex, 1);
   tags.unshift(keyword);
   if (tags.length > Math.min(8, rawTags.length)) tags.pop();
-  while (tags.length > 3 && tags.join(',').length > 450) tags.pop();
-  if (tags.join(',').length > 450) throw new Error('Tags exceed the recommended combined length');
-  return tags;
+  const focused = ensureCreatorTag(tags, { maxCharacters: 450, maxTags: 8, trimOverflow: true });
+  const creatorIndex = focused.findIndex((tag) => tag.toLocaleLowerCase() === '@saevond');
+  if (creatorIndex > 1) focused.splice(1, 0, focused.splice(creatorIndex, 1)[0]);
+  return focused;
 }
 
 function validatePackage(raw, source, context, analysis = null, marketEvidence = null) {

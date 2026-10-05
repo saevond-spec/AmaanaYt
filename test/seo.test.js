@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const { normalizeContext, normalizeSource, validatePackage, generatePackage,
   descriptionChapters, retryAfterDetails, createModelCircuitBreaker } = require('../src/seo-package');
 const { createSeoWorker } = require('../src/seo-worker');
+const { youtubeTagCharacters } = require('../src/channel-tags');
 
 const keyword = 'NARAKA BLADEPOINT guide';
 const hook = 'NARAKA BLADEPOINT guide: Learn the opening strategy, key moments, and practical moves in this gameplay breakdown for players improving today.';
@@ -72,7 +73,8 @@ test('shorter truthful hooks and focused tags pass, and market provenance is rec
   });
   assert.equal(pkg.evidence.marketSampleSize, 1);
   assert.equal(pkg.evidence.marketObservedAt, '2026-10-02T12:00:00Z');
-  assert.equal(pkg.tags.length, 3);
+  assert.equal(pkg.tags.length, 4);
+  assert.equal(pkg.tags[1], '@saevond');
 });
 
 test('tag output caps overlong provider lists and restores the exact primary keyword', () => {
@@ -87,13 +89,13 @@ test('tag output caps overlong provider lists and restores the exact primary key
 
   const candidates = [keyword, ...Array.from({ length: 14 }, (_value, index) => 'NARAKA term ' + index)];
   const pkg = validatePackage({ ...generated, tags: candidates }, source, context);
-  assert.deepEqual(pkg.tags, candidates.slice(0, 8));
-  assert.ok(pkg.tags.join(',').length <= 450);
+  assert.deepEqual(pkg.tags, [keyword, '@saevond', ...candidates.slice(1, 7)]);
+  assert.ok(youtubeTagCharacters(pkg.tags) <= 450);
 
   const longCandidates = [keyword, ...Array(14).fill('x'.repeat(60))];
   const trimmed = validatePackage({ ...generated, tags: longCandidates }, source, context);
   assert.ok(trimmed.tags.length <= 8);
-  assert.ok(trimmed.tags.join(',').length <= 450);
+  assert.ok(youtubeTagCharacters(trimmed.tags) <= 450);
   assert.throws(() => validatePackage({ ...generated, tags: Array(31).fill('NARAKA') }, source, context),
     /3–30 focused tag candidates/);
 });

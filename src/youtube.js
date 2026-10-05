@@ -2,6 +2,7 @@ const fs = require('fs');
 const { google } = require('googleapis');
 const store = require('./store');
 const { createYouTubePlaylistClient } = require('./youtube-playlists');
+const { ensureCreatorTag, buildCreatorTagUpdate } = require('./channel-tags');
 
 const SCOPES = [
   'https://www.googleapis.com/auth/youtube.upload',
@@ -68,7 +69,7 @@ async function uploadPrivate({ filePath, title, description, tags, madeForKids =
   const response = await youtube.videos.insert({
     part: ['snippet', 'status'],
     requestBody: {
-      snippet: { title, description, tags, categoryId: '20', defaultLanguage: 'en' },
+      snippet: { title, description, tags: ensureCreatorTag(tags || [], { trimOverflow: true }), categoryId: '20', defaultLanguage: 'en' },
       status: { privacyStatus: 'private', selfDeclaredMadeForKids: Boolean(madeForKids) }
     },
     media: { body: fs.createReadStream(filePath) }
@@ -123,10 +124,21 @@ async function updateVideoSeo(videoId, video, edit) {
     categoryId: video.snippet.categoryId
   };
   if (video.snippet.defaultLanguage) snippet.defaultLanguage = video.snippet.defaultLanguage;
+  if (video.snippet.defaultAudioLanguage) snippet.defaultAudioLanguage = video.snippet.defaultAudioLanguage;
   const response = await youtube.videos.update({
     part: ['snippet'], requestBody: { id: videoId, snippet }
   }, { headers: { 'If-Match': video.etag } });
   return response.data;
+}
+
+async function updateVideoTags(video, channelId) {
+  const update = buildCreatorTagUpdate(video, channelId);
+  if (!update.changed) return { state: 'already_tagged', tags: update.tags };
+  const youtube = await service();
+  const response = await youtube.videos.update({
+    part: ['snippet'], requestBody: update.requestBody
+  }, { headers: { 'If-Match': update.etag } });
+  return { state: 'updated', tags: update.tags, video: response.data };
 }
 
 async function channelSeo() {
@@ -213,7 +225,7 @@ async function videoMetadata(ids) {
   if (!ids.length) return [];
   const youtube = await service();
   const response = await youtube.videos.list({ part: ['snippet', 'status', 'contentDetails'], id: ids,
-    fields: 'items(id,snippet(title,description,tags,publishedAt,channelId,categoryId,defaultLanguage,defaultAudioLanguage),status(privacyStatus),contentDetails(duration))' });
+    fields: 'items(id,etag,snippet(title,description,tags,publishedAt,channelId,categoryId,defaultLanguage,defaultAudioLanguage),status(privacyStatus),contentDetails(duration))' });
   return response.data.items || [];
 }
 
@@ -232,11 +244,20 @@ async function getVideoViews(videoIds) {
 
 async function listOwnedBroadcasts() {
   const youtube = await service();
-  const response = await youtube.liveBroadcasts.list({
-    part: ['snippet', 'status', 'contentDetails', 'monetizationDetails'],
-    mine: true, broadcastType: 'all', maxResults: 50
-  });
-  return response.data.items || [];
+  const broadcasts = [];
+  for (const broadcastStatus of ['active', 'upcoming']) {
+    let pageToken;
+    do {
+      const response = await youtube.liveBroadcasts.list({
+        part: ['snippet', 'status', 'contentDetails', 'monetizationDetails'],
+        mine: true, broadcastStatus, maxResults: 50,
+        ...(pageToken ? { pageToken } : {})
+      });
+      broadcasts.push(...(response.data.items || []));
+      pageToken = response.data.nextPageToken || null;
+    } while (pageToken);
+  }
+  return broadcasts;
 }
 
 async function recentGameVideos(game, { now = Date.now() } = {}) {
@@ -324,7 +345,7 @@ async function enablePublicBroadcastAds(broadcast) {
 }
 
 module.exports = { isConnected, canApprove, authorizationUrl, exchangeCode, uploadPrivate, setThumbnail, publish,
-  getVideo, updateVideoSeo, channelSeo, updateChannelSeo, assertTargetChannel,
+  getVideo, updateVideoSeo, updateVideoTags, channelSeo, updateChannelSeo, assertTargetChannel,
   getVideoViews, ownedChannel, uploadsPage, videoMetadata,
   listOwnedBroadcasts, enablePublicBroadcastAds, recentGameVideos,
   listOwnedPlaylists: playlistClient.listOwnedPlaylists,

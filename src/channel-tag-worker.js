@@ -22,7 +22,11 @@ function createChannelTagWorker({ store, youtube, env = process.env, logger = co
   const perRunLimit = Math.min(dailyLimit, boundedSetting(env.YOUTUBE_HANDLE_TAG_RUN_LIMIT, 5, 20));
   const authCooldownMs = 30 * 60 * 1000;
   const errorCooldownMs = 5 * 60 * 1000;
+  const scheduleIntervalMs = 5 * 60 * 1000;
   let running = false;
+  let scheduled = false;
+  let lastRun = 0;
+  let authBlockedUntil = 0;
 
   function freshState(channelId) {
     return {
@@ -75,6 +79,10 @@ function createChannelTagWorker({ store, youtube, env = process.env, logger = co
       if (!owner?.id || !owner?.uploads) throw new Error('YouTube channel uploads playlist is unavailable');
       if (!progress || progress.channelId !== owner.id) progress = freshState(owner.id);
       await youtube.assertTargetChannel(owner.id);
+      if (progress.lastError && isYouTubeAuthorizationError(progress.lastError)) {
+        progress.lastError = null;
+        progress.blockedUntil = null;
+      }
 
       const today = youtubeQuotaDate(now());
       if (progress.quotaDate !== today) {
@@ -225,37 +233,69 @@ function createChannelTagWorker({ store, youtube, env = process.env, logger = co
       .map((broadcast) => broadcast.id)
       .filter((id) => /^[A-Za-z0-9_-]{11}$/.test(String(id || ''))))];
     if (!activeIds.length) return;
-    let videos;
-    try {
-      videos = await youtube.videoMetadata(activeIds.slice(0, 50));
-    } catch (error) {
-      await fail(null, error);
-      return;
-    }
-    for (const video of videos || []) {
+    for (let offset = 0; offset < activeIds.length; offset += 50) {
       if (getWrites() >= runLimit || progress.writesToday >= dayLimit) break;
-      if (video.snippet?.channelId !== owner.id ||
-          !['public', 'private', 'unlisted'].includes(video.status?.privacyStatus)) continue;
-      const currentTags = Array.isArray(video.snippet.tags) ? video.snippet.tags : [];
-      const targetTags = ensureCreatorTag(currentTags, { trimOverflow: true });
-      if (JSON.stringify(targetTags) === JSON.stringify(currentTags)) continue;
-      progress.writesToday += 1;
-      setWrites(getWrites() + 1);
-      await persist();
+      let videos;
       try {
-        await youtube.updateVideoTags(video, owner.id);
-        progress.tagged += 1;
-        onTagged();
-        progress.lastError = null;
-        await persist();
+        videos = await youtube.videoMetadata(activeIds.slice(offset, offset + 50));
       } catch (error) {
-        await fail(video.id, error);
+        await fail(null, error);
         return;
+      }
+      for (const video of videos || []) {
+        if (getWrites() >= runLimit || progress.writesToday >= dayLimit) break;
+        if (video.snippet?.channelId !== owner.id ||
+            !['public', 'private', 'unlisted'].includes(video.status?.privacyStatus)) continue;
+        const currentTags = Array.isArray(video.snippet.tags) ? video.snippet.tags : [];
+        const targetTags = ensureCreatorTag(currentTags, { trimOverflow: true });
+        if (JSON.stringify(targetTags) === JSON.stringify(currentTags)) continue;
+        progress.writesToday += 1;
+        setWrites(getWrites() + 1);
+        await persist();
+        try {
+          await youtube.updateVideoTags(video, owner.id);
+          progress.tagged += 1;
+          onTagged();
+          progress.lastError = null;
+          await persist();
+        } catch (error) {
+          await fail(video.id, error);
+          return;
+        }
       }
     }
   }
 
-  return { enabled, dailyLimit, perRunLimit, run };
+  function schedule(force = false) {
+    if (!enabled || running || scheduled || now() < authBlockedUntil ||
+        !force && now() - lastRun < scheduleIntervalMs) return;
+    scheduled = true;
+    setImmediate(async () => {
+      scheduled = false;
+      lastRun = now();
+      try {
+        if (typeof youtube.isConnected === 'function' && !await youtube.isConnected()) return;
+        const owner = await youtube.ownedChannel();
+        const state = await store.getSeoSyncState();
+        const result = await run(owner, state);
+        if (result.authorizationRequired) authBlockedUntil = now() + authCooldownMs;
+      } catch (error) {
+        if (isYouTubeAuthorizationError(error)) {
+          authBlockedUntil = now() + authCooldownMs;
+          logger.warn?.('Creator tag sync paused; reconnect YouTube in the owner dashboard');
+        } else {
+          logger.warn?.('Creator tag sync failed: ' + String(error?.message || error).slice(0, 240));
+        }
+      }
+    });
+  }
+
+  function resumeAfterYouTubeReconnect() {
+    authBlockedUntil = 0;
+    schedule(true);
+  }
+
+  return { enabled, dailyLimit, perRunLimit, run, schedule, resumeAfterYouTubeReconnect };
 }
 
 module.exports = { createChannelTagWorker };

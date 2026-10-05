@@ -8,7 +8,7 @@ function youtubeTagCharacters(tags) {
   const values = (Array.isArray(tags) ? tags : [])
     .filter((tag) => typeof tag === 'string' && tag.trim())
     .map((tag) => tag.trim());
-  return values.reduce((total, tag) => total + Array.from(tag).length + (/\\s/u.test(tag) ? 2 : 0), 0) +
+  return values.reduce((total, tag) => total + Array.from(tag).length + (/\s/u.test(tag) ? 2 : 0), 0) +
     Math.max(0, values.length - 1);
 }
 
@@ -22,16 +22,22 @@ function ensureCreatorTag(rawTags, { maxCharacters = MAX_YOUTUBE_TAG_CHARACTERS,
     throw new Error('Invalid YouTube tag count limit');
   }
 
-  const tags = rawTags.filter((tag) => typeof tag === 'string' && tag.trim())
+  const sourceTags = rawTags.filter((tag) => typeof tag === 'string' && tag.trim())
     .map((tag) => tag.trim());
-  const creatorTagIndex = tags.findIndex((tag) => tag.toLocaleLowerCase() === CREATOR_TAG);
-  if (creatorTagIndex >= 0) {
-    tags[creatorTagIndex] = CREATOR_TAG;
-  } else {
-    const legacyBrandIndex = tags.findIndex((tag) => tag.toLocaleLowerCase() === 'saevond');
-    if (legacyBrandIndex >= 0) tags[legacyBrandIndex] = CREATOR_TAG;
-    else tags.push(CREATOR_TAG);
-  }
+  const creatorTagIndex = sourceTags.findIndex((tag) => {
+    const normalized = tag.toLocaleLowerCase();
+    return normalized === CREATOR_TAG || normalized === 'saevond';
+  });
+  const tags = sourceTags.filter((tag) => {
+    const normalized = tag.toLocaleLowerCase();
+    return normalized !== CREATOR_TAG && normalized !== 'saevond';
+  });
+  const creatorInsertIndex = creatorTagIndex < 0 ? tags.length :
+    sourceTags.slice(0, creatorTagIndex).filter((tag) => {
+      const normalized = tag.toLocaleLowerCase();
+      return normalized !== CREATOR_TAG && normalized !== 'saevond';
+    }).length;
+  tags.splice(creatorInsertIndex, 0, CREATOR_TAG);
 
   const fits = () => tags.length <= maxTags && youtubeTagCharacters(tags) <= maxCharacters;
   while (!fits() && trimOverflow) {
