@@ -15,8 +15,8 @@ test('imports video page metrics and derives impression-weighted average positio
 
 test('imports video URLs from current YouTube property Videos table headers', () => {
   for (const header of ['Video', 'Videos', 'Top video', 'Top videos']) {
-    const csv = header + ',Clicks,Impressions,CTR,Position\\n' +
-      '"https://www.youtube.com/shorts/abcdefghijk",7,70,10%,3.5\\n';
+    const csv = header + ',Clicks,Impressions,CTR,Position\n' +
+      '"https://www.youtube.com/shorts/abcdefghijk",7,70,10%,3.5\n';
     assert.deepEqual(parseGoogleSearchConsoleCsv(csv), [{
       videoId: 'abcdefghijk', clicks: 7, impressions: 70, averagePosition: 3.5
     }]);
