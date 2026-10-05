@@ -131,7 +131,7 @@ test('unmatched metadata is placed in a private review playlist', async () => {
 test('playlist coverage audit compares every channel upload with all owned playlists', async () => {
   const requeued = [];
   const store = {
-    getSeoSyncState: async () => ({ channelId: 'channel-1', completed: true }),
+    getSeoSyncState: async () => ({ channelId: 'channel-1', completed: true, viewPriorityScanVersion: 1, }),
     requeueSeoPlaylistResults: async (ids) => { requeued.push(...ids); return ids.length; }
   };
   const youtube = {

@@ -41,15 +41,21 @@ const generated = {
   clipHooks: ['The final fight starts here.', 'Watch the reaction at the end.']
 };
 
-test('normalizes text and spoken-audio languages separately', () => {
+test('normalizes text and spoken-audio languages separately and keeps public view counts', () => {
   const normalized = normalizeSource({
     snippet: { title: 'Audio metadata', description: 'English description',
       defaultLanguage: 'en', defaultAudioLanguage: 'ja' },
+    statistics: { viewCount: '42' },
     contentDetails: { duration: 'PT30S' },
     status: { privacyStatus: 'public' }
   });
   assert.equal(normalized.defaultLanguage, 'en');
   assert.equal(normalized.defaultAudioLanguage, 'ja');
+  assert.equal(normalized.viewCount, '42');
+  assert.equal(normalizeSource({ statistics: { viewCount: 'invalid' },
+    status: { privacyStatus: 'public' } }).viewCount, null);
+  assert.equal(normalizeSource({ statistics: { viewCount: '42' },
+    status: { privacyStatus: 'unlisted' } }).viewCount, null);
 });
 
 test('uses only supplied markers for chapters and clips', () => {
@@ -351,7 +357,7 @@ test('worker uses Retry-After on 429 and pauses 60 minutes when absent', async (
   try {
     for (const header of ['45', null]) {
       let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
-        completed: true, enabled: true };
+        completed: true, viewPriorityScanVersion: 1, enabled: true };
       const fakeStore = {
         getSeoSyncState: async () => state,
         saveSeoSyncState: async (next) => { state = next; },
@@ -379,7 +385,7 @@ test('worker uses Retry-After on 429 and pauses 60 minutes when absent', async (
 
 test('worker grows consecutive 503 pauses to 120 minutes', async () => {
   let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
-    completed: true, enabled: true };
+    completed: true, viewPriorityScanVersion: 1, enabled: true };
   const store = {
     getSeoSyncState: async () => state,
     saveSeoSyncState: async (next) => { state = next; },
@@ -410,7 +416,7 @@ test('worker can process more than five jobs in one run with default budget 200'
   let finished = 0;
   const store = {
     getSeoSyncState: async () => ({ channelId: 'channel-1', recentAt: new Date().toISOString(),
-      completed: true, enabled: true }),
+      completed: true, viewPriorityScanVersion: 1, enabled: true }),
     seoCounts: async () => ({ attemptedToday: 0 }),
     claimSeoVideo: async () => claimed++ < 6
       ? { videoId: `video-${claimed}`, claimToken: 'claim', source, context: {}, attempts: 1 } : null,
@@ -462,13 +468,51 @@ test('catalog scan pages through the uploads playlist and preserves a resume cur
   assert.deepEqual(pages, ['recent', 'older']);
 });
 
+test('rescans the completed catalog once to populate low-view priority counts', async () => {
+  let state = { channelId: 'channel-1', cursor: null, completed: true, enabled: true,
+    recentAt: new Date().toISOString() };
+  const stored = new Map();
+  const pages = [];
+  const fakeStore = {
+    getSeoSyncState: async () => state,
+    saveSeoSyncState: async (next) => { state = next; },
+    upsertSeoVideo: async (id, video) => { stored.set(id, video); },
+    seoCounts: async () => ({ attemptedToday: 0 })
+  };
+  const fakeYoutube = {
+    isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner', uploads: 'uploads-1' }),
+    uploadsPage: async (_playlistId, cursor) => {
+      pages.push(cursor || 'recent');
+      return cursor ? { ids: ['older-video1'], nextPageToken: null }
+        : { ids: ['recent-video1'], nextPageToken: 'older' };
+    },
+    videoMetadata: async (ids) => ids.map((id) => ({
+      id, snippet: { title: id, description: '', channelId: 'channel-1' },
+      statistics: { viewCount: id === 'older-video1' ? '3' : '27' },
+      status: { privacyStatus: 'public' }
+    }))
+  };
+  const worker = createSeoWorker({ store: fakeStore, youtube: fakeYoutube, env: {} });
+
+  await worker.run();
+
+  assert.deepEqual(pages, ['recent', 'older']);
+  assert.equal(stored.get('older-video1').viewCount, '3');
+  assert.equal(stored.get('recent-video1').viewCount, '27');
+  assert.equal(state.completed, true);
+  assert.equal(state.viewPriorityScanVersion, 1);
+  await worker.run();
+  assert.deepEqual(pages, ['recent', 'older']);
+});
+
 test('generates for catalog videos whose stored context is empty JSON', async () => {
   let claimed = false;
   let finished;
   let requested = false;
   const fakeStore = {
     getSeoSyncState: async () => ({ channelId: 'channel-1', recentAt: new Date().toISOString(),
-      completed: true, enabled: true }),
+      completed: true, viewPriorityScanVersion: 1, enabled: true }),
     seoCounts: async () => ({ attemptedToday: 0 }),
     claimSeoVideo: async () => {
       if (claimed) return null;
@@ -500,7 +544,7 @@ test('generates for catalog videos whose stored context is empty JSON', async ()
 
 test('pauses provider requests on insufficient balance without failing the video', async () => {
   let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
-    completed: true, enabled: true };
+    completed: true, viewPriorityScanVersion: 1, enabled: true };
   let claims = 0;
   let requests = 0;
   let finishError;
@@ -539,7 +583,7 @@ test('pauses provider requests on insufficient balance without failing the video
 
 test('keeps a video retryable and pauses the queue after a transient Gemini 503', async () => {
   let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
-    completed: true, enabled: true };
+    completed: true, viewPriorityScanVersion: 1, enabled: true };
   let claims = 0;
   let requests = 0;
   let finishError;
@@ -580,7 +624,7 @@ test('keeps a video retryable and pauses the queue after a transient Gemini 503'
 
 test('a new fallback gets one probe during cooldown, then respects the pause', async () => {
   let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
-    completed: true, enabled: true,
+    completed: true, viewPriorityScanVersion: 1, enabled: true,
     providerBlockedUntil: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
     providerProbeTag: 'final:gemini-3.1-flash-lite' };
   let claims = 0;
@@ -623,7 +667,7 @@ test('analysis backfill queues a bounded batch of public videos in one run', asy
   let requestedLimit = 0;
   const store = {
     getSeoSyncState: async () => ({ channelId: 'channel-1', recentAt: new Date().toISOString(),
-      completed: true, enabled: true }),
+      completed: true, viewPriorityScanVersion: 1, enabled: true }),
     seoCounts: async () => ({ attemptedToday: 0 }),
     listSeoNeedsAnalysis: async (limit) => { requestedLimit = limit; return candidates.slice(0, limit); },
     updateSeoContext: async (id) => { queued.push(id); return true; },
@@ -671,7 +715,7 @@ test('five-year queue simulation drains the active backlog and requeues only leg
   }
 
   let sync = { channelId: 'channel-1', recentAt: '2099-01-01T00:00:00.000Z',
-    completed: true, enabled: true };
+    completed: true, viewPriorityScanVersion: 1, enabled: true };
   const store = {
     getSeoSyncState: async () => sync,
     saveSeoSyncState: async (next) => { sync = next; },
@@ -777,7 +821,7 @@ test('five-year queue simulation drains the active backlog and requeues only leg
 });
 
 test('restarting a catalog backfill requeues unmatched playlist results', async () => {
-  let state = { cursor: 'older-page', completed: true, recentAt: '2026-10-03T00:00:00.000Z',
+  let state = { cursor: 'older-page', completed: true, viewPriorityScanVersion: 1, recentAt: '2026-10-03T00:00:00.000Z',
     enabled: true, providerBlockedUntil: '2026-10-04T00:00:00.000Z', providerError: 'quotaExceeded',
     playlistCoverageAudit: { complete: true, missingCount: 0 } };
   let resetCalls = 0;
@@ -807,7 +851,7 @@ test('restarting a catalog backfill requeues unmatched playlist results', async 
 
 
 test('automatically audits completed catalog coverage and retries repairs daily', async () => {
-  let state = { channelId: 'channel-1', channelTitle: 'Owner', cursor: null, completed: true,
+  let state = { channelId: 'channel-1', channelTitle: 'Owner', cursor: null, completed: true, viewPriorityScanVersion: 1,
     recentAt: new Date().toISOString(), enabled: true };
   let auditCalls = 0;
   let assignmentCalls = 0;

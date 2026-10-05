@@ -54,6 +54,9 @@ function normalizeSource(video) {
     channelId: video.snippet?.channelId || null,
     publishedAt: video.snippet?.publishedAt || null,
     privacyStatus: video.status?.privacyStatus || null,
+    viewCount: video.status?.privacyStatus === 'public' &&
+      /^\d+$/.test(String(video.statistics?.viewCount ?? ''))
+      ? String(video.statistics.viewCount) : null,
     durationSeconds
   };
 }
