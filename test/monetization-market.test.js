@@ -73,3 +73,32 @@ test('market samples use fresh public data, exclude the creator, and respect a p
   assert.equal(await restarted.research({ ...source, title: 'Mortal Kombat' }), null);
   assert.equal(searches.length, 3);
 });
+
+test('live monetization pauses on invalid YouTube OAuth until the owner reconnects', async () => {
+  let channelReads = 0;
+  const warnings = [];
+  const youtube = {
+    isConnected: async () => true,
+    ownedChannel: async () => {
+      channelReads += 1;
+      throw new Error('invalid_grant');
+    }
+  };
+  const worker = createMonetizationWorker({
+    youtube, env: { YOUTUBE_PUBLIC_LIVE_MONETIZATION: 'true' },
+    logger: { info() {}, warn(message) { warnings.push(message); } }
+  });
+
+  const result = await worker.run();
+  assert.deepEqual(result.errors, ['invalid_grant']);
+  assert.equal(worker.status().authorizationBlocked, true);
+  worker.schedule();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(channelReads, 1);
+
+  worker.resumeAfterYouTubeReconnect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(channelReads, 2);
+  assert.equal(worker.status().authorizationBlocked, true);
+  assert.equal(warnings.filter((message) => message.includes('reconnect YouTube')).length, 2);
+});

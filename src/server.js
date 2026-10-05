@@ -595,6 +595,7 @@ app.get('/oauth2/callback', async (req, res, next) => {
     market.resetBackoff();
     seo.resumeAfterYouTubeReconnect();
     channelTagWorker.resumeAfterYouTubeReconnect();
+    monetization.resumeAfterYouTubeReconnect();
     delete req.session.oauthState;
     seo.schedule(true);
     market.schedule();
