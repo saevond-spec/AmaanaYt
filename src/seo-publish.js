@@ -192,10 +192,23 @@ function thumbnailChoiceFor(item) {
 }
 
 const YOUTUBE_THUMBNAIL_HOSTS = new Set(['i.ytimg.com', 'img.youtube.com']);
+const YOUTUBE_THUMBNAIL_DIMENSIONS = {
+  default: { width: 120, height: 90 },
+  medium: { width: 320, height: 180 },
+  high: { width: 480, height: 360 },
+  standard: { width: 640, height: 480 },
+  maxres: { width: 1280, height: 720 },
+  fhd: { width: 1920, height: 1080 },
+  qhd: { width: 2560, height: 1440 },
+  uhd: { width: 3840, height: 2160 }
+};
 
 async function youtubeThumbnailImage(video, fetchImpl = fetch) {
-  const candidates = Object.values(video?.snippet?.thumbnails || {})
-    .filter((image) => image?.url && Number(image.width) >= 480 && Number(image.height) >= 270)
+  const candidates = Object.entries(video?.snippet?.thumbnails || {}).map(([variant, image]) => {
+    const fallback = YOUTUBE_THUMBNAIL_DIMENSIONS[variant] || {};
+    return { ...image, width: Number(image?.width) || fallback.width,
+      height: Number(image?.height) || fallback.height };
+  }).filter((image) => image?.url && Number(image.width) >= 480 && Number(image.height) >= 270)
     .sort((left, right) => Number(right.width) * Number(right.height) - Number(left.width) * Number(left.height));
   if (!candidates.length) throw problem('YouTube did not provide a usable thumbnail image', 422);
 
@@ -225,7 +238,7 @@ async function youtubeThumbnailImage(video, fetchImpl = fetch) {
       }
       const extension = contentType === 'image/png' ? '.png' :
         contentType === 'image/webp' ? '.webp' : '.jpg';
-      return { buffer, extension };
+      return { buffer, extension, width: Number(image.width), height: Number(image.height) };
     } catch (error) {
       lastError = error;
     }
@@ -246,7 +259,8 @@ async function uploadSeoThumbnail(videoId, video, item, { youtube, fetchImpl, re
   const outputPath = path.join(directory, 'thumbnail.jpg');
   try {
     await fs.writeFile(inputPath, image.buffer);
-    await renderThumbnail(inputPath, outputPath, { headline });
+    await renderThumbnail(inputPath, outputPath, { headline,
+      sourceWidth: image.width, sourceHeight: image.height });
     const output = await fs.readFile(outputPath);
     if (output.length < 4 || output[0] !== 0xff || output[1] !== 0xd8) {
       throw new Error('Thumbnail renderer did not produce a JPEG');
