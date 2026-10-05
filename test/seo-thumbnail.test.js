@@ -53,6 +53,7 @@ function makeHarness(count, options = {}) {
   let dailyWrites = 0;
   let metadataWrites = 0;
   let thumbnailWrites = 0;
+  let thumbnailRenderOptions = null;
   const store = {
     listSeoAutoCandidates: async (limit = 20) => [...rows.values()].filter((row) =>
       row.source.privacyStatus === 'public' && row.package &&
@@ -101,7 +102,8 @@ function makeHarness(count, options = {}) {
   const publisher = createSeoPublisher({
     store, youtube,
     fetchImpl: options.fetchImpl || (async () => responseImage()),
-    renderThumbnail: async (_input, output) => {
+    renderThumbnail: async (_input, output, renderOptions) => {
+      thumbnailRenderOptions = renderOptions;
       await require('node:fs/promises').writeFile(output, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
     },
     logger: { info() {}, warn() {} }
@@ -110,7 +112,8 @@ function makeHarness(count, options = {}) {
     get dailyWrites() { return dailyWrites; },
     resetDay() { dailyWrites = 0; },
     get metadataWrites() { return metadataWrites; },
-    get thumbnailWrites() { return thumbnailWrites; }
+    get thumbnailWrites() { return thumbnailWrites; },
+    get thumbnailRenderOptions() { return thumbnailRenderOptions; }
   };
 }
 
@@ -127,6 +130,10 @@ test('rates all concepts and applies the highest grounded thumbnail option', asy
     { visual: 'Floating raider gameplay', overlay: 'FLOATING RAIDER',
       palette: 'Cyan and amber', hook: 'Unexpected movement' }
   ];
+  h.live.get(row.videoId).snippet.thumbnails = {
+    maxres: { url: 'https://i.ytimg.com/vi/' + row.videoId + '/maxresdefault.jpg' },
+    uhd: { url: 'https://i.ytimg.com/vi/' + row.videoId + '/uhddefault.jpg' }
+  };
   Object.assign(h.live.get('thumb000000').snippet, row.source);
 
   const result = await h.publisher.publishVideo(row.videoId);
@@ -136,6 +143,8 @@ test('rates all concepts and applies the highest grounded thumbnail option', asy
   assert.equal(result.thumbnailSelection.option, 2);
   assert.equal(result.thumbnailSelection.method, 'evidence_readability_heuristic');
   assert.ok(result.thumbnailSelection.score >= 60);
+  assert.equal(h.thumbnailRenderOptions.sourceWidth, 3840);
+  assert.equal(h.thumbnailRenderOptions.sourceHeight, 2160);
   assert.equal(h.thumbnailWrites, 1);
   assert.equal(row.source.privacyStatus, 'public');
 });
