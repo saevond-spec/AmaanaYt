@@ -3,7 +3,6 @@ const os = require('os');
 const path = require('path');
 const { descriptionChapters } = require('./seo-package');
 const { createThumbnailFromImage, thumbnailHeadline } = require('./video');
-const { rateThumbnailBriefs } = require('./thumbnail-rating');
 
 function problem(message, status = 400) {
   const error = new Error(message);
@@ -154,41 +153,20 @@ function safeHeadline(value) {
     words.every((word) => /^[A-Z0-9]+$/.test(word));
 }
 
-function thumbnailChoiceFor(item) {
+function thumbnailHeadlineFor(item) {
   const source = item.source || {};
-  const result = rateThumbnailBriefs(item.package?.thumbnails || [], {
-    source, context: item.context, analysis: item.analysis
-  });
-  const selected = result.selected;
-  if (selected) {
-    const brief = item.package.thumbnails[selected.index];
-    if (safeHeadline(brief?.overlay)) {
-      return {
-        headline: brief.overlay.trim().toUpperCase(),
-        selection: {
-          option: selected.index + 1,
-          score: selected.score,
-          grade: selected.grade,
-          method: result.method,
-          reasons: selected.reasons
-        }
-      };
-    }
-  }
+  const evidence = [
+    source.title, source.description, ...(source.tags || []),
+    item.context?.takeaways, item.analysis?.summary, item.analysis?.visualContext,
+    ...(item.analysis?.topics || []), ...(item.analysis?.keywords || [])
+  ].filter(Boolean).join(' ').toLocaleLowerCase();
+  const proposed = String(item.package?.thumbnails?.[0]?.overlay || '').trim();
+  if (safeHeadline(proposed) && evidence.includes(proposed.toLocaleLowerCase())) return proposed.toUpperCase();
 
   if (!/[A-Za-z0-9]/.test(String(source.title || ''))) return null;
   const fromTitle = thumbnailHeadline(source.title);
   if (!safeHeadline(fromTitle) || fromTitle === 'SAEVOND HIGHLIGHT') return null;
-  return {
-    headline: fromTitle,
-    selection: {
-      option: null,
-      score: null,
-      grade: null,
-      method: 'title_fallback',
-      reasons: ['No grounded thumbnail concept met the readability and selection threshold; text was derived from the existing video title.']
-    }
-  };
+  return fromTitle;
 }
 
 const YOUTUBE_THUMBNAIL_HOSTS = new Set(['i.ytimg.com', 'img.youtube.com']);
@@ -233,9 +211,8 @@ async function youtubeThumbnailImage(video, fetchImpl = fetch) {
   throw lastError || problem('YouTube thumbnail image could not be downloaded', 502);
 }
 
-async function uploadSeoThumbnail(videoId, video, item, { youtube, fetchImpl, renderThumbnail, selection }) {
-  const choice = selection || thumbnailChoiceFor(item);
-  const headline = choice?.headline;
+async function uploadSeoThumbnail(videoId, video, item, { youtube, fetchImpl, renderThumbnail }) {
+  const headline = thumbnailHeadlineFor(item);
   if (!headline) return { state: 'skipped', reason: 'No supported, evidence-grounded thumbnail text is available' };
   if (typeof youtube.setThumbnail !== 'function') {
     return { state: 'skipped', reason: 'YouTube thumbnail upload is unavailable' };
@@ -253,7 +230,7 @@ async function uploadSeoThumbnail(videoId, video, item, { youtube, fetchImpl, re
     }
     if (output.length > 50 * 1024 * 1024) throw problem('Generated thumbnail exceeds YouTube’s upload limit', 413);
     await youtube.setThumbnail(videoId, outputPath);
-    return { state: 'applied', headline, selection: choice.selection };
+    return { state: 'applied', headline };
   } finally {
     await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
   }
@@ -276,14 +253,12 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
       result.thumbnailState = thumbnail.state;
       if (thumbnail.reason) result.thumbnailReason = thumbnail.reason;
       if (thumbnail.headline) result.thumbnailHeadline = thumbnail.headline;
-      if (thumbnail.selection) result.thumbnailSelection = thumbnail.selection;
       if (thumbnail.state === 'applied') result.thumbnailAt = at;
       else if (prior.thumbnailAt) result.thumbnailAt = prior.thumbnailAt;
     } else if (prior.thumbnailState) {
       result.thumbnailState = prior.thumbnailState;
       if (prior.thumbnailReason) result.thumbnailReason = prior.thumbnailReason;
       if (prior.thumbnailHeadline) result.thumbnailHeadline = prior.thumbnailHeadline;
-      if (prior.thumbnailSelection) result.thumbnailSelection = prior.thumbnailSelection;
       if (prior.thumbnailAt) result.thumbnailAt = prior.thumbnailAt;
     }
     await store.markSeoAutoResult(videoId, result);
@@ -315,18 +290,15 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
     }
 
     let thumbnail = thumbnailDone
-      ? { state: prior.thumbnailState, reason: prior.thumbnailReason, headline: prior.thumbnailHeadline,
-        selection: prior.thumbnailSelection }
+      ? { state: prior.thumbnailState, reason: prior.thumbnailReason, headline: prior.thumbnailHeadline }
       : null;
-    let selectedThumbnail = null;
     let headline = null;
     if (!thumbnailDone) {
-      selectedThumbnail = thumbnailChoiceFor(item);
-      headline = selectedThumbnail?.headline || null;
+      headline = thumbnailHeadlineFor(item);
       if (!headline) thumbnail = { state: 'skipped',
         reason: 'No supported, evidence-grounded thumbnail text is available' };
       else if (typeof youtube.setThumbnail !== 'function') thumbnail = { state: 'skipped',
-        reason: 'YouTube thumbnail upload is unavailable', selection: selectedThumbnail.selection };
+        reason: 'YouTube thumbnail upload is unavailable' };
     }
     const metadataWritePending = Boolean(edit);
     const thumbnailWritePending = Boolean(headline && !thumbnailDone);
@@ -393,9 +365,7 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
 
     if (thumbnailWritePending && metadata?.state !== 'retry') {
       try {
-        const result = await uploadSeoThumbnail(videoId, video, item, {
-          youtube, fetchImpl, renderThumbnail, selection: selectedThumbnail
-        });
+        const result = await uploadSeoThumbnail(videoId, video, item, { youtube, fetchImpl, renderThumbnail });
         thumbnail = result;
         if (result.state === 'applied') logger.info?.('SEO thumbnail applied to public video ' + videoId);
       } catch (error) {

@@ -21,20 +21,22 @@ function candidatePackage(id) {
     description: 'ARC Raiders gameplay near the Seed Vault. A floating raider appears during the extraction fight.',
     tags: ['ARC Raiders', 'Seed Vault', 'floating raider', 'gameplay']
   };
+  const briefs = [
+    { overlay: 'FLOATING RAIDER', visual: 'Gameplay image of the floating raider',
+      palette: 'Amber and cyan', hook: 'Unexpected movement during extraction' },
+    { overlay: 'SEED VAULT', visual: 'Seed Vault extraction scene',
+      palette: 'Bright amber against dark blue', hook: 'The fight reaches the Seed Vault' },
+    { overlay: 'RAREST BLUEPRINT', visual: 'Blueprint close-up',
+      palette: 'Gold and black', hook: 'The rarest blueprint appears' }
+  ];
+  const rotation = (id - 1) % briefs.length;
   return {
     source,
     context: { takeaways: '' },
     analysis: { summary: 'The raider floats near the Seed Vault during extraction.',
       visualContext: 'Gameplay shows the floating raider at the Seed Vault.',
       topics: ['ARC Raiders', 'Seed Vault'], keywords: ['floating raider', 'extraction'] },
-    briefs: [
-      { overlay: 'FLOATING RAIDER', visual: 'Gameplay image of the floating raider',
-        palette: 'Amber and cyan', hook: 'Unexpected movement during extraction' },
-      { overlay: 'SEED VAULT', visual: 'Seed Vault extraction scene',
-        palette: 'Bright amber against dark blue', hook: 'The fight reaches the Seed Vault' },
-      { overlay: 'RAREST BLUEPRINT', visual: 'Blueprint close-up',
-        palette: 'Gold and black', hook: 'The rarest blueprint appears' }
-    ]
+    briefs: briefs.slice(rotation).concat(briefs.slice(0, rotation))
   };
 }
 
@@ -72,7 +74,6 @@ function simulateTwoYears(input = {}) {
 
   let nextId = initialPublicBacklog;
   let initialRemaining = initialPublicBacklog;
-  let attempts = 0;
   for (let day = 0; day < days; day += 1) {
     for (let count = 0; count < newPublicVideosPerDay; count += 1) {
       nextId += 1;
@@ -86,7 +87,6 @@ function simulateTwoYears(input = {}) {
       if (index < 0) break;
       const [job] = queue.splice(index, 1);
       capacity -= 1;
-      attempts += 1;
       job.attempts += 1;
 
       if (!job.selection) {
@@ -126,11 +126,10 @@ function simulateTwoYears(input = {}) {
 
   metrics.remainingEligibleQueueAtHorizon = queue.length;
   const eligibleAdded = initialPublicBacklog + newPublicVideosPerDay * days;
-  const peakDailyVideoLimit = dailyLimit;
   const dailyMaxApiUnits = dailyLimit * 100;
   return {
     title: 'Two-year thumbnail selection capacity simulation',
-    note: 'Synthetic workflow load test only. Ratings rank text concepts by evidence and readability; the model does not predict CTR, watch time, views, or revenue and does not evaluate thumbnail pixels.',
+    note: 'Synthetic workflow load test only. Ratings rank text concepts by evidence, readability, topic fit, title complement, and the fixed high-contrast text treatment; the model does not predict CTR, watch time, views, or revenue and does not evaluate image composition or thumbnail pixels.',
     assumptions: {
       startDate: start.toISOString().slice(0, 10),
       endDate: end.toISOString().slice(0, 10),
@@ -165,4 +164,3 @@ if (require.main === module) {
 }
 
 module.exports = { simulateTwoYears };
-

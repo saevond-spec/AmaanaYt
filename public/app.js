@@ -483,7 +483,7 @@ function renderSeoVideo(item) {
     `SEO thumbnail updated: ${item.autoResult.thumbnailHeadline || 'thumbnail'}`));
   const thumbnailSelection = item.autoResult?.thumbnailSelection;
   if (thumbnailSelection?.score != null) card.append(element('p', 'draft-meta',
-    `Thumbnail rating: ${thumbnailSelection.score}/100 (${thumbnailSelection.grade}); option ${thumbnailSelection.option} selected by evidence/readability heuristic, not a YouTube experiment.`));
+    `Thumbnail rating: ${thumbnailSelection.score}/100 (${thumbnailSelection.grade}); option ${thumbnailSelection.option} selected by evidence/readability/contrast heuristic, not a YouTube experiment.`));
   if (item.autoResult?.thumbnailState === 'skipped') card.append(element('p', 'draft-meta',
     `SEO thumbnail skipped: ${item.autoResult.thumbnailReason}`));
   if (item.autoResult?.thumbnailState === 'retry') card.append(element('p', 'draft-meta',
@@ -510,7 +510,7 @@ function renderSeoVideo(item) {
         `${ratingText}${brief.overlay}\nVisual: ${brief.visual}\nPalette: ${brief.palette}\nHook: ${brief.hook}`));
     });
     details.append(seoHeading('How ratings work',
-      'Evidence and text-readability heuristic only. It does not inspect the image pixels or predict CTR, views, or watch time.'));
+      'Evidence, short-text readability, fixed text contrast, topic fit, and title-complement heuristic only. It does not inspect image pixels or layout, or predict CTR, views, or watch time. Use eligible YouTube Studio Test & Compare experiments for performance evidence.'));
     details.append(seoHeading('Full description', pkg.description || ''));
     details.append(seoHeading('Tags', (pkg.tags || []).join(', ')));
     details.append(seoHeading('Pinned comment', pkg.pinnedComment || ''));

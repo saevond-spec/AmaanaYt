@@ -29,6 +29,9 @@ test('rates three options, excludes unsupported claims, and selects the highest 
   assert.equal(result.ratings[2].eligible, true);
   assert.ok(result.ratings[1].score >= 60);
   assert.ok(result.ratings[2].score >= 60);
+  assert.equal(result.ratings[1].components.contrast, 5);
+  assert.equal(Object.values(result.ratings[1].components).reduce((sum, value) => sum + value, 0),
+    result.ratings[1].score);
   assert.equal(result.selectedIndex, result.ratings[1].score > result.ratings[2].score ? 1 : 2);
   assert.equal(result.selected.score, result.ratings[result.selectedIndex].score);
   assert.match(result.method, /heuristic/);
@@ -63,9 +66,9 @@ test('two-year simulation is stable, retries transient limits, and never touches
   assert.equal(result.outcome.rejectedCandidates, 1730);
   assert.equal(result.outcome.retriesAfterSimulatedRateLimit, 46);
   assert.equal(result.outcome.daysToClearInitialPublicBacklog, 21);
+  assert.deepEqual(result.outcome.selectedOptionCounts, { '1': 577, '2': 577, '3': 576 });
   assert.equal(result.outcome.remainingEligibleQueueAtHorizon, 0);
   assert.equal(result.outcome.privateOrUnlistedWrites, 0);
   assert.equal(result.outcome.privacyInvariant, true);
   assert.equal(Object.hasOwn(result.outcome, 'predictedViews'), false);
 });
-
