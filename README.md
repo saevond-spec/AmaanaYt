@@ -310,7 +310,6 @@ Use square or vertical video no longer than three minutes. For gameplay, 1080×1
 
 New Google API projects can be limited to private API uploads until Google completes an API compliance audit. Private drafts will still work, but public automation may require that audit.
 
-
 ## Low-view SEO triage
 
 YouTube's current guidance says tags can help correct common spelling mistakes but are not essential for discovery. Titles, thumbnails, and descriptions shape how viewers understand a video, while viewer response signals appeal, engagement, and satisfaction. Amaana's low-view queue is therefore a work-order heuristic: it sorts public videos with known lower view counts first for SEO review, analysis, and eligible publishing. It does not treat an `@saevond` tag as evidence of improved YouTube or Google placement, or promise that low-view priority will improve placement. It does not rewrite metadata solely because a video has few views.

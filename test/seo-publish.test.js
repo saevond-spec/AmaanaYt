@@ -270,7 +270,7 @@ test('channel keywords derive from analyzed public videos and retain existing de
 test('worker requeues one older public package for footage analysis when Gemini is available', async () => {
   let queued = 0;
   const state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
-    completed: true, enabled: true };
+    completed: true, viewPriorityScanVersion: 1, enabled: true };
   const store = {
     getSeoSyncState: async () => state,
     saveSeoSyncState: async () => {},
@@ -423,7 +423,7 @@ test('worker reports missing YouTube connection once without accessing the catal
 
 test('one-time owner approval resumes a paused catalog, then respects a later manual pause', async () => {
   let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
-    completed: true, enabled: false };
+    completed: true, viewPriorityScanVersion: 1, enabled: false };
   const logs = [];
   const store = {
     getSeoSyncState: async () => state,

@@ -85,7 +85,7 @@ test('worker caches public video analysis and reuses it on regeneration', async 
   const finished = [];
   const store = {
     getSeoSyncState: async () => ({ channelId: 'channel-1', recentAt: new Date().toISOString(),
-      completed: true, enabled: true }),
+      completed: true, viewPriorityScanVersion: 1, enabled: true }),
     saveSeoSyncState: async () => {},
     seoCounts: async () => ({ attemptedToday: 0 }),
     claimSeoVideo: async () => claimed++ < 2
@@ -126,7 +126,7 @@ test('worker caches public video analysis and reuses it on regeneration', async 
 
 test('analysis 503 pauses only analysis while metadata SEO generation continues', async () => {
   let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
-    completed: true, enabled: true };
+    completed: true, viewPriorityScanVersion: 1, enabled: true };
   let claimed = 0;
   let nativeCalls = 0;
   const finished = [];
@@ -168,7 +168,7 @@ test('private uploads skip YouTube URL analysis', async () => {
   let generated;
   const store = {
     getSeoSyncState: async () => ({ channelId: 'channel-1', recentAt: new Date().toISOString(),
-      completed: true, enabled: true }),
+      completed: true, viewPriorityScanVersion: 1, enabled: true }),
     saveSeoSyncState: async () => {},
     seoCounts: async () => ({ attemptedToday: 0 }),
     claimSeoVideo: async () => claimed ? null : (claimed = true, {
