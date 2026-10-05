@@ -105,12 +105,15 @@ function automaticVideoEdit(item) {
   if (!description || Buffer.byteLength(description, 'utf8') > 5000) {
     throw problem('Description exceeds 5,000 bytes');
   }
-  const tags = [];
   const originalTags = prior && sameTags(source.tags, prior.tags) ? prior.originalTags : source.tags;
-  for (const tag of [...(originalTags || []), ...(pkg.tags || [])]) {
-    if (typeof tag !== 'string' || !tag.trim() || tags.some((part) => part.toLowerCase() === tag.trim().toLowerCase())) continue;
-    if ([...tags, tag.trim()].join(',').length > 450 || tags.length >= 30) break;
-    tags.push(tag.trim());
+  const tags = [];
+  for (const tag of [...(pkg.tags || []), ...(originalTags || [])]) {
+    if (typeof tag !== 'string' || !tag.trim()) continue;
+    const value = tag.trim();
+    if (tags.some((part) => part.toLowerCase() === value.toLowerCase())) continue;
+    if (tags.length >= 30) break;
+    if ([...tags, value].join(',').length > 450) continue;
+    tags.push(value);
   }
   return { title, description, tags };
 }
