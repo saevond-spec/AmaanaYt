@@ -27,6 +27,7 @@ async function harness(t, options = {}) {
   const drafts = new Map([[batch.id, batch]]);
   const counters = {
     clipCreates: 0, uploads: [], thumbnailSets: 0, thumbnailCreates: 0,
+    thumbnailSource: null, thumbnailOptions: null,
     shortRenders: 0, seo: [], playlists: [], visibilityMutations: 0,
     publicationChecks: [], publications: [], errors: []
   };
@@ -84,8 +85,10 @@ async function harness(t, options = {}) {
 
   const video = {
     thumbnailHeadline(title) { return title.slice(0, 35); },
-    async createThumbnail(_source, destination) {
+    async createThumbnail(source, destination, thumbnailOptions) {
       counters.thumbnailCreates += 1;
+      counters.thumbnailSource = source;
+      counters.thumbnailOptions = thumbnailOptions;
       if (options.failThumbnailCreateOnce && !thumbnailCreateFailureUsed) {
         thumbnailCreateFailureUsed = true;
         throw new Error('FFmpeg frame extraction failed');
@@ -201,6 +204,8 @@ test('complete production validates media and timestamps, then publishes all out
   assert.equal(parent.publicationStatus, 'published');
   assert.equal(parent.mediaValidation, 'passed');
   assert.equal(parent.thumbnailStatus, 'applied');
+  assert.equal(path.basename(h.counters.thumbnailSource), 'source-0.mp4');
+  assert.equal(h.counters.thumbnailOptions.timestampSeconds, 15);
   assert.equal(parent.seoRegistrationStatus, 'registered');
   assert.equal(shorts.length, 3);
   assert.ok(shorts.every((draft) => draft.status === 'published' &&
