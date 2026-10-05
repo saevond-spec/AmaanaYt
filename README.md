@@ -10,6 +10,8 @@ Generated Shorts can also be sent to the creator's TikTok inbox **one at a time 
 
 Amaana can list and create the channel's YouTube playlists and automatically place confident metadata matches from the existing public, private, and unlisted catalog. New drafts and private/unlisted catalog videos can only go into private playlists; public videos prefer a matching public playlist. Adding a playlist item never changes video visibility.
 
+Playlist matching considers video titles, existing tags, owner topic fields, and generated SEO package tags. When Amaana applies SEO to an eligible public video, the generated focused tags come first; existing tags are retained afterward where YouTube's 30-tag and conservative 450-character limits allow. YouTube says tags are mainly useful for common misspellings, while search relevance centers on the title, description, and video content. Use playlists to group related formats or series, then compare those groups in Analytics over the same time window; tags and playlist placement do not guarantee discovery ([tag guidance](https://support.google.com/youtube/answer/141805), [description tips](https://support.google.com/youtube/answer/12948449), [playlist/content group guidance](https://support.google.com/youtube/answer/13616340)).
+
 ## Five-year capacity simulation
 
 Run `npm run simulate:five-years` to estimate pipeline volume, SEO analysis backlog, safe write throughput, and YouTube API quota use over five years. The default scenario assumes one six-hour Twitch VOD per day, three selected moments per VOD, and a 1,000-video public-library stress cohort with 30% missing analysis. These are adjustable load-test assumptions, not channel measurements.
