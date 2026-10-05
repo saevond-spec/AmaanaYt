@@ -122,3 +122,28 @@ test('fails closed on YouTube research errors and records a warning', async () =
   assert.equal(state.budget().used, 1);
   assert.equal(state.warnings(), 1);
 });
+
+test('backs off scheduler failures for five minutes instead of retrying on every health check', async () => {
+  const currentTime = { value: NOW };
+  const state = fixture({
+    currentTime,
+    youtube: {
+      isConnected: async () => true,
+      ownedChannel: async () => { throw new Error('invalid_grant'); }
+    }
+  });
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+  state.market.schedule();
+  await flush();
+  assert.equal(state.warnings(), 1);
+
+  state.market.schedule();
+  await flush();
+  assert.equal(state.warnings(), 1);
+
+  currentTime.value += 5 * 60 * 1000;
+  state.market.schedule();
+  await flush();
+  assert.equal(state.warnings(), 2);
+});
