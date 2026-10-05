@@ -160,6 +160,28 @@
           <button id="seoRefresh" class="ghost" type="button">Refresh SEO</button>
         </div>
         <p class="muted">Amaana detects metadata gaps and applies grounded SEO titles, descriptions, and tags to videos that are already public. Private, unlisted, and unpublished videos remain untouched. Existing links and disclosures are preserved. Channel keywords follow topics from analyzed public videos.</p>
+        <p class="muted">Tags can help correct spelling, but they are not evidence of Google ranking lift. Public videos with the fewest known views are listed first. Use Google Search Console's YouTube platform property to compare actual search impressions, clicks, CTR, and average position for those videos.</p>
+        <details class="seo-details google-search-import">
+          <summary>Import Google Search Console performance</summary>
+          <p class="muted">Add or select the <strong>@saevond YouTube platform property</strong> in Search Console. Open its Performance report, choose Google Search (Web), set a date range, and export the Pages or Posts table as CSV. If Google downloads a ZIP, extract and upload its Pages or Posts CSV here. The report contains Google impressions, clicks, CTR, and average position; it measures Google Search performance, not YouTube recommendations.</p>
+          <p class="fine-print">Google's current Search Console API documentation does not expose platform-property reports, so Amaana imports Google's CSV export. Exports may be capped at 1,000 rows; if a low-view video is missing, filter the report to that video URL and import its Pages CSV too.</p>
+          <p class="muted"><a href="https://search.google.com/search-console" target="_blank" rel="noopener noreferrer">Open Search Console</a> · <a href="https://support.google.com/webmasters/answer/17148418?hl=en" target="_blank" rel="noopener noreferrer">Platform property setup</a> · <a href="https://support.google.com/webmasters/answer/12919797?hl=en" target="_blank" rel="noopener noreferrer">CSV export instructions</a></p>
+          <form id="googleSearchImportForm" class="google-search-import-form">
+            <div class="google-search-import-fields">
+              <label for="googleSearchStart">Report start date
+                <input id="googleSearchStart" name="periodStart" type="date" required>
+              </label>
+              <label for="googleSearchEnd">Report end date
+                <input id="googleSearchEnd" name="periodEnd" type="date" required>
+              </label>
+              <label class="google-search-file" for="googleSearchFile">Pages or Posts CSV
+                <input id="googleSearchFile" name="file" type="file" accept=".csv,text/csv" required>
+              </label>
+            </div>
+            <button class="ghost" type="submit">Import this period</button>
+          </form>
+          <p id="googleSearchImportStatus" class="draft-meta" role="status">Each import updates the video rows present in that file; other rows for the same dates stay saved because Search Console exports can be truncated. Use equal-length, non-overlapping date ranges to compare performance.</p>
+        </details>
         <p class="muted">Amaana reads YouTube's spoken-audio language when available, but the public YouTube Data API cannot set it or report generated dubbing tracks. Use <a href="https://studio.youtube.com" target="_blank" rel="noopener noreferrer">YouTube Studio → Languages</a> to verify generated audio and Settings → Channel → Advanced settings for channel dubbing preferences.</p>
         <p id="seoStatus" class="draft-meta">Checking the catalog…</p>
         <div class="seo-field">
