@@ -50,7 +50,7 @@ function metadataFields(video = {}) {
   const context = video.context || {};
   const snippet = video.snippet || {};
   const seoPackage = video.package || video.seoPackage || {};
-  const tags = [video.tags, source.tags, snippet.tags].flat()
+  const tags = [video.tags, source.tags, snippet.tags, seoPackage.tags].flat()
     .filter((value) => typeof value === 'string').join(' ');
   return {
     strong: [
