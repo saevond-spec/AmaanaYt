@@ -1,9 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { createThumbnailFromImage, thumbnailHeadline, thumbnailOverlay } = require('../src/video');
+const ffmpegPath = require('ffmpeg-static');
+const { createThumbnail, createThumbnailFromImage, thumbnailDimensions, thumbnailHeadline, thumbnailOverlay } = require('../src/video');
 
 function jpegDimensions(buffer) {
   let offset = 2;
@@ -41,4 +43,37 @@ test('existing public thumbnail can be composed into a 1280x720 JPEG', async (t)
   assert.equal(image[1], 0xd8);
   assert.deepEqual(jpegDimensions(image), { width: 1280, height: 720 });
   assert.ok(image.length < 50 * 1024 * 1024);
+});
+
+test('thumbnail composition preserves available source detail and caps output at 4K', async (t) => {
+  assert.deepEqual(thumbnailDimensions(1920, 1080), { width: 1920, height: 1080 });
+  assert.deepEqual(thumbnailDimensions(2560, 1440), { width: 2560, height: 1440 });
+  assert.deepEqual(thumbnailDimensions(7680, 4320), { width: 3840, height: 2160 });
+  assert.deepEqual(thumbnailDimensions(480, 360), { width: 640, height: 360 });
+
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'amaana-thumbnail-hires-test-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const source = path.join(directory, 'source-1920.png');
+  const output = path.join(directory, 'result-1920.jpg');
+  await fs.writeFile(source, thumbnailOverlay('HIGH DETAIL', 1920, 1080));
+  await createThumbnailFromImage(source, output, {
+    headline: 'FINAL FIGHT', sourceWidth: 1920, sourceHeight: 1080
+  });
+  const image = await fs.readFile(output);
+  assert.deepEqual(jpegDimensions(image), { width: 1920, height: 1080 });
+});
+
+test('thumbnail frame extraction uses the original video source resolution', async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'amaana-video-thumbnail-test-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const frame = path.join(directory, 'source.png');
+  const source = path.join(directory, 'source.mp4');
+  const output = path.join(directory, 'thumbnail.jpg');
+  await fs.writeFile(frame, thumbnailOverlay('ORIGINAL SOURCE', 1920, 1080));
+  const fixture = spawnSync(ffmpegPath, ['-y', '-loop', '1', '-i', frame, '-t', '1',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-r', '1', source], { encoding: 'utf8' });
+  assert.equal(fixture.status, 0, fixture.stderr || fixture.error?.message);
+  await createThumbnail(source, output, { timestampSeconds: 0, headline: 'ORIGINAL SOURCE' });
+  const image = await fs.readFile(output);
+  assert.deepEqual(jpegDimensions(image), { width: 1920, height: 1080 });
 });

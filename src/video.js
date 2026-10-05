@@ -92,6 +92,21 @@ async function inspectMedia(inputPath) {
   };
 }
 
+async function inspectImageDimensions(inputPath) {
+  if (!ffmpegPath) throw new Error('FFmpeg is not available');
+  const stderr = await new Promise((resolve, reject) => {
+    const child = spawn(ffmpegPath, ['-i', inputPath], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let output = '';
+    child.stderr.on('data', (chunk) => { output = (output + chunk).slice(-12000); });
+    const timer = setTimeout(() => child.kill('SIGKILL'), 30000);
+    child.on('error', (error) => { clearTimeout(timer); reject(error); });
+    child.on('close', () => { clearTimeout(timer); resolve(output); });
+  });
+  const dimensions = stderr.match(/Video:[^\n]*?(\d{2,5})x(\d{2,5})/);
+  if (!dimensions) throw new Error('Could not verify thumbnail source dimensions');
+  return { width: Number(dimensions[1]), height: Number(dimensions[2]) };
+}
+
 function durationMatches(actual, expected) {
   const tolerance = Math.max(1.5, Math.min(3, Number(expected) * 0.02));
   return Number.isFinite(Number(expected)) && Number(expected) > 0 &&
@@ -249,18 +264,38 @@ function fillRect(pixels, width, height, x, y, rectWidth, rectHeight, color) {
   }
 }
 
-function thumbnailOverlay(headline) {
-  const width = 1280;
-  const height = 720;
+function thumbnailDimensions(sourceWidth, sourceHeight) {
+  const width = Number(sourceWidth);
+  const height = Number(sourceHeight);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    throw new Error('Thumbnail source dimensions must be positive numbers');
+  }
+  const widthLimit = Math.min(3840, width, height * 16 / 9);
+  const outputWidth = Math.max(640, Math.floor(widthLimit));
+  return { width: outputWidth, height: Math.round(outputWidth * 9 / 16) };
+}
+
+function thumbnailOverlay(headline, width = 1280, height = 720) {
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1) {
+    throw new Error('Thumbnail overlay dimensions must be positive integers');
+  }
   const pixels = Buffer.alloc(width * height * 4);
-  fillRect(pixels, width, height, 0, 500, width, 220, [0, 0, 0, 210]);
-  fillRect(pixels, width, height, 0, 500, 18, 220, [255, 214, 0, 255]);
+  const bandHeight = Math.round(height * 220 / 720);
+  const bandY = height - bandHeight;
+  const accentWidth = Math.max(1, Math.round(width * 18 / 1280));
+  fillRect(pixels, width, height, 0, bandY, width, bandHeight, [0, 0, 0, 210]);
+  fillRect(pixels, width, height, 0, bandY, accentWidth, bandHeight, [255, 214, 0, 255]);
 
   const text = thumbnailHeadline(headline);
-  const scale = Math.max(8, Math.min(10, Math.floor(1120 / (Math.max(1, text.length) * 6))));
+  const widthScale = width / 1280;
+  const minScale = Math.max(1, Math.round(8 * widthScale));
+  const maxScale = Math.max(minScale, Math.round(10 * widthScale));
+  const scale = Math.max(minScale, Math.min(maxScale,
+    Math.floor(width * 0.875 / (Math.max(1, text.length) * 6))));
   const textWidth = text.length * 6 * scale;
   let x = Math.floor((width - textWidth) / 2);
-  const y = 500 + Math.floor((220 - 7 * scale) / 2);
+  const y = bandY + Math.floor((bandHeight - 7 * scale) / 2);
+  const outlineWidth = Math.max(1, Math.round(2 * widthScale));
   const white = [255, 255, 255, 255];
   const outline = [0, 0, 0, 255];
   for (const character of text) {
@@ -271,7 +306,8 @@ function thumbnailOverlay(headline) {
           if (glyph[row][column] !== '1') continue;
           const left = x + column * scale;
           const top = y + row * scale;
-          fillRect(pixels, width, height, left - 2, top - 2, scale + 4, scale + 4, outline);
+          fillRect(pixels, width, height, left - outlineWidth, top - outlineWidth,
+            scale + 2 * outlineWidth, scale + 2 * outlineWidth, outline);
           fillRect(pixels, width, height, left, top, scale, scale, white);
         }
       }
@@ -285,13 +321,16 @@ async function createThumbnail(inputPath, outputPath, { timestampSeconds = 0, he
   if (!inputPath || !outputPath) throw new Error('A source video and thumbnail output path are required');
   const seek = Number(timestampSeconds);
   if (!Number.isFinite(seek) || seek < 0) throw new Error('Thumbnail timestamp must be non-negative');
+  const source = await inspectMedia(inputPath);
+  const size = thumbnailDimensions(source.width, source.height);
   const overlayPath = outputPath.replace(/\.[^.]+$/, '') + '-overlay.png';
-  await fs.promises.writeFile(overlayPath, thumbnailOverlay(headline));
+  await fs.promises.writeFile(overlayPath, thumbnailOverlay(headline, size.width, size.height));
   try {
     await runFfmpeg([
       '-y', '-ss', String(seek), '-i', inputPath, '-i', overlayPath,
       '-filter_complex',
-      '[0:v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720[base];' +
+      `[0:v]scale=${size.width}:${size.height}:force_original_aspect_ratio=increase,` +
+        `crop=${size.width}:${size.height}[base];` +
         '[base][1:v]overlay=0:0:format=auto,format=yuv420p[out]',
       '-map', '[out]', '-frames:v', '1', '-q:v', '2', outputPath
     ], 2 * 60 * 1000);
@@ -301,17 +340,22 @@ async function createThumbnail(inputPath, outputPath, { timestampSeconds = 0, he
 }
 
 
-async function createThumbnailFromImage(inputPath, outputPath, { headline } = {}) {
+async function createThumbnailFromImage(inputPath, outputPath, { headline, sourceWidth, sourceHeight } = {}) {
   if (!inputPath || !outputPath || !String(headline || '').trim()) {
     throw new Error('A source thumbnail, output path, and headline are required');
   }
+  const source = Number(sourceWidth) > 0 && Number(sourceHeight) > 0
+    ? { width: Number(sourceWidth), height: Number(sourceHeight) }
+    : await inspectImageDimensions(inputPath);
+  const size = thumbnailDimensions(source.width, source.height);
   const overlayPath = outputPath.replace(/\.[^.]+$/, '') + '-overlay.png';
-  await fs.promises.writeFile(overlayPath, thumbnailOverlay(headline));
+  await fs.promises.writeFile(overlayPath, thumbnailOverlay(headline, size.width, size.height));
   try {
     await runFfmpeg([
       '-y', '-i', inputPath, '-i', overlayPath,
       '-filter_complex',
-      '[0:v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720[base];' +
+      `[0:v]scale=${size.width}:${size.height}:force_original_aspect_ratio=increase,` +
+        `crop=${size.width}:${size.height}[base];` +
         '[base][1:v]overlay=0:0:format=auto,format=yuv420p[out]',
       '-map', '[out]', '-frames:v', '1', '-q:v', '2', outputPath
     ], 2 * 60 * 1000);
@@ -321,4 +365,5 @@ async function createThumbnailFromImage(inputPath, outputPath, { headline } = {}
 }
 
 module.exports = { convertLandscapeToShort, assembleHighlights, shortFromHighlight, inspectMedia,
-  validateHighlight, validateShort, createThumbnail, createThumbnailFromImage, thumbnailHeadline, thumbnailOverlay };
+  validateHighlight, validateShort, createThumbnail, createThumbnailFromImage, thumbnailHeadline,
+  thumbnailDimensions, thumbnailOverlay };

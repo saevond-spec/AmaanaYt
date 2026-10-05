@@ -173,12 +173,13 @@ function createHighlightProcessor(dependencies) {
         const selectedIndex = batch.highlights.reduce((best, item, index, all) =>
           (Number(item.score) || 0) > (Number(all[best] && all[best].score) || 0) ? index : best, 0);
         const selected = batch.highlights[selectedIndex];
-        const startOffset = durations.slice(0, selectedIndex).reduce((total, value) => total + value, 0);
-        const frameOffset = startOffset + Math.min(durations[selectedIndex] / 2,
+        const frameOffset = Math.min(durations[selectedIndex] / 2,
           Math.max(0.25, durations[selectedIndex] - 0.25));
         thumbnailHeadline = video.thumbnailHeadline(selected.title || highlightTitle);
         try {
-          await video.createThumbnail(montage, thumbnailPath, {
+          // The montage is normalized to 1280x720. Extract from the original Twitch clip instead
+          // so the thumbnail renderer can retain any higher-resolution source frames.
+          await video.createThumbnail(sources[selectedIndex] || montage, thumbnailPath, {
             timestampSeconds: frameOffset, headline: thumbnailHeadline
           });
           thumbnailReady = true;
