@@ -16,6 +16,16 @@ Run `npm run simulate:five-years` to estimate pipeline volume, SEO analysis back
 
 The simulator forecasts operational capacity only; it does not predict views, revenue, or ranking. Quota values follow the [YouTube API quota calculator](https://developers.google.com/youtube/v3/determine_quota_cost). It includes the separate 100-per-day YouTube `videos.insert` and `search.list` request buckets, then accounts for a 1-unit pre-publish `videos.list` and 50-unit `videos.update` for each generated video. Set `SIM_START_DATE`, `SIM_STREAMS_PER_DAY`, `SIM_HOURS_PER_STREAM`, `SIM_MOMENTS_PER_STREAM`, `SIM_PUBLIC_VIDEO_COHORT`, and `SIM_MISSING_ANALYSIS_SHARE` to model another scenario. Actual project quota can differ.
 
+## Thumbnail ratings and two-year simulation
+
+Amaana rates the three generated thumbnail concepts for exact phrase support in video evidence, short readable overlay text, grounded topic fit, title complement, and the renderer's fixed white-text/dark-backing/yellow-accent treatment. It selects the highest-scoring grounded concept at or above 60/100; otherwise it uses a safe title-derived fallback or skips the thumbnail. This is a text-brief heuristic: it does not inspect image pixels, source quality, or layout, and it does not predict CTR, views, watch time, or revenue.
+
+YouTube recommends accurate titles and thumbnails, simple designs, and readable text. Its desktop Studio Test & Compare feature can test up to three thumbnail variants, title variants, or combinations and chooses a winner by watch-time share. A test usually takes a few days and can take up to two weeks. It is unavailable for Shorts, scheduled live streams, Premieres, private videos, made-for-kids videos, and age-restricted videos. Amaana does not launch or read Studio experiments; use those tests on eligible videos for performance evidence ([YouTube thumbnail and title tips](https://support.google.com/youtube/answer/12340300), [Test & Compare](https://support.google.com/youtube/answer/16391400)).
+
+YouTube recommends 3840×2160 thumbnails for standard videos, with a 16:9 aspect ratio and a minimum width of 640 pixels. Amaana currently composes at 1280×720 from the existing YouTube thumbnail, so its output meets the stated minimum and ratio but is below YouTube's recommended resolution. A higher-resolution source frame would be needed to improve detail without simply enlarging a smaller image ([custom thumbnail requirements](https://support.google.com/youtube/answer/72431)).
+
+Run `npm run simulate:two-years` for a 730-day capacity and recovery simulation. Defaults model 1,000 public videos in the starting queue, one new public video per day, three concepts per video, a 50-video daily processing cap, and one synthetic thumbnail rate limit per 37 videos. Private and unlisted cohorts are excluded. These are test assumptions, not channel or view forecasts.
+
 ## Security model
 
 - Google passwords are never collected.

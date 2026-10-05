@@ -481,6 +481,9 @@ function renderSeoVideo(item) {
     `Automatic SEO will retry: ${item.autoResult.reason}`));
   if (item.autoResult?.thumbnailState === 'applied') card.append(element('p', 'draft-meta',
     `SEO thumbnail updated: ${item.autoResult.thumbnailHeadline || 'thumbnail'}`));
+  const thumbnailSelection = item.autoResult?.thumbnailSelection;
+  if (thumbnailSelection?.score != null) card.append(element('p', 'draft-meta',
+    `Thumbnail rating: ${thumbnailSelection.score}/100 (${thumbnailSelection.grade}); option ${thumbnailSelection.option} selected by evidence/readability/contrast heuristic, not a YouTube experiment.`));
   if (item.autoResult?.thumbnailState === 'skipped') card.append(element('p', 'draft-meta',
     `SEO thumbnail skipped: ${item.autoResult.thumbnailReason}`));
   if (item.autoResult?.thumbnailState === 'retry') card.append(element('p', 'draft-meta',
@@ -498,9 +501,16 @@ function renderSeoVideo(item) {
         (pkg.titles?.[group] || []).map((title, index) => `${index + 1}. ${title}`).join('\n')));
     }
     (pkg.thumbnails || []).forEach((brief, index) => {
-      details.append(seoHeading(`Thumbnail ${index + 1}`,
-        `${brief.overlay}\nVisual: ${brief.visual}\nPalette: ${brief.palette}\nHook: ${brief.hook}`));
+      const rating = brief.rating;
+      const selected = pkg.thumbnailSelection?.selectedIndex === index;
+      const ratingText = rating
+        ? `Rating: ${rating.score}/100 (${rating.grade}) — ${rating.recommendable ? 'recommended' : 'not recommended'}\nReasons: ${rating.reasons.join(' ')}\n`
+        : 'No rating available.\n';
+      details.append(seoHeading(`Thumbnail ${index + 1}${selected ? ' — selected' : ''}`,
+        `${ratingText}${brief.overlay}\nVisual: ${brief.visual}\nPalette: ${brief.palette}\nHook: ${brief.hook}`));
     });
+    details.append(seoHeading('How ratings work',
+      'Evidence, short-text readability, fixed text contrast, topic fit, and title-complement heuristic only. It does not inspect image pixels or layout, or predict CTR, views, or watch time. Use eligible YouTube Studio Test & Compare experiments for performance evidence.'));
     details.append(seoHeading('Full description', pkg.description || ''));
     details.append(seoHeading('Tags', (pkg.tags || []).join(', ')));
     details.append(seoHeading('Pinned comment', pkg.pinnedComment || ''));
