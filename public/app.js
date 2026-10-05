@@ -80,13 +80,22 @@ function showDashboard() {
 
 async function refreshConnection() {
   const status = await api('/api/youtube/status');
-  connectionDot.classList.toggle('connected', status.connected);
-  connectionText.textContent = status.connected ? 'Connected' : 'Not connected';
-  connectionHelp.textContent = status.connected
-    ? (status.canApprove
+  const analyticsNeedsReconnect = status.analyticsNeedsReconnect === true;
+  const analyticsNeedsConsent = status.connected && status.analyticsReadAccess !== true;
+  connectionDot.classList.toggle('connected', status.connected && !analyticsNeedsReconnect);
+  connectionText.textContent = analyticsNeedsReconnect ? 'Reconnect required'
+    : status.connected ? 'Connected' : 'Not connected';
+  const accountHelp = !status.connected ? 'Connect the Google account that owns @saevond.'
+    : status.canApprove
       ? 'Amaana can upload private drafts. You can approve publishing if Google permits it for this API project.'
-      : 'Private uploads work. Reconnect YouTube to grant permission for owner approval and scheduling.')
-    : 'Connect the Google account that owns @saevond.';
+      : 'Private uploads work. Reconnect YouTube to grant permission for owner approval and scheduling.';
+  const analyticsHelp = analyticsNeedsReconnect
+    ? 'Google rejected the saved YouTube token. Reconnect once; the low-view-first Analytics batch will resume after consent.'
+    : analyticsNeedsConsent
+      ? 'Reconnect once and grant youtube.readonly plus yt-analytics.readonly to start the daily low-view-first Analytics collection.'
+      : status.analyticsReadAccess
+        ? 'Daily read-only YouTube Analytics collection is authorized.' : '';
+  connectionHelp.textContent = [accountHelp, analyticsHelp].filter(Boolean).join(' ');
   connectButton.textContent = status.connected ? 'Reconnect YouTube' : 'Connect YouTube';
 }
 
@@ -747,7 +756,9 @@ async function loadSeo() {
       status.completed ? 'Catalog scan complete' : 'Catalog scan in progress',
       coverageStatus,
       status.youtubeAnalyticsAuthorized
-        ? (status.youtubeSearchAnalyticsLastAttemptAt
+        ? (status.youtubeSearchAnalyticsNeedsReconnect
+          ? 'Google rejected the saved YouTube token; reconnect to resume Analytics collection'
+          : status.youtubeSearchAnalyticsLastAttemptAt
           ? 'Read-only search-traffic autopilot active; last batch ' +
             new Date(status.youtubeSearchAnalyticsLastAttemptAt).toLocaleString()
           : 'Read-only search-traffic autopilot enabled')

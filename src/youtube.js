@@ -3,6 +3,7 @@ const { google } = require('googleapis');
 const store = require('./store');
 const { createYouTubePlaylistClient } = require('./youtube-playlists');
 const { ensureCreatorTag, buildCreatorTagUpdate } = require('./channel-tags');
+const { mergeYouTubeOAuthTokens } = require('./youtube-oauth');
 const { summarizeYoutubeSearchPerformance, hasYoutubeAnalyticsReadScopes, youtubeSearchReportQueries } = require('./youtube-search-performance');
 
 const SCOPES = [
@@ -57,8 +58,9 @@ async function authorizationUrl(state) {
 async function exchangeCode(code) {
   const client = await oauthClient();
   const { tokens } = await client.getToken(code);
-  await store.saveTokens(tokens);
-  return tokens;
+  const savedTokens = mergeYouTubeOAuthTokens(await store.getTokens(), tokens, SCOPES);
+  await store.saveTokens(savedTokens);
+  return savedTokens;
 }
 
 async function service() {

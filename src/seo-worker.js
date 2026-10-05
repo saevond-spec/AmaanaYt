@@ -416,8 +416,19 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     return updated;
   }
 
-  return { schedule, run, registerUpload, status, setBackfill,
-    resumeAfterYouTubeReconnect: () => { youtubeAuthBlockedUntil = 0; } };
+  async function resumeAfterYouTubeReconnect() {
+    youtubeAuthBlockedUntil = 0;
+    if (typeof store.getSeoSyncState !== 'function' || typeof store.saveSeoSyncState !== 'function') return;
+    const state = await store.getSeoSyncState();
+    await store.saveSeoSyncState({ ...state,
+      youtubeSearchAnalyticsNeedsReconnect: false,
+      youtubeSearchAnalyticsRetryAfter: null,
+      youtubeSearchAnalyticsLastError: null,
+      youtubeSearchAnalyticsRunDate: null
+    });
+  }
+
+  return { schedule, run, registerUpload, status, setBackfill, resumeAfterYouTubeReconnect };
 }
 
 module.exports = { createSeoWorker };
