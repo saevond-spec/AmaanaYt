@@ -49,7 +49,8 @@ function headerKey(value) {
 
 function findHeader(rows) {
   const pageNames = new Set(['page', 'pages', 'toppage', 'toppages', 'post', 'posts',
-    'toppost', 'topposts', 'url', 'pageurl', 'posturl', 'videourl']);
+    'toppost', 'topposts', 'video', 'videos', 'topvideo', 'topvideos',
+    'url', 'pageurl', 'posturl', 'videourl']);
   for (let index = 0; index < Math.min(rows.length, 30); index += 1) {
     const headers = rows[index].map(headerKey);
     const pageIndex = headers.findIndex((header) => pageNames.has(header));
@@ -61,7 +62,7 @@ function findHeader(rows) {
       return { index, pageIndex, clicksIndex, impressionsIndex, positionIndex };
     }
   }
-  fail('Upload the Search Console Pages or Posts CSV with page/post, clicks, impressions, and position columns.');
+  fail('Upload the Search Console Videos, Pages, or Posts CSV with video/page/post URL, clicks, impressions, and position columns.');
 }
 
 function numericCell(value, label) {
@@ -121,7 +122,7 @@ function parseGoogleSearchConsoleCsv(text) {
     videos.set(videoId, existing);
   }
   if (!videos.size) {
-    fail('No YouTube video URLs were found. Export the Pages or Posts table from the @saevond YouTube platform property.');
+    fail('No YouTube video URLs were found. Export the Videos, Pages, or Posts table from the @saevond YouTube platform property.');
   }
   return [...videos.values()].map((video) => ({
     videoId: video.videoId,
