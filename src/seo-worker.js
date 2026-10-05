@@ -169,6 +169,11 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
         await store.saveSeoSyncState(state);
         logger.info?.('SEO backfill resumed by one-time owner approval');
       }
+      if (state.enabled !== false && state.completed === true && state.viewPriorityScanVersion !== 1) {
+        state = { ...state, cursor: null, completed: false, recentAt: null };
+        await store.saveSeoSyncState(state);
+        logger.info?.('Starting one-time catalog refresh for low-view SEO prioritization');
+      }
       state = { ...state, channelId: channel.id, channelTitle: channel.title };
       catalogScanIncomplete = state.enabled !== false && !state.completed;
       const diagnostic = JSON.stringify({ channelId: channel.id, backfillEnabled: state.enabled !== false,
@@ -196,6 +201,11 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           if (!state.cursor) state.completed = true;
           await store.saveSeoSyncState(state);
         }
+      }
+      if (state.enabled !== false && state.completed === true && state.viewPriorityScanVersion !== 1) {
+        state = { ...state, viewPriorityScanVersion: 1 };
+        await store.saveSeoSyncState(state);
+        logger.info?.('Low-view SEO catalog refresh completed');
       }
       catalogScanIncomplete = state.enabled !== false && !state.completed;
       await assignCatalogPlaylists();

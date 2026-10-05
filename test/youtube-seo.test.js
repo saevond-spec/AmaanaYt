@@ -5,6 +5,28 @@ const { google } = require('googleapis');
 const store = require('../src/store');
 const youtube = require('../src/youtube');
 
+test('catalog metadata request includes statistics needed for view-count triage', async (t) => {
+  const oldYoutube = google.youtube;
+  const oldTokens = store.getTokens;
+  const oldBaseUrl = process.env.BASE_URL;
+  t.after(() => {
+    google.youtube = oldYoutube;
+    store.getTokens = oldTokens;
+    process.env.BASE_URL = oldBaseUrl;
+  });
+  process.env.BASE_URL = 'https://amaana.example.test';
+  store.getTokens = async () => ({ access_token: 'unit-test', expiry_date: Date.now() + 3600000 });
+  let request;
+  google.youtube = () => ({
+    videos: { list: async (params) => { request = params; return { data: { items: [] } }; } }
+  });
+
+  await youtube.videoMetadata(['abcdefghijk']);
+
+  assert.deepEqual(request.part, ['snippet', 'status', 'contentDetails', 'statistics']);
+  assert.match(request.fields, /statistics\(viewCount\)/);
+});
+
 test('video metadata update sends only writable snippet fields and uses the current ETag', async (t) => {
   const oldYoutube = google.youtube;
   const oldTokens = store.getTokens;

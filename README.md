@@ -309,3 +309,12 @@ Market research: YouTube says auto dubbing supports 27 languages and reported mo
 Use square or vertical video no longer than three minutes. For gameplay, 1080×1920 (9:16) is recommended. Confirm music and footage rights before uploading.
 
 New Google API projects can be limited to private API uploads until Google completes an API compliance audit. Private drafts will still work, but public automation may require that audit.
+
+
+## Low-view SEO triage
+
+YouTube's current guidance says tags can help correct common spelling mistakes but are not essential for discovery. Titles, thumbnails, and descriptions shape how viewers understand a video, while viewer response signals appeal, engagement, and satisfaction. Amaana's low-view queue is therefore a work-order heuristic: it sorts public videos with known lower view counts first for SEO review, analysis, and eligible publishing. It does not treat an `@saevond` tag as evidence of improved YouTube or Google placement, or promise that low-view priority will improve placement. It does not rewrite metadata solely because a video has few views.
+
+On its first run after deployment, the worker rescans the existing catalog so older videos also have view counts for triage; the normal sync continues to refresh recent uploads. Videos with unknown counts follow those with known counts. Automatic publication still keeps ready packages ahead of packages needing review and remains limited to public videos. Its SEO metadata writes do not include visibility or status fields.
+
+Use YouTube Studio to diagnose performance before changing titles, thumbnails, or descriptions. Compare impressions and click-through rate with traffic source and audience context, then inspect watch time and retention. YouTube notes that click-through rates for newer videos and videos under 100 views can vary widely, and advises comparing over time. Amaana does not measure Google Search placement. See [YouTube guidance on content performance and tags](https://support.google.com/youtube/answer/16559650?hl=en), [impressions and click-through rate](https://support.google.com/youtube/answer/7628154?hl=en), and [reading impressions and CTR in Analytics](https://support.google.com/youtube/answer/16767369?hl=en).

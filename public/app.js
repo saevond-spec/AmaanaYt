@@ -469,6 +469,19 @@ function renderSeoVideo(item) {
   card.append(studioLanguages);
   if (item.error) card.append(element('p', 'draft-error', item.error));
   card.append(element('p', 'draft-meta', `YouTube visibility: ${item.source.privacyStatus || 'unknown'}`));
+  if (item.source?.privacyStatus === 'public') {
+    const rawViews = String(item.source.viewCount ?? '');
+    const views = /^\d+$/.test(rawViews)
+      ? rawViews.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : null;
+    card.append(element('p', 'draft-meta', views === null
+      ? 'View count unavailable; public videos with known low counts are queued first.'
+      : `YouTube views: ${views} · low-view public videos are queued first. Use Studio impressions, CTR, retention, and traffic sources to assess performance.`));
+    const studioAnalytics = element('a', 'ghost video-link', 'Open YouTube Studio analytics');
+    studioAnalytics.href = `https://studio.youtube.com/video/${encodeURIComponent(item.videoId)}/analytics/tab-overview`;
+    studioAnalytics.target = '_blank';
+    studioAnalytics.rel = 'noopener noreferrer';
+    card.append(studioAnalytics);
+  }
   if (item.playlistResult) card.append(element('p', 'draft-meta',
     'Automatic playlist: ' + playlistAssignmentText(item.playlistResult)));
   const playlistControl = renderPlaylistAdder(item.videoId, item.source.privacyStatus || 'unknown');

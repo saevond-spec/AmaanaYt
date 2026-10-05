@@ -224,8 +224,8 @@ async function videoMetadata(ids) {
   if (!Array.isArray(ids) || ids.length > 50) throw new Error('Request metadata for up to 50 videos');
   if (!ids.length) return [];
   const youtube = await service();
-  const response = await youtube.videos.list({ part: ['snippet', 'status', 'contentDetails'], id: ids,
-    fields: 'items(id,etag,snippet(title,description,tags,publishedAt,channelId,categoryId,defaultLanguage,defaultAudioLanguage),status(privacyStatus),contentDetails(duration))' });
+  const response = await youtube.videos.list({ part: ['snippet', 'status', 'contentDetails', 'statistics'], id: ids,
+    fields: 'items(id,etag,snippet(title,description,tags,publishedAt,channelId,categoryId,defaultLanguage,defaultAudioLanguage),status(privacyStatus),contentDetails(duration),statistics(viewCount))' });
   return response.data.items || [];
 }
 

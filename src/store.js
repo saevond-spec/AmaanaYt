@@ -308,7 +308,16 @@ async function listSeoVideos(limit = 50, offset = 0) {
     p.generated_at AS "generatedAt", p.updated_at AS "updatedAt",
     a.analysis, a.model AS "analysisModel", a.analyzed_at AS "analyzedAt"
     FROM amaana_seo_packages p LEFT JOIN amaana_video_analysis a ON a.video_id = p.video_id
-    ORDER BY (p.source->>'publishedAt') DESC NULLS LAST, p.created_at DESC
+    ORDER BY CASE WHEN p.source->>'privacyStatus' = 'public' THEN 0 ELSE 1 END,
+      CASE WHEN p.source->>'privacyStatus' = 'public'
+        AND p.source->>'viewCount' ~ '^[0-9]+$' THEN 0 ELSE 1 END,
+      CASE WHEN p.source->>'privacyStatus' = 'public'
+        AND p.source->>'viewCount' ~ '^[0-9]+$'
+        THEN (p.source->>'viewCount')::numeric END ASC NULLS LAST,
+      CASE WHEN p.source->>'privacyStatus' = 'public' THEN p.source->>'publishedAt' END ASC NULLS LAST,
+      CASE WHEN p.source->>'privacyStatus' IS DISTINCT FROM 'public'
+        THEN p.source->>'publishedAt' END DESC NULLS LAST,
+      p.created_at DESC
     LIMIT $1 OFFSET $2`, [Math.min(100, Math.max(1, limit)), Math.max(0, offset)]);
   return result.rows;
 }
@@ -444,7 +453,10 @@ async function claimSeoVideo() {
       WHERE source->>'privacyStatus' = 'public'
         AND ((status IN ('queued', 'retry') AND (next_attempt_at IS NULL OR next_attempt_at <= NOW()))
         OR (status = 'generating' AND claimed_at < NOW() - INTERVAL '20 minutes'))
-      ORDER BY (source->>'publishedAt') DESC NULLS LAST, created_at ASC
+      ORDER BY CASE WHEN source->>'viewCount' ~ '^[0-9]+$' THEN 0 ELSE 1 END,
+        CASE WHEN source->>'viewCount' ~ '^[0-9]+$'
+          THEN (source->>'viewCount')::numeric END ASC NULLS LAST,
+        source->>'publishedAt' ASC NULLS LAST, created_at ASC
       LIMIT 1 FOR UPDATE SKIP LOCKED
     )
     UPDATE amaana_seo_packages p SET status = 'generating', claim_token = $1,
@@ -485,7 +497,9 @@ async function listSeoAutoCandidates(limit = 20) {
         WHEN jsonb_typeof(package->'missingEvidence') = 'array'
           THEN jsonb_array_length(package->'missingEvidence')
         ELSE 2147483647 END AS "missingEvidenceCount",
-      generated_at AS "generatedAt"
+      generated_at AS "generatedAt",
+      CASE WHEN source->>'viewCount' ~ '^[0-9]+$'
+        THEN source->>'viewCount' ELSE NULL END AS "viewCount"
     FROM amaana_seo_packages
     WHERE status IN ('ready', 'needs_review')
       AND source->>'privacyStatus' = 'public'
@@ -522,7 +536,10 @@ async function listSeoNeedsAnalysis(limit = 20) {
       AND a.video_id IS NULL
       AND COALESCE(p.context->>'takeaways', '') = ''
       AND p.generated_at < NOW() - INTERVAL '6 hours'
-    ORDER BY p.generated_at ASC LIMIT $1`, [safeLimit]);
+    ORDER BY CASE WHEN p.source->>'viewCount' ~ '^[0-9]+$' THEN 0 ELSE 1 END,
+      CASE WHEN p.source->>'viewCount' ~ '^[0-9]+$'
+        THEN (p.source->>'viewCount')::numeric END ASC NULLS LAST,
+      p.generated_at ASC LIMIT $1`, [safeLimit]);
   return result.rows;
 }
 
