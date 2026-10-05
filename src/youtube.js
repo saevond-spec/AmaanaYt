@@ -250,7 +250,7 @@ async function listOwnedBroadcasts() {
     do {
       const response = await youtube.liveBroadcasts.list({
         part: ['snippet', 'status', 'contentDetails', 'monetizationDetails'],
-        mine: true, broadcastStatus, maxResults: 50,
+        broadcastStatus, broadcastType: 'all', maxResults: 50,
         ...(pageToken ? { pageToken } : {})
       });
       broadcasts.push(...(response.data.items || []));
