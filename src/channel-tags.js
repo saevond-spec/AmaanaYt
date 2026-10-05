@@ -101,9 +101,10 @@ function buildCreatorTagUpdate(video, channelId, options = {}) {
 function isYouTubeAuthorizationError(error) {
   const apiError = error?.response?.data?.error || {};
   const reason = (apiError.errors || []).map((item) => item?.reason || '').join(' ');
+  const status = Number(error?.response?.status || error?.status || apiError.code);
   const text = [error?.code, error?.status, apiError.status, apiError.message, reason, error?.message]
     .filter(Boolean).join(' ').toLocaleLowerCase();
-  return /invalid_grant|invalid credentials|refresh token.{0,30}(expired|revoked|invalid)|(?:expired|revoked).{0,30}refresh token/.test(text);
+  return status === 401 || /invalid_grant|invalid credentials|autherror|unauthenticated|insufficient.{0,30}(scope|permission)|refresh token.{0,30}(expired|revoked|invalid)|(?:expired|revoked).{0,30}refresh token/.test(text);
 }
 
 module.exports = {

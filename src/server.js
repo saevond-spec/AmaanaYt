@@ -481,7 +481,11 @@ app.post('/api/admin/logout', admin, (req, res, next) => {
 
 app.get('/api/youtube/status', admin, async (_req, res, next) => {
   try {
-    res.json({ connected: await youtube.isConnected(), canApprove: await youtube.canApprove() });
+    const [connected, canApprove, analyticsReadAccess, syncState] = await Promise.all([
+      youtube.isConnected(), youtube.canApprove(), youtube.hasAnalyticsReadAccess(), store.getSeoSyncState()
+    ]);
+    res.json({ connected, canApprove, analyticsReadAccess,
+      analyticsNeedsReconnect: syncState.youtubeSearchAnalyticsNeedsReconnect === true });
   } catch (error) {
     next(error);
   }
@@ -642,7 +646,7 @@ app.get('/oauth2/callback', async (req, res, next) => {
     if (!req.query.code) return res.status(400).send('Google did not return an authorization code.');
     await youtube.exchangeCode(req.query.code);
     market.resetBackoff();
-    seo.resumeAfterYouTubeReconnect();
+    await seo.resumeAfterYouTubeReconnect();
     channelTagWorker.resumeAfterYouTubeReconnect();
     monetization.resumeAfterYouTubeReconnect();
     delete req.session.oauthState;

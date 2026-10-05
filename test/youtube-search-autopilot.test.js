@@ -119,6 +119,40 @@ test('autopilot waits for read-only consent and schedules a cooldown after total
     Date.parse('2026-10-06T00:30:00.000Z'));
 });
 
+test('autopilot pauses on revoked OAuth, preserves its cursor, and retries after reconnect', async () => {
+  let calls = 0;
+  let savedState;
+  const storeApi = {
+    async countPublicSeoVideos() { return 10; },
+    async listYoutubeSearchCandidates() {
+      return ['abcdefghijk', 'bbbbbbbbbbb', 'ccccccccccc'].map((videoId) => ({ videoId }));
+    },
+    async saveYoutubeSearchSnapshots() {},
+    async saveSeoSyncState(state) { savedState = state; }
+  };
+  const youtube = {
+    async hasAnalyticsReadAccess() { return true; },
+    async googleSearchTraffic() { calls += 1; throw new Error('invalid_grant'); }
+  };
+  const failed = await runYoutubeSearchAutopilot({ store: storeApi, youtube,
+    state: { youtubeSearchAnalyticsCursor: 4 }, batchSize: 3,
+    now: new Date('2026-10-05T18:30:00.000Z'), logger: { info() {}, warn() {} } });
+  assert.equal(failed.status, 'needs_youtube_reconnect');
+  assert.equal(calls, 2);
+  assert.equal(failed.state.youtubeSearchAnalyticsAttempted, 1);
+  assert.equal(failed.state.youtubeSearchAnalyticsCursor, 4);
+  assert.equal(failed.state.youtubeSearchAnalyticsNeedsReconnect, true);
+  assert.equal(failed.state.youtubeSearchAnalyticsRetryAfter, null);
+  assert.equal(failed.state.youtubeSearchAnalyticsRunDate, undefined);
+  assert.equal(savedState, failed.state);
+
+  const waiting = await runYoutubeSearchAutopilot({ store: storeApi, youtube,
+    state: failed.state, now: new Date('2026-10-05T19:00:00.000Z'),
+    logger: { info() {}, warn() {} } });
+  assert.equal(waiting.status, 'needs_youtube_reconnect');
+  assert.equal(calls, 2);
+});
+
 test('autopilot records an empty window without fabricating metrics', async () => {
   const states = [];
   const result = await runYoutubeSearchAutopilot({

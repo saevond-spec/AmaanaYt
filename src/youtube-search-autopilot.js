@@ -1,4 +1,5 @@
 const { youtubeSearchComparisonWindows } = require('./youtube-search-performance');
+const { isYouTubeAuthorizationError } = require('./channel-tags');
 function cleanError(error) {
   return String(error?.message || 'YouTube Analytics request failed')
     .replace(/[\r\n\t]+/g, ' ').slice(0, 240);
@@ -15,6 +16,9 @@ async function runYoutubeSearchAutopilot({ store, youtube, state = {}, now = new
   if (typeof youtube?.hasAnalyticsReadAccess !== 'function' ||
       !await youtube.hasAnalyticsReadAccess()) {
     return { state, status: 'needs_youtube_analytics_consent', updatedCount: 0, failedCount: 0 };
+  }
+  if (state.youtubeSearchAnalyticsNeedsReconnect === true) {
+    return { state, status: 'needs_youtube_reconnect', updatedCount: 0, failedCount: 0 };
   }
   if (state.youtubeSearchAnalyticsRunDate === today) {
     return { state, status: 'already_ran_today', updatedCount: 0, failedCount: 0 };
@@ -54,8 +58,11 @@ async function runYoutubeSearchAutopilot({ store, youtube, state = {}, now = new
   const candidates = total ? await store.listYoutubeSearchCandidates(limit, offset) : [];
   const errors = [];
   let updatedCount = 0;
+  let attemptedCount = 0;
+  let reconnectRequired = false;
   for (const candidate of candidates) {
     const videoId = String(candidate?.videoId || '');
+    attemptedCount += 1;
     if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
       errors.push('Skipped an invalid catalog video ID');
       continue;
@@ -73,30 +80,36 @@ async function runYoutubeSearchAutopilot({ store, youtube, state = {}, now = new
     } catch (error) {
       errors.push(videoId + ': ' + cleanError(error));
       logger.warn?.('YouTube search analytics sync failed for ' + videoId + ': ' + cleanError(error));
+      if (isYouTubeAuthorizationError(error)) {
+        reconnectRequired = true;
+        break;
+      }
     }
   }
   const failedCount = errors.length;
   const allFailed = candidates.length > 0 && updatedCount === 0;
-  const nextCursor = total ? (offset + candidates.length) % total : 0;
+  const nextCursor = reconnectRequired ? offset : total ? (offset + candidates.length) % total : 0;
   const updatedState = {
     ...state,
     youtubeSearchAnalyticsCursor: nextCursor,
-    youtubeSearchAnalyticsAttempted: candidates.length,
+    youtubeSearchAnalyticsAttempted: attemptedCount,
     youtubeSearchAnalyticsUpdated: updatedCount,
     youtubeSearchAnalyticsFailed: failedCount,
     youtubeSearchAnalyticsPeriodStart: windows.current.startDate,
     youtubeSearchAnalyticsPeriodEnd: windows.current.endDate,
     youtubeSearchAnalyticsLastAttemptAt: timestamp.toISOString(),
     youtubeSearchAnalyticsLastError: failedCount ? errors.slice(0, 3).join(' | ').slice(0, 700) : null,
-    youtubeSearchAnalyticsRetryAfter: allFailed
+    youtubeSearchAnalyticsNeedsReconnect: reconnectRequired,
+    youtubeSearchAnalyticsRetryAfter: reconnectRequired ? null : allFailed
       ? new Date(timestamp.getTime() + 6 * 60 * 60 * 1000).toISOString() : null,
-    ...(allFailed ? {} : { youtubeSearchAnalyticsRunDate: today })
+    ...(allFailed || reconnectRequired ? {} : { youtubeSearchAnalyticsRunDate: today })
   };
   await store.saveSeoSyncState(updatedState);
   logger.info?.('YouTube search analytics autopilot: updated ' + updatedCount + '/' +
     candidates.length + ' low-view-priority public videos for ' + windows.current.startDate +
     '–' + windows.current.endDate);
-  return { state: updatedState, status: allFailed ? 'retry_scheduled' : 'complete',
+  return { state: updatedState, status: reconnectRequired ? 'needs_youtube_reconnect'
+    : allFailed ? 'retry_scheduled' : 'complete',
     updatedCount, failedCount, windows };
 }
 module.exports = { runYoutubeSearchAutopilot, safeCursor };
