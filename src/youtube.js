@@ -3,15 +3,22 @@ const { google } = require('googleapis');
 const store = require('./store');
 const { createYouTubePlaylistClient } = require('./youtube-playlists');
 const { ensureCreatorTag, buildCreatorTagUpdate } = require('./channel-tags');
+const { summarizeYoutubeSearchPerformance, hasYoutubeAnalyticsReadScopes, youtubeSearchReportQueries } = require('./youtube-search-performance');
 
 const SCOPES = [
   'https://www.googleapis.com/auth/youtube.upload',
-  'https://www.googleapis.com/auth/youtube.force-ssl'
+  'https://www.googleapis.com/auth/youtube.force-ssl',
+  'https://www.googleapis.com/auth/youtube.readonly',
+  'https://www.googleapis.com/auth/yt-analytics.readonly'
 ];
 
 async function canApprove() {
   const tokens = await store.getTokens();
   return Boolean(tokens?.scope?.split(/\s+/).includes('https://www.googleapis.com/auth/youtube.force-ssl'));
+}
+
+async function hasAnalyticsReadAccess() {
+  return hasYoutubeAnalyticsReadScopes(await store.getTokens());
 }
 
 async function oauthClient() {
@@ -242,6 +249,19 @@ async function getVideoViews(videoIds) {
   return response.data.items || [];
 }
 
+async function googleSearchTraffic(videoId, startDate, endDate) {
+  const queries = youtubeSearchReportQueries(videoId, startDate, endDate);
+  if (!await hasAnalyticsReadAccess()) {
+    const error = new Error('Reconnect YouTube to grant read-only Analytics access');
+    error.status = 403;
+    throw error;
+  }
+  const auth = await oauthClient();
+  const analytics = google.youtubeAnalytics({ version: 'v2', auth });
+  const [traffic, details] = await Promise.all(queries.map((query) => analytics.reports.query(query)));
+  return summarizeYoutubeSearchPerformance(traffic.data?.rows || [], details.data?.rows || []);
+}
+
 async function listOwnedBroadcasts() {
   const youtube = await service();
   const broadcasts = [];
@@ -344,9 +364,9 @@ async function enablePublicBroadcastAds(broadcast) {
   return response.data;
 }
 
-module.exports = { isConnected, canApprove, authorizationUrl, exchangeCode, uploadPrivate, setThumbnail, publish,
+module.exports = { isConnected, canApprove, hasAnalyticsReadAccess, authorizationUrl, exchangeCode, uploadPrivate, setThumbnail, publish,
   getVideo, updateVideoSeo, updateVideoTags, channelSeo, updateChannelSeo, assertTargetChannel,
-  getVideoViews, ownedChannel, uploadsPage, videoMetadata,
+  getVideoViews, googleSearchTraffic, ownedChannel, uploadsPage, videoMetadata,
   listOwnedBroadcasts, enablePublicBroadcastAds, recentGameVideos,
   listOwnedPlaylists: playlistClient.listOwnedPlaylists,
   listPlaylistVideoIds: playlistClient.listPlaylistVideoIds,

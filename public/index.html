@@ -160,7 +160,8 @@
           <button id="seoRefresh" class="ghost" type="button">Refresh SEO</button>
         </div>
         <p class="muted">Amaana detects metadata gaps and applies grounded SEO titles, descriptions, and tags to videos that are already public. Private, unlisted, and unpublished videos remain untouched. Existing links and disclosures are preserved. Channel keywords follow topics from analyzed public videos.</p>
-        <p class="muted">Tags can help correct spelling, but they are not evidence of Google ranking lift. Public videos with the fewest known views are listed first. Use Google Search Console's YouTube platform property to compare actual search impressions, clicks, CTR, and average position for those videos.</p>
+        <p class="muted">Tags can help correct spelling, but they are not evidence of Google ranking lift. Public videos with the fewest known views are listed first. The read-only YouTube Analytics autopilot refreshes Google-domain referral views and YouTube Search views for public videos in low-view-first batches. Reconnect YouTube once to grant Analytics access.</p>
+        <p class="fine-print">Google-domain referrals count video views attributed to an external Google source; they do not include Search Console impressions or average position. Use the CSV import below for those Google Search metrics.</p>
         <details class="seo-details google-search-import">
           <summary>Import Google Search Console performance</summary>
           <p class="muted">Add or select the <strong>@saevond YouTube platform property</strong> in Search Console. Open its Performance report, choose Google Search (Web), set a date range, and export the Pages or Posts table as CSV. If Google downloads a ZIP, extract and upload its Pages or Posts CSV here. The report contains Google impressions, clicks, CTR, and average position; it measures Google Search performance, not YouTube recommendations.</p>
