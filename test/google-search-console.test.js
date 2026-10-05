@@ -13,6 +13,16 @@ test('imports video page metrics and derives impression-weighted average positio
   }]);
 });
 
+test('imports video URLs from current YouTube property Videos table headers', () => {
+  for (const header of ['Video', 'Videos', 'Top video', 'Top videos']) {
+    const csv = header + ',Clicks,Impressions,CTR,Position\n' +
+      '"https://www.youtube.com/shorts/abcdefghijk",7,70,10%,3.5\n';
+    assert.deepEqual(parseGoogleSearchConsoleCsv(csv), [{
+      videoId: 'abcdefghijk', clicks: 7, impressions: 70, averagePosition: 3.5
+    }]);
+  }
+});
+
 test('recognizes YouTube video formats and rejects playlist or unrelated URLs', () => {
   assert.equal(extractVideoId('https://www.youtube.com/watch?v=abcdefghijk'), 'abcdefghijk');
   assert.equal(extractVideoId('https://youtube.com/shorts/abcdefghijk'), 'abcdefghijk');
@@ -25,7 +35,7 @@ test('recognizes YouTube video formats and rejects playlist or unrelated URLs', 
 
 test('rejects query exports and CSVs with no YouTube video URLs', () => {
   assert.throws(() => parseGoogleSearchConsoleCsv('Query,Clicks,Impressions,Position\ngame,1,2,3'),
-    /Pages or Posts CSV/);
+    /Videos, Pages, or Posts CSV/);
   assert.throws(() => parseGoogleSearchConsoleCsv(
     'Page,Clicks,Impressions,CTR,Position\nhttps://example.com/video,1,2,50%,3'),
   /No YouTube video URLs/);

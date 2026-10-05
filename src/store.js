@@ -81,6 +81,20 @@ function init() {
       );
       CREATE INDEX IF NOT EXISTS amaana_google_search_snapshots_recent_idx
         ON amaana_google_search_snapshots (video_id, period_end DESC);
+      CREATE TABLE IF NOT EXISTS amaana_youtube_search_snapshots (
+        video_id TEXT NOT NULL REFERENCES amaana_seo_packages(video_id) ON DELETE CASCADE,
+        period_start DATE NOT NULL,
+        period_end DATE NOT NULL,
+        google_referral_views BIGINT CHECK (google_referral_views >= 0),
+        google_referral_complete BOOLEAN NOT NULL DEFAULT FALSE,
+        google_detail_rows INTEGER NOT NULL DEFAULT 0 CHECK (google_detail_rows BETWEEN 0 AND 25),
+        youtube_search_views BIGINT NOT NULL DEFAULT 0 CHECK (youtube_search_views >= 0),
+        imported_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (video_id, period_start, period_end),
+        CHECK (period_end >= period_start)
+      );
+      CREATE INDEX IF NOT EXISTS amaana_youtube_search_snapshots_recent_idx
+        ON amaana_youtube_search_snapshots (video_id, period_end DESC);
     `);
   }
   return initialized;
@@ -336,7 +350,24 @@ async function listSeoVideos(limit = 50, offset = 0) {
         WHERE video_id = p.video_id
         ORDER BY period_end DESC, period_start DESC
         LIMIT 2
-      ) snapshot) AS "googleSearchSnapshots"
+      ) snapshot) AS "googleSearchSnapshots",
+    (SELECT jsonb_agg(jsonb_build_object(
+        'periodStart', snapshot.period_start,
+        'periodEnd', snapshot.period_end,
+        'googleSearchReferralViews', snapshot.google_referral_views,
+        'googleSearchReferralComplete', snapshot.google_referral_complete,
+        'googleSearchDetailRows', snapshot.google_detail_rows,
+        'youtubeSearchViews', snapshot.youtube_search_views,
+        'importedAt', snapshot.imported_at
+      ) ORDER BY snapshot.period_end DESC, snapshot.period_start DESC)
+      FROM (
+        SELECT period_start, period_end, google_referral_views, google_referral_complete,
+          google_detail_rows, youtube_search_views, imported_at
+        FROM amaana_youtube_search_snapshots
+        WHERE video_id = p.video_id
+        ORDER BY period_end DESC, period_start DESC
+        LIMIT 2
+      ) snapshot) AS "youtubeSearchSnapshots"
     FROM amaana_seo_packages p LEFT JOIN amaana_video_analysis a ON a.video_id = p.video_id
     ORDER BY CASE WHEN p.source->>'privacyStatus' = 'public' THEN 0 ELSE 1 END,
       CASE WHEN p.source->>'privacyStatus' = 'public'
@@ -350,6 +381,77 @@ async function listSeoVideos(limit = 50, offset = 0) {
       p.created_at DESC
     LIMIT $1 OFFSET $2`, [Math.min(100, Math.max(1, limit)), Math.max(0, offset)]);
   return result.rows;
+}
+
+async function countPublicSeoVideos() {
+  await init();
+  const result = await pool.query(
+    "SELECT COUNT(*)::integer AS count FROM amaana_seo_packages " +
+    "WHERE source->>'privacyStatus' = 'public'");
+  return result.rows[0]?.count || 0;
+}
+
+async function listYoutubeSearchCandidates(limit = 20, offset = 0) {
+  await init();
+  const safeLimit = Math.max(1, Math.min(50, Number.isSafeInteger(limit) ? limit : 20));
+  const safeOffset = Math.max(0, Number.isSafeInteger(offset) ? offset : 0);
+  const result = await pool.query(
+    "SELECT video_id FROM amaana_seo_packages " +
+    "WHERE source->>'privacyStatus' = 'public' " +
+    "ORDER BY CASE WHEN source->>'viewCount' ~ '^[0-9]+$' THEN 0 ELSE 1 END, " +
+    "CASE WHEN source->>'viewCount' ~ '^[0-9]+$' " +
+    "THEN (source->>'viewCount')::numeric END ASC NULLS LAST, " +
+    "CASE WHEN source->>'publishedAt' IS NOT NULL THEN source->>'publishedAt' END ASC NULLS LAST, " +
+    "video_id ASC LIMIT $1 OFFSET $2", [safeLimit, safeOffset]);
+  return result.rows.map((row) => ({ videoId: row.video_id }));
+}
+
+async function saveYoutubeSearchSnapshots(snapshots) {
+  await init();
+  if (!Array.isArray(snapshots) || !snapshots.length || snapshots.length > 100) {
+    throw new Error('Save between 1 and 100 YouTube Analytics video snapshots');
+  }
+  for (const snapshot of snapshots) {
+    if (!/^[A-Za-z0-9_-]{11}$/.test(String(snapshot.videoId || '')) ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(String(snapshot.startDate || '')) ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(String(snapshot.endDate || '')) ||
+        snapshot.startDate > snapshot.endDate ||
+        snapshot.googleSearchReferralViews !== null &&
+          (!Number.isSafeInteger(snapshot.googleSearchReferralViews) || snapshot.googleSearchReferralViews < 0) ||
+        typeof snapshot.googleSearchReferralComplete !== 'boolean' ||
+        !Number.isSafeInteger(snapshot.googleSearchDetailRows) || snapshot.googleSearchDetailRows < 0 ||
+          snapshot.googleSearchDetailRows > 25 ||
+        !Number.isSafeInteger(snapshot.youtubeSearchViews) || snapshot.youtubeSearchViews < 0) {
+      throw new Error('YouTube Analytics snapshot contains invalid video metrics');
+    }
+  }
+  const result = await pool.query(
+    "INSERT INTO amaana_youtube_search_snapshots " +
+    "(video_id, period_start, period_end, google_referral_views, google_referral_complete, " +
+    "google_detail_rows, youtube_search_views, imported_at) " +
+    "SELECT input.video_id, input.period_start, input.period_end, input.google_referral_views, " +
+    "input.google_referral_complete, input.google_detail_rows, input.youtube_search_views, NOW() " +
+    "FROM jsonb_to_recordset($1::jsonb) AS input(" +
+    "video_id TEXT, period_start DATE, period_end DATE, google_referral_views BIGINT, " +
+    "google_referral_complete BOOLEAN, google_detail_rows INTEGER, youtube_search_views BIGINT) " +
+    "JOIN amaana_seo_packages p ON p.video_id = input.video_id " +
+    "WHERE p.source->>'privacyStatus' = 'public' " +
+    "ON CONFLICT (video_id, period_start, period_end) DO UPDATE SET " +
+    "google_referral_views = EXCLUDED.google_referral_views, " +
+    "google_referral_complete = EXCLUDED.google_referral_complete, " +
+    "google_detail_rows = EXCLUDED.google_detail_rows, " +
+    "youtube_search_views = EXCLUDED.youtube_search_views, imported_at = NOW() " +
+    "RETURNING video_id",
+    [JSON.stringify(snapshots.map((snapshot) => ({
+      video_id: snapshot.videoId,
+      period_start: snapshot.startDate,
+      period_end: snapshot.endDate,
+      google_referral_views: snapshot.googleSearchReferralViews,
+      google_referral_complete: snapshot.googleSearchReferralComplete,
+      google_detail_rows: snapshot.googleSearchDetailRows,
+      youtube_search_views: snapshot.youtubeSearchViews
+    })))]);
+  return { savedCount: result.rowCount, skippedCount: snapshots.length - result.rowCount };
 }
 
 async function saveGoogleSearchSnapshots(snapshots, periodStart, periodEnd) {
@@ -645,6 +747,9 @@ module.exports = {
   upsertSeoVideo,
   getSeoVideo,
   listSeoVideos,
+  countPublicSeoVideos,
+  listYoutubeSearchCandidates,
+  saveYoutubeSearchSnapshots,
   saveGoogleSearchSnapshots,
   listSeoChannelCandidates,
   listSeoNeedsPlaylist,

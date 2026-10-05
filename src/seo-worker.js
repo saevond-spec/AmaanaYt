@@ -2,6 +2,7 @@ const { normalizeSource, normalizeContext, generatePackage, createModelCircuitBr
 const { analyzeVideo } = require('./video-analysis');
 const { createSeoPublisher } = require('./seo-publish');
 const { isYouTubeAuthorizationError } = require('./channel-tags');
+const { runYoutubeSearchAutopilot } = require('./youtube-search-autopilot');
 
 function createSeoWorker({ store, youtube, env = process.env, logger = console, sleep,
   generate = generatePackage, analyze = analyzeVideo, market = null, playlistAuto = null }) {
@@ -208,6 +209,21 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
         logger.info?.('Low-view SEO catalog refresh completed');
       }
       catalogScanIncomplete = state.enabled !== false && !state.completed;
+      if (typeof youtube.hasAnalyticsReadAccess === 'function' &&
+          typeof youtube.googleSearchTraffic === 'function' &&
+          typeof store.countPublicSeoVideos === 'function' &&
+          typeof store.listYoutubeSearchCandidates === 'function' &&
+          typeof store.saveYoutubeSearchSnapshots === 'function') {
+        try {
+          const analyticsRun = await runYoutubeSearchAutopilot({ store, youtube, state, logger,
+            batchSize: Number(env.YOUTUBE_SEARCH_ANALYTICS_BATCH_SIZE) || 20 });
+          state = analyticsRun.state || state;
+          if (analyticsRun.updatedCount) logger.info?.('Google referral and YouTube Search metrics refreshed for ' +
+            analyticsRun.updatedCount + ' low-view-priority videos');
+        } catch (error) {
+          logger.warn?.('YouTube search analytics autopilot failed:', error.message);
+        }
+      }
       await assignCatalogPlaylists();
       const coverageAudit = await auditPlaylistCoverage(state);
       if (coverageAudit?.requeuedCount) await assignCatalogPlaylists();
@@ -372,10 +388,13 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   }
 
   async function status() {
-    const [state, counts] = await Promise.all([store.getSeoSyncState(), store.seoCounts()]);
+    const [state, counts, youtubeAnalyticsAuthorized] = await Promise.all([
+      store.getSeoSyncState(), store.seoCounts(),
+      typeof youtube.hasAnalyticsReadAccess === 'function' ? youtube.hasAnalyticsReadAccess() : false
+    ]);
     return { ...state, ...counts, dailyLimit, analysisBatchSize, videoAnalysisEnabled: analysisEnabled,
       providerConfigured: Boolean(env.SEO_AI_API_KEY && env.SEO_AI_MODEL), autoPublishEnabled,
-      catalogPagesPerRun, running };
+      youtubeAnalyticsAuthorized, catalogPagesPerRun, running };
   }
 
   async function setBackfill(enabled, restart = false) {

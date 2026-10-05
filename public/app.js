@@ -524,6 +524,42 @@ function googleSearchSummary(item) {
   return section;
 }
 
+
+function youtubeSearchAnalyticsSummary(item) {
+  const snapshots = Array.isArray(item.youtubeSearchSnapshots) ? item.youtubeSearchSnapshots : [];
+  const current = snapshots[0];
+  if (!current) return null;
+  const googleViews = current.googleSearchReferralViews === null ||
+    current.googleSearchReferralViews === undefined ? null : Number(current.googleSearchReferralViews);
+  const googleText = googleViews === null
+    ? 'unavailable in the top ' + (Number(current.googleSearchDetailRows) || 25) + ' external sources'
+    : current.googleSearchReferralComplete
+      ? formatSearchCount(googleViews)
+      : 'at least ' + formatSearchCount(googleViews);
+  const section = element('div', 'seo-field');
+  section.append(element('h4', '', 'YouTube Analytics search traffic · autopilot'),
+    element('p', 'draft-meta', current.periodStart + '–' + current.periodEnd + ': ' +
+      googleText + ' Google-domain referral views · ' +
+      formatSearchCount(current.youtubeSearchViews) + ' YouTube Search views.'));
+  const previous = snapshots[1];
+  const sameLength = previous && periodDays(current) === periodDays(previous);
+  const nonOverlapping = previous && current.periodStart > previous.periodEnd;
+  if (sameLength && nonOverlapping) {
+    const googleComparable = current.googleSearchReferralComplete && previous.googleSearchReferralComplete &&
+      googleViews !== null && previous.googleSearchReferralViews !== null;
+    section.append(element('p', 'draft-meta',
+      'Vs ' + previous.periodStart + '–' + previous.periodEnd + ': Google-domain referrals ' +
+      (googleComparable
+        ? searchChange(googleViews, previous.googleSearchReferralViews)
+        : 'not comparable because external-source details are incomplete') +
+      ' · YouTube Search views ' +
+      searchChange(current.youtubeSearchViews, previous.youtubeSearchViews) + '.'));
+  }
+  section.append(element('p', 'fine-print',
+    'These are video views attributed to traffic sources, not Google Search impressions, CTR, or average position. Search Console imports remain the ranking-performance source.'));
+  return section;
+}
+
 function renderSeoVideo(item) {
   const card = element('article', 'draft');
   const top = element('div', 'draft-top');
@@ -556,6 +592,8 @@ function renderSeoVideo(item) {
     studioAnalytics.target = '_blank';
     studioAnalytics.rel = 'noopener noreferrer';
     card.append(studioAnalytics);
+    const analyticsSummary = youtubeSearchAnalyticsSummary(item);
+    if (analyticsSummary) card.append(analyticsSummary);
     const searchSummary = googleSearchSummary(item);
     if (searchSummary) card.append(searchSummary);
   }
@@ -708,6 +746,14 @@ async function loadSeo() {
       `${status.appliedTotal || 0} public videos updated by Amaana`,
       status.completed ? 'Catalog scan complete' : 'Catalog scan in progress',
       coverageStatus,
+      status.youtubeAnalyticsAuthorized
+        ? (status.youtubeSearchAnalyticsLastAttemptAt
+          ? 'Read-only search-traffic autopilot active; last batch ' +
+            new Date(status.youtubeSearchAnalyticsLastAttemptAt).toLocaleString()
+          : 'Read-only search-traffic autopilot enabled')
+        : 'Reconnect YouTube to grant read-only Analytics access for search-traffic autopilot',
+      status.youtubeSearchAnalyticsLastError
+        ? 'Analytics sync issue: ' + status.youtubeSearchAnalyticsLastError : null,
       status.providerConfigured ? `${status.attemptedToday}/${status.dailyLimit} AI attempts today (UTC)`
         : 'Configure SEO_AI_API_KEY and SEO_AI_MODEL to create packages',
       status.videoAnalysisEnabled ? 'Video analysis on for public videos' : 'Video analysis off',
