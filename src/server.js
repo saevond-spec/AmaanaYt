@@ -23,6 +23,7 @@ const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries, fin
 const { auditVideo, channelSuggestions, problem, assertVideoMatchesCatalog } = require('./seo-publish');
 const { createSessionStore } = require('./session-store');
 const { canAddVideoToPlaylist } = require('./youtube-playlists');
+const { parseGoogleSearchConsoleCsv } = require('./google-search-console');
 const { createPlaylistAutoAssigner } = require('./playlist-auto');
 
 for (const name of ['BASE_URL', 'DATABASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SESSION_SECRET', 'TOKEN_ENCRYPTION_KEY', 'AGENT_KEY', 'ADMIN_KEY']) {
@@ -39,6 +40,26 @@ const upload = multer({
   limits: { fileSize: 2 * 1024 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => cb(null, file.mimetype.startsWith('video/'))
 });
+const googleSearchCsvUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024, files: 1 }
+});
+
+function uploadGoogleSearchCsv(req, res, next) {
+  googleSearchCsvUpload.single('file')(req, res, (error) => {
+    if (!error) return next();
+    return res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400)
+      .json({ error: error.code === 'LIMIT_FILE_SIZE'
+        ? 'CSV upload must be 5 MB or smaller'
+        : 'Upload one Search Console CSV file' });
+  });
+}
+
+function isIsoDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))) return false;
+  const parsed = new Date(String(value) + 'T00:00:00.000Z');
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
 
 app.set('trust proxy', 1);
 app.use(helmet());
@@ -493,6 +514,34 @@ app.get('/api/seo/videos', admin, async (req, res, next) => {
     res.json((await store.listSeoVideos(50, offset)).map((item) => ({
       ...item, audit: auditVideo(item)
     })));
+  } catch (error) { next(error); }
+});
+
+app.post('/api/seo/google-search/import', admin, uploadGoogleSearchCsv, async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'Select the Pages or Posts CSV exported from Search Console.' });
+    }
+    if (path.extname(req.file.originalname || '').toLowerCase() !== '.csv') {
+      return res.status(400).json({ error: 'Extract the Search Console export and upload its Pages or Posts CSV file.' });
+    }
+    const periodStart = String(req.body?.periodStart || '');
+    const periodEnd = String(req.body?.periodEnd || '');
+    if (!isIsoDate(periodStart) || !isIsoDate(periodEnd) || periodStart > periodEnd) {
+      return res.status(400).json({ error: 'Enter valid dates matching the Search Console report.' });
+    }
+    let snapshots;
+    try {
+      snapshots = parseGoogleSearchConsoleCsv(req.file.buffer.toString('utf8'));
+    } catch (error) {
+      return res.status(error.status || 400).json({ error: error.message });
+    }
+    const result = await store.saveGoogleSearchSnapshots(snapshots, periodStart, periodEnd);
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      periodStart, periodEnd, parsedCount: snapshots.length,
+      savedCount: result.savedCount, skippedCount: result.skippedCount
+    });
   } catch (error) { next(error); }
 });
 

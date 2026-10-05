@@ -67,6 +67,20 @@ function init() {
         model TEXT NOT NULL,
         analyzed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+      CREATE TABLE IF NOT EXISTS amaana_google_search_snapshots (
+        video_id TEXT NOT NULL REFERENCES amaana_seo_packages(video_id) ON DELETE CASCADE,
+        period_start DATE NOT NULL,
+        period_end DATE NOT NULL,
+        clicks BIGINT NOT NULL DEFAULT 0 CHECK (clicks >= 0),
+        impressions BIGINT NOT NULL DEFAULT 0 CHECK (impressions >= 0),
+        ctr NUMERIC NOT NULL DEFAULT 0 CHECK (ctr >= 0),
+        average_position NUMERIC,
+        imported_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (video_id, period_start, period_end),
+        CHECK (period_end >= period_start)
+      );
+      CREATE INDEX IF NOT EXISTS amaana_google_search_snapshots_recent_idx
+        ON amaana_google_search_snapshots (video_id, period_end DESC);
     `);
   }
   return initialized;
@@ -306,7 +320,23 @@ async function listSeoVideos(limit = 50, offset = 0) {
   const result = await pool.query(`SELECT p.video_id AS "videoId", p.source, p.context, p.package, p.status, p.attempts,
     p.error, p.applied, p.auto_result AS "autoResult", p.playlist_result AS "playlistResult",
     p.generated_at AS "generatedAt", p.updated_at AS "updatedAt",
-    a.analysis, a.model AS "analysisModel", a.analyzed_at AS "analyzedAt"
+    a.analysis, a.model AS "analysisModel", a.analyzed_at AS "analyzedAt",
+    (SELECT jsonb_agg(jsonb_build_object(
+        'periodStart', snapshot.period_start,
+        'periodEnd', snapshot.period_end,
+        'clicks', snapshot.clicks,
+        'impressions', snapshot.impressions,
+        'ctr', snapshot.ctr,
+        'averagePosition', snapshot.average_position,
+        'importedAt', snapshot.imported_at
+      ) ORDER BY snapshot.period_end DESC, snapshot.period_start DESC)
+      FROM (
+        SELECT period_start, period_end, clicks, impressions, ctr, average_position, imported_at
+        FROM amaana_google_search_snapshots
+        WHERE video_id = p.video_id
+        ORDER BY period_end DESC, period_start DESC
+        LIMIT 2
+      ) snapshot) AS "googleSearchSnapshots"
     FROM amaana_seo_packages p LEFT JOIN amaana_video_analysis a ON a.video_id = p.video_id
     ORDER BY CASE WHEN p.source->>'privacyStatus' = 'public' THEN 0 ELSE 1 END,
       CASE WHEN p.source->>'privacyStatus' = 'public'
@@ -320,6 +350,47 @@ async function listSeoVideos(limit = 50, offset = 0) {
       p.created_at DESC
     LIMIT $1 OFFSET $2`, [Math.min(100, Math.max(1, limit)), Math.max(0, offset)]);
   return result.rows;
+}
+
+async function saveGoogleSearchSnapshots(snapshots, periodStart, periodEnd) {
+  await init();
+  if (!Array.isArray(snapshots) || !snapshots.length || snapshots.length > 2000) {
+    throw new Error('Import between 1 and 2,000 Google Search Console video rows');
+  }
+  for (const snapshot of snapshots) {
+    if (!/^[A-Za-z0-9_-]{11}$/.test(String(snapshot.videoId || '')) ||
+        !Number.isSafeInteger(snapshot.clicks) || snapshot.clicks < 0 ||
+        !Number.isSafeInteger(snapshot.impressions) || snapshot.impressions < 0 ||
+        snapshot.averagePosition !== null &&
+          (!Number.isFinite(snapshot.averagePosition) || snapshot.averagePosition < 0)) {
+      throw new Error('Google Search Console snapshot contains invalid video metrics');
+    }
+  }
+
+  const result = await pool.query(`INSERT INTO amaana_google_search_snapshots
+      (video_id, period_start, period_end, clicks, impressions, ctr, average_position, imported_at)
+    SELECT input.video_id, $2::date, $3::date, input.clicks, input.impressions,
+      CASE WHEN input.impressions > 0
+        THEN input.clicks::numeric / input.impressions::numeric ELSE 0 END,
+      input.average_position, NOW()
+    FROM jsonb_to_recordset($1::jsonb) AS input(
+      video_id TEXT, clicks BIGINT, impressions BIGINT, average_position NUMERIC
+    )
+    JOIN amaana_seo_packages p ON p.video_id = input.video_id
+    WHERE p.source->>'privacyStatus' = 'public'
+    ON CONFLICT (video_id, period_start, period_end) DO UPDATE SET
+      clicks = EXCLUDED.clicks,
+      impressions = EXCLUDED.impressions,
+      ctr = EXCLUDED.ctr,
+      average_position = EXCLUDED.average_position,
+      imported_at = NOW()
+    RETURNING video_id AS "videoId", period_start AS "periodStart", period_end AS "periodEnd",
+      clicks, impressions, ctr, average_position AS "averagePosition", imported_at AS "importedAt"`,
+  [JSON.stringify(snapshots.map((snapshot) => ({
+    video_id: snapshot.videoId, clicks: snapshot.clicks, impressions: snapshot.impressions,
+    average_position: snapshot.averagePosition
+  }))), periodStart, periodEnd]);
+  return { savedCount: result.rowCount, skippedCount: snapshots.length - result.rowCount };
 }
 
 async function listSeoChannelCandidates(limit = 100) {
@@ -574,6 +645,7 @@ module.exports = {
   upsertSeoVideo,
   getSeoVideo,
   listSeoVideos,
+  saveGoogleSearchSnapshots,
   listSeoChannelCandidates,
   listSeoNeedsPlaylist,
   markSeoPlaylistResult,

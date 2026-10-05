@@ -29,6 +29,8 @@ const seoPlaylistAudit = document.querySelector('#seoPlaylistAudit');
 const seoPlaylistAuditStatus = document.querySelector('#seoPlaylistAuditStatus');
 const seoPage = document.querySelector('#seoPage');
 const seoChannel = document.querySelector('#seoChannel');
+const googleSearchImportForm = document.querySelector('#googleSearchImportForm');
+const googleSearchImportStatus = document.querySelector('#googleSearchImportStatus');
 let seoOffset = 0;
 let seoEnabled = true;
 let draftPoll = null;
@@ -449,6 +451,79 @@ function seoHeading(label, value) {
   return section;
 }
 
+function formatSearchCount(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? new Intl.NumberFormat().format(number) : '0';
+}
+
+function formatSearchPosition(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number.toFixed(1) : 'not available';
+}
+
+function periodDays(snapshot) {
+  const start = Date.parse(String(snapshot.periodStart || '') + 'T00:00:00Z');
+  const end = Date.parse(String(snapshot.periodEnd || '') + 'T00:00:00Z');
+  return Number.isFinite(start) && Number.isFinite(end) && end >= start
+    ? Math.round((end - start) / 86400000) + 1 : null;
+}
+
+function searchChange(current, previous) {
+  const now = Number(current);
+  const before = Number(previous);
+  if (!Number.isFinite(now) || !Number.isFinite(before)) return 'unavailable';
+  if (before === 0) return now === 0 ? 'unchanged from 0' : 'up from 0 to ' + formatSearchCount(now);
+  const change = ((now - before) / before) * 100;
+  const rounded = Math.round(Math.abs(change) * 10) / 10;
+  return (change > 0 ? '+' : change < 0 ? '−' : '') + rounded + '%';
+}
+
+function googleSearchSummary(item) {
+  const snapshots = Array.isArray(item.googleSearchSnapshots) ? item.googleSearchSnapshots : [];
+  const current = snapshots[0];
+  if (!current) return null;
+  const clicks = Number(current.clicks) || 0;
+  const impressions = Number(current.impressions) || 0;
+  const ctr = impressions ? (clicks / impressions) * 100 : 0;
+  const section = element('div', 'seo-field');
+  section.append(element('h4', '', 'Google Search Console'),
+    element('p', 'draft-meta', current.periodStart + '–' + current.periodEnd + ': ' +
+      formatSearchCount(impressions) + ' impressions · ' + formatSearchCount(clicks) +
+      ' clicks · ' + ctr.toFixed(2) + '% CTR · average position ' +
+      formatSearchPosition(current.averagePosition) + '.'));
+  const previous = snapshots[1];
+  const sameLength = previous && periodDays(current) === periodDays(previous);
+  const nonOverlapping = previous && current.periodStart > previous.periodEnd;
+  if (sameLength && nonOverlapping) {
+    const currentPosition = Number(current.averagePosition);
+    const previousPosition = Number(previous.averagePosition);
+    let positionText = 'average position unavailable in one period';
+    if (Number.isFinite(currentPosition) && currentPosition > 0 &&
+        Number.isFinite(previousPosition) && previousPosition > 0) {
+      const movement = previousPosition - currentPosition;
+      positionText = movement > 0
+        ? 'average position improved from ' + previousPosition.toFixed(1) + ' to ' + currentPosition.toFixed(1)
+        : movement < 0
+          ? 'average position moved down from ' + previousPosition.toFixed(1) + ' to ' + currentPosition.toFixed(1)
+          : 'average position stayed at ' + currentPosition.toFixed(1);
+    }
+    section.append(element('p', 'draft-meta',
+      'Vs ' + previous.periodStart + '–' + previous.periodEnd + ': impressions ' +
+      searchChange(current.impressions, previous.impressions) + ' · clicks ' +
+      searchChange(current.clicks, previous.clicks) + ' · ' + positionText + '.'));
+  } else if (previous) {
+    section.append(element('p', 'draft-meta',
+      'Previous imported period ' + previous.periodStart + '–' + previous.periodEnd + ': ' +
+      formatSearchCount(previous.impressions) + ' impressions, ' +
+      formatSearchCount(previous.clicks) + ' clicks, average position ' +
+      formatSearchPosition(previous.averagePosition) +
+      '. Equal-length, non-overlapping periods are needed for a fair comparison.'));
+  }
+  section.append(element('p', 'fine-print',
+    'Search Console average position is an aggregate Google Search metric, not a fixed rank for every person or location.'));
+  return section;
+}
+
 function renderSeoVideo(item) {
   const card = element('article', 'draft');
   const top = element('div', 'draft-top');
@@ -481,6 +556,8 @@ function renderSeoVideo(item) {
     studioAnalytics.target = '_blank';
     studioAnalytics.rel = 'noopener noreferrer';
     card.append(studioAnalytics);
+    const searchSummary = googleSearchSummary(item);
+    if (searchSummary) card.append(searchSummary);
   }
   if (item.playlistResult) card.append(element('p', 'draft-meta',
     'Automatic playlist: ' + playlistAssignmentText(item.playlistResult)));
@@ -779,6 +856,27 @@ playlistForm.addEventListener('submit', async (event) => {
     playlistCreateButton.textContent = 'Create playlist';
   }
 });
+googleSearchImportForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const button = googleSearchImportForm.querySelector('button[type="submit"]');
+  button.disabled = true;
+  googleSearchImportStatus.textContent = 'Importing Search Console report…';
+  try {
+    const form = new FormData(googleSearchImportForm);
+    const result = await api('/api/seo/google-search/import', { method: 'POST', body: form });
+    googleSearchImportStatus.textContent =
+      'Stored ' + result.savedCount + ' public video rows for ' + result.periodStart + '–' +
+      result.periodEnd + '; ' + result.skippedCount +
+      ' rows did not match public videos in this channel catalog.';
+    googleSearchImportForm.reset();
+    await loadSeo();
+  } catch (error) {
+    googleSearchImportStatus.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+
 connectButton.addEventListener('click', () => window.location.assign('/auth/google'));
 twitchConnectButton.addEventListener('click', () => window.location.assign('/auth/twitch'));
 tiktokConnectButton.addEventListener('click', () => window.location.assign('/auth/tiktok'));
