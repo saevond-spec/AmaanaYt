@@ -26,6 +26,8 @@ YouTube recommends 3840×2160 thumbnails for standard videos, with a 16:9 aspect
 
 Run `npm run simulate:two-years` for a 730-day capacity and recovery simulation. Defaults model 1,000 public videos in the starting queue, one new public video per day, three concepts per video, a 50-video daily processing cap, and one synthetic thumbnail rate limit per 37 videos. Private and unlisted cohorts are excluded. These are test assumptions, not channel or view forecasts.
 
+If YouTube requests begin failing with `invalid_grant`, the saved refresh token may be expired or invalidated; reconnect YouTube from the owner dashboard. Google also documents seven-day refresh-token expiration when an external OAuth consent screen remains in Testing and requests non-basic scopes. Amaana waits five minutes before retrying a failed automatic market refresh so a health check cannot trigger another attempt every few seconds. This cooldown limits retries; it does not restore authorization ([Google OAuth refresh-token guidance](https://developers.google.com/identity/protocols/oauth2#expiration)).
+
 ## Security model
 
 - Google passwords are never collected.

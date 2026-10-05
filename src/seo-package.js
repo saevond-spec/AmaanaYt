@@ -1,4 +1,5 @@
 const MAX_DESCRIPTION = 5000;
+const { rateThumbnailBriefs } = require('./thumbnail-rating');
 
 function clean(value, max = 5000) {
   return String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -142,6 +143,10 @@ function validatePackage(raw, source, context, analysis = null, marketEvidence =
     return { visual: nonempty(item.visual, 'thumbnail visual', 500), overlay,
       palette: nonempty(item.palette, 'thumbnail palette', 150), hook: nonempty(item.hook, 'thumbnail hook', 250) };
   });
+  const thumbnailRating = rateThumbnailBriefs(thumbnails, { source, context, analysis });
+  const ratedThumbnails = thumbnails.map((item, index) => ({
+    ...item, rating: thumbnailRating.ratings[index]
+  }));
   const hook = nonempty(raw.hook, 'description hook', 160);
   if (hook.length < 50 || !hook.toLocaleLowerCase().includes(keyword.toLocaleLowerCase())) {
     throw new Error('The hook must be 50–160 characters and include the primary keyword');
@@ -180,7 +185,16 @@ function validatePackage(raw, source, context, analysis = null, marketEvidence =
   ].join('\n');
   if (description.length > 5000) throw new Error('Description exceeds the YouTube character limit');
   return {
-    primaryKeyword: keyword, titles, thumbnails, hook, paragraphs, chapters,
+    primaryKeyword: keyword, titles,
+    thumbnails: ratedThumbnails,
+    thumbnailSelection: {
+      method: thumbnailRating.method,
+      selectedIndex: thumbnailRating.selectedIndex,
+      score: thumbnailRating.selected?.score ?? null,
+      grade: thumbnailRating.selected?.grade ?? null,
+      reasons: thumbnailRating.selected?.reasons ?? []
+    },
+    hook, paragraphs, chapters,
     description, tags, hashtags: raw.hashtags,
     pinnedComment: nonempty(raw.pinnedComment, 'pinned comment', 500),
     communityPost: nonempty(raw.communityPost, 'community post', 600),

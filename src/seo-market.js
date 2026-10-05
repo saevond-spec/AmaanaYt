@@ -20,6 +20,7 @@ function createSeoMarket({ store, youtube, env = process.env, logger = console, 
     typeof store.saveSeoMarketSnapshot === 'function' &&
     typeof store.getSeoMarketBudget === 'function' && typeof store.saveSeoMarketBudget === 'function';
   let refreshing = false;
+  let retryAfter = 0;
 
   async function research(source) {
     if (!enabled || !hasStore || source?.privacyStatus !== 'public' ||
@@ -53,17 +54,19 @@ function createSeoMarket({ store, youtube, env = process.env, logger = console, 
   }
 
   function schedule() {
-    if (!enabled || refreshing) return;
+    if (!enabled || refreshing || now() < retryAfter) return;
     refreshing = true;
     setImmediate(async () => {
       try {
         if (!await youtube.isConnected()) return;
         const channel = await youtube.ownedChannel();
         await youtube.assertTargetChannel(channel.id);
+        retryAfter = 0;
         for (const game of ['ARC Raiders', 'NARAKA: BLADEPOINT']) {
           await research({ title: game, privacyStatus: 'public', channelId: channel.id });
         }
       } catch (error) {
+        retryAfter = now() + 5 * 60 * 1000;
         logger.warn?.(`SEO market refresh unavailable: ${error.message}`);
       } finally { refreshing = false; }
     });
