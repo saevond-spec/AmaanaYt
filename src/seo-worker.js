@@ -1,6 +1,7 @@
 const { normalizeSource, normalizeContext, generatePackage, createModelCircuitBreaker } = require('./seo-package');
 const { analyzeVideo } = require('./video-analysis');
 const { createSeoPublisher } = require('./seo-publish');
+const { isYouTubeAuthorizationError } = require('./channel-tags');
 
 function createSeoWorker({ store, youtube, env = process.env, logger = console, sleep,
   generate = generatePackage, analyze = analyzeVideo, market = null, playlistAuto = null }) {
@@ -8,6 +9,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   let scheduled = false;
   let rerunRequested = false;
   let lastRun = 0;
+  let youtubeAuthBlockedUntil = 0;
   let catalogScanIncomplete = false;
   let lastDiagnostic = null;
   let legacyTagRecoveryChecked = false;
@@ -143,7 +145,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   }
 
   async function run() {
-    if (running) return;
+    if (running || Date.now() < youtubeAuthBlockedUntil) return;
     running = true;
     lastRun = Date.now();
     try {
@@ -327,7 +329,14 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     scheduled = true;
     setImmediate(async () => {
       scheduled = false;
-      try { await run(); } catch (error) { logger.error('SEO backfill failed:', error.message); }
+      try { await run(); } catch (error) {
+        if (isYouTubeAuthorizationError(error)) {
+          youtubeAuthBlockedUntil = Date.now() + 30 * 60 * 1000;
+          logger.warn?.('SEO backfill paused; reconnect YouTube in the owner dashboard');
+        } else {
+          logger.error('SEO backfill failed:', error.message);
+        }
+      }
     });
   }
 
@@ -378,7 +387,8 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     return updated;
   }
 
-  return { schedule, run, registerUpload, status, setBackfill };
+  return { schedule, run, registerUpload, status, setBackfill,
+    resumeAfterYouTubeReconnect: () => { youtubeAuthBlockedUntil = 0; } };
 }
 
 module.exports = { createSeoWorker };

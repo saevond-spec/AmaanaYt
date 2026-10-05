@@ -123,13 +123,13 @@ test('fails closed on YouTube research errors and records a warning', async () =
   assert.equal(state.warnings(), 1);
 });
 
-test('backs off scheduler failures for five minutes instead of retrying on every health check', async () => {
+test('backs off ordinary scheduler failures for five minutes instead of retrying on every health check', async () => {
   const currentTime = { value: NOW };
   const state = fixture({
     currentTime,
     youtube: {
       isConnected: async () => true,
-      ownedChannel: async () => { throw new Error('invalid_grant'); }
+      ownedChannel: async () => { throw new Error('YouTube unavailable'); }
     }
   });
   const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -146,4 +146,17 @@ test('backs off scheduler failures for five minutes instead of retrying on every
   state.market.schedule();
   await flush();
   assert.equal(state.warnings(), 2);
+});
+
+test('backs off invalid_grant and clears the hold after reconnect', async () => {
+  const currentTime = { value: NOW };
+  const state = fixture({ currentTime, error: new Error('invalid_grant') });
+  assert.equal(await state.market.research(PUBLIC_SOURCE), null);
+  assert.equal(state.calls(), 1);
+  assert.equal(await state.market.research(PUBLIC_SOURCE), null);
+  assert.equal(state.calls(), 1);
+
+  state.market.resetBackoff();
+  assert.equal(await state.market.research(PUBLIC_SOURCE), null);
+  assert.equal(state.calls(), 2);
 });

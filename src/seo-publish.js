@@ -4,6 +4,7 @@ const path = require('path');
 const { descriptionChapters } = require('./seo-package');
 const { createThumbnailFromImage, thumbnailHeadline } = require('./video');
 const { rateThumbnailBriefs } = require('./thumbnail-rating');
+const { ensureCreatorTag, youtubeTagCharacters } = require('./channel-tags');
 
 function problem(message, status = 400) {
   const error = new Error(message);
@@ -106,13 +107,14 @@ function automaticVideoEdit(item) {
     throw problem('Description exceeds 5,000 bytes');
   }
   const originalTags = prior && sameTags(source.tags, prior.tags) ? prior.originalTags : source.tags;
+  const packageTags = ensureCreatorTag(pkg.tags || [], { maxCharacters: 450, maxTags: 8, trimOverflow: true });
   const tags = [];
-  for (const tag of [...(pkg.tags || []), ...(originalTags || [])]) {
+  for (const tag of [...packageTags, ...(originalTags || [])]) {
     if (typeof tag !== 'string' || !tag.trim()) continue;
     const value = tag.trim();
     if (tags.some((part) => part.toLowerCase() === value.toLowerCase())) continue;
     if (tags.length >= 30) break;
-    if ([...tags, value].join(',').length > 450) continue;
+    if (youtubeTagCharacters([...tags, value]) > 450) continue;
     tags.push(value);
   }
   return { title, description, tags };

@@ -40,7 +40,7 @@ test('video metadata update sends only writable snippet fields and uses the curr
   assert.deepEqual(request.params.requestBody, {
     id: 'abcdefghijk',
     snippet: { title: 'After', description: 'Better description', tags: ['new'],
-      categoryId: '20', defaultLanguage: 'ja' }
+      categoryId: '20', defaultLanguage: 'ja', defaultAudioLanguage: 'en' }
   });
   assert.equal(request.options.headers['If-Match'], current.etag);
   assert.equal(Object.hasOwn(request.params.requestBody, 'status'), false);
@@ -230,7 +230,7 @@ test('private uploads omit unsupported spoken-audio metadata', async (t) => {
     description: 'English metadata', tags: ['gameplay'] });
 
   assert.deepEqual(request.requestBody.snippet, {
-    title: 'Gameplay', description: 'English metadata', tags: ['gameplay'],
+    title: 'Gameplay', description: 'English metadata', tags: ['gameplay', '@saevond'],
     categoryId: '20', defaultLanguage: 'en'
   });
   assert.equal(Object.hasOwn(request.requestBody.snippet, 'defaultAudioLanguage'), false);

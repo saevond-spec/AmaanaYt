@@ -162,7 +162,7 @@ function createHighlightProcessor(dependencies) {
         ? buildHighlightDescription(batch.vodId, timeline)
         : 'Highlights from https://www.twitch.tv/videos/' + batch.vodId;
       const highlightTitle = cleanText((batch.streamTitle || 'Saevond livestream') + ' | Best moments', 100);
-      const highlightTags = ['Saevond', 'gaming', 'livestream highlights'];
+      const highlightTags = ['@saevond', 'gaming', 'livestream highlights'];
       const thumbnailPath = path.join(directory, 'highlight-thumbnail.jpg');
       let thumbnailStatus = batch.thumbnailStatus || 'pending';
       let thumbnailError = null;
@@ -266,7 +266,7 @@ function createHighlightProcessor(dependencies) {
         const length = Math.min(60, durations[index]);
         const shortDescription = (moment.reason || 'Livestream highlight') +
           '\n\nHighlight video: https://youtu.be/' + highlight.id + '\n#Saevond #Shorts';
-        const shortTags = ['Saevond', 'gaming', 'Shorts'];
+        const shortTags = ['@saevond', 'gaming', 'Shorts'];
         const existingShort = shortsByIndex.get(index);
         if (existingShort && existingShort.youtubeVideoId) {
           if (existingShort.seoRegistrationStatus !== 'registered') {

@@ -1,3 +1,5 @@
+const { isYouTubeAuthorizationError } = require('./channel-tags');
+
 const GAMES = [
   ['ARC Raiders', /\bARC\s+Raiders\b/i],
   ['NARAKA: BLADEPOINT', /\bNARAKA\b/i],
@@ -21,10 +23,15 @@ function createSeoMarket({ store, youtube, env = process.env, logger = console, 
     typeof store.getSeoMarketBudget === 'function' && typeof store.saveSeoMarketBudget === 'function';
   let refreshing = false;
   let retryAfter = 0;
+  const authCooldownMs = 6 * 60 * 60 * 1000;
+
+  function applyCooldown(error) {
+    retryAfter = now() + (isYouTubeAuthorizationError(error) ? authCooldownMs : 5 * 60 * 1000);
+  }
 
   async function research(source) {
     if (!enabled || !hasStore || source?.privacyStatus !== 'public' ||
-        typeof youtube.recentGameVideos !== 'function') return null;
+        typeof youtube.recentGameVideos !== 'function' || now() < retryAfter) return null;
     const game = detectGame(source);
     if (!game) return null;
     const cached = await store.getSeoMarketSnapshot(game);
@@ -44,10 +51,12 @@ function createSeoMarket({ store, youtube, env = process.env, logger = console, 
       const snapshot = { game, query: `${game} gameplay`, observedAt: new Date(now()).toISOString(),
         windowDays: 7, samples };
       await store.saveSeoMarketSnapshot(game, snapshot);
+      retryAfter = 0;
       logger.info?.(`SEO market snapshot ${game}: ${samples.length} recent public video examples; ` +
         JSON.stringify(samples.slice(0, 2)));
       return samples.length ? snapshot : null;
     } catch (error) {
+      applyCooldown(error);
       logger.warn?.(`SEO market sample ${game} unavailable: ${error.message}`);
       return null;
     }
@@ -61,18 +70,18 @@ function createSeoMarket({ store, youtube, env = process.env, logger = console, 
         if (!await youtube.isConnected()) return;
         const channel = await youtube.ownedChannel();
         await youtube.assertTargetChannel(channel.id);
-        retryAfter = 0;
         for (const game of ['ARC Raiders', 'NARAKA: BLADEPOINT']) {
+          if (now() < retryAfter) break;
           await research({ title: game, privacyStatus: 'public', channelId: channel.id });
         }
       } catch (error) {
-        retryAfter = now() + 5 * 60 * 1000;
+        applyCooldown(error);
         logger.warn?.(`SEO market refresh unavailable: ${error.message}`);
       } finally { refreshing = false; }
     });
   }
 
-  return { enabled, research, schedule };
+  return { enabled, research, schedule, resetBackoff: () => { retryAfter = 0; } };
 }
 
 module.exports = { detectGame, createSeoMarket };

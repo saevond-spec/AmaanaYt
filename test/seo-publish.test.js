@@ -35,7 +35,7 @@ test('automatic copy preserves existing links and disclosures without inserting 
   assert.match(edit.description, /https:\/\/example.com/);
   assert.match(edit.description, /Affiliate disclosure: paid links/);
   assert.doesNotMatch(edit.description, /\[add URL\]|Chapters/);
-  assert.deepEqual(edit.tags, ['ARC Raiders', 'gaming highlights']);
+  assert.deepEqual(edit.tags, ['ARC Raiders', 'gaming highlights', '@saevond']);
   assert.ok(auditVideo(item()).some((finding) => finding.includes('keyword')));
 });
 
@@ -70,7 +70,7 @@ test('a full existing description still permits title and tag improvements witho
   const edit = automaticVideoEdit(row);
   assert.equal(edit.description, longDescription);
   assert.equal(edit.title, 'ARC Raiders Gameplay Highlights');
-  assert.deepEqual(edit.tags, ['ARC Raiders', 'gaming highlights']);
+  assert.deepEqual(edit.tags, ['ARC Raiders', 'gaming highlights', '@saevond']);
 });
 
 test('public metadata-only packages can use a substantial existing description as evidence', () => {
