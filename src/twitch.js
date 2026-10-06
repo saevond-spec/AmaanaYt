@@ -2,6 +2,7 @@ const fs = require('fs');
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
 const store = require('./store');
+const { requireArchivedTwitchVod } = require('./highlight-validation');
 
 const OAUTH_BASE = 'https://id.twitch.tv/oauth2';
 const HELIX_BASE = 'https://api.twitch.tv/helix';
@@ -154,22 +155,7 @@ async function getVod(vodId) {
     helix('/videos', { query: { id: String(vodId) } }), currentUser()
   ]);
   const vod = payload.data?.find((item) => String(item.id) === String(vodId));
-  if (!vod) {
-    const error = new Error('Twitch archive VOD is not available yet');
-    error.status = 425;
-    throw error;
-  }
-  if (String(vod.user_id) !== String(user.id)) {
-    const error = new Error('Twitch VOD does not belong to the connected broadcaster');
-    error.status = 403;
-    throw error;
-  }
-  if (vod.type !== 'archive') {
-    const error = new Error('The supplied Twitch video is not an archived livestream VOD');
-    error.status = 422;
-    throw error;
-  }
-  return vod;
+  return requireArchivedTwitchVod(vod, vodId, user.id);
 }
 
 async function getClip(clipId) {

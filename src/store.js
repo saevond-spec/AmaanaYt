@@ -383,12 +383,29 @@ async function listSeoVideos(limit = 50, offset = 0) {
   return result.rows;
 }
 
-async function countPublicSeoVideos() {
+async function countPublicSeoVideos(channelId) {
   await init();
-  const result = await pool.query(
-    "SELECT COUNT(*)::integer AS count FROM amaana_seo_packages " +
-    "WHERE source->>'privacyStatus' = 'public'");
+  const safeChannelId = String(channelId || '').trim();
+  const result = safeChannelId
+    ? await pool.query(
+      "SELECT COUNT(*)::integer AS count FROM amaana_seo_packages " +
+      "WHERE source->>'privacyStatus' = 'public' AND source->>'channelId' = $1", [safeChannelId])
+    : await pool.query(
+      "SELECT COUNT(*)::integer AS count FROM amaana_seo_packages " +
+      "WHERE source->>'privacyStatus' = 'public'");
   return result.rows[0]?.count || 0;
+}
+
+async function listPublicSeoMetadata(channelId, limit = 5000) {
+  await init();
+  const safeChannelId = String(channelId || '').trim();
+  if (!safeChannelId) throw new Error('A YouTube channel ID is required for duplicate metadata checks');
+  const safeLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(5000, limit)) : 5000;
+  const result = await pool.query('SELECT video_id AS "videoId", source->>\'title\' AS title, ' +
+    'source->>\'description\' AS description FROM amaana_seo_packages ' +
+    'WHERE source->>\'privacyStatus\' = \'public\' AND source->>\'channelId\' = $1 ' +
+    'ORDER BY updated_at DESC, video_id ASC LIMIT $2', [safeChannelId, safeLimit]);
+  return result.rows;
 }
 
 async function listYoutubeSearchCandidates(limit = 20, offset = 0) {
@@ -505,18 +522,22 @@ async function listSeoChannelCandidates(limit = 100) {
   return result.rows;
 }
 
-async function listSeoNeedsPlaylist(limit = 20) {
+async function listSeoNeedsPlaylist(limit = 20, privacyGroup = 'all') {
   await init();
   const requestedLimit = Number(limit);
   const safeLimit = Number.isSafeInteger(requestedLimit) ? Math.max(1, Math.min(50, requestedLimit)) : 20;
+  const privacyStatuses = privacyGroup === 'public' ? ['public']
+    : privacyGroup === 'nonpublic' ? ['private', 'unlisted']
+      : privacyGroup === 'all' ? ['public', 'private', 'unlisted'] : null;
+  if (!privacyStatuses) throw new Error('Invalid playlist privacy queue');
   const result = await pool.query(`SELECT video_id AS "videoId", source, context, package
     FROM amaana_seo_packages
-    WHERE source->>'privacyStatus' IN ('public', 'private', 'unlisted')
+    WHERE source->>'privacyStatus' = ANY($2::text[])
       AND (playlist_result IS NULL OR
         (playlist_result->>'state' = 'retry' AND
          (playlist_result->>'at')::timestamptz < NOW() - INTERVAL '1 hour'))
     ORDER BY (source->>'publishedAt') ASC NULLS LAST, created_at ASC
-    LIMIT $1`, [safeLimit]);
+    LIMIT $1`, [safeLimit, privacyStatuses]);
   return result.rows;
 }
 
@@ -544,7 +565,17 @@ async function requeueSeoPlaylistResults(videoIds = []) {
   const result = await pool.query(`UPDATE amaana_seo_packages
     SET playlist_result = NULL, updated_at = NOW()
     WHERE video_id = ANY($1::text[])
-      AND source->>'privacyStatus' IN ('public', 'private', 'unlisted')`, [ids]);
+      AND source->>'privacyStatus' IN ('public', 'private', 'unlisted')
+      AND playlist_result->>'state' IN ('added', 'already_added', 'fallback_added', 'fallback_already_added')`, [ids]);
+  return result.rowCount;
+}
+
+async function requeueSeoPlaylistAuthorizationFailures() {
+  await init();
+  const result = await pool.query(`UPDATE amaana_seo_packages
+    SET playlist_result = NULL, updated_at = NOW()
+    WHERE playlist_result->>'state' = 'authorization_required'
+      AND source->>'privacyStatus' IN ('public', 'private', 'unlisted')`);
   return result.rowCount;
 }
 
@@ -748,6 +779,7 @@ module.exports = {
   getSeoVideo,
   listSeoVideos,
   countPublicSeoVideos,
+  listPublicSeoMetadata,
   listYoutubeSearchCandidates,
   saveYoutubeSearchSnapshots,
   saveGoogleSearchSnapshots,
@@ -756,6 +788,7 @@ module.exports = {
   markSeoPlaylistResult,
   resetSeoPlaylistResults,
   requeueSeoPlaylistResults,
+  requeueSeoPlaylistAuthorizationFailures,
   getVideoAnalysis,
   saveVideoAnalysis,
   seoCounts,

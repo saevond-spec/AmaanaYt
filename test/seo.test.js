@@ -70,6 +70,16 @@ test('uses only supplied markers for chapters and clips', () => {
   assert.ok(pkg.description.startsWith(hook));
 });
 
+test('marks title and substantive description duplicates for owner review', () => {
+  const baseline = validatePackage(generated, source, context);
+  const duplicate = validatePackage(generated, source, context, null, null, [{
+    videoId: 'older-video', title: baseline.titles.hybrid[0], description: baseline.description
+  }]);
+  assert.deepEqual(duplicate.metadataConflicts.map((item) => item.kind), ['title', 'description']);
+  assert.ok(duplicate.missingEvidence.some((warning) => /title closely matches/i.test(warning)));
+  assert.ok(duplicate.missingEvidence.some((warning) => /description closely matches/i.test(warning)));
+});
+
 test('shorter truthful hooks and focused tags pass, and market provenance is recorded', () => {
   const pkg = validatePackage({ ...generated,
     hook: 'NARAKA BLADEPOINT guide with a final fight from this match.',
@@ -411,6 +421,78 @@ test('worker grows consecutive 503 pauses to 120 minutes', async () => {
   }
 });
 
+test('worker checks generated metadata against the public channel catalog before publishing', async () => {
+  let storedPackage = null;
+  let metadataLookup = null;
+  let claims = 0;
+  const publicSource = { ...source, privacyStatus: 'public' };
+  const existingPackage = validatePackage(generated, publicSource, context);
+  const store = {
+    getSeoSyncState: async () => ({ channelId: 'channel-1', recentAt: new Date().toISOString(),
+      completed: true, viewPriorityScanVersion: 1, enabled: true }),
+    seoCounts: async () => ({ attemptedToday: 0 }),
+    listPublicSeoMetadata: async (channelId, limit) => {
+      metadataLookup = { channelId, limit };
+      return [{ videoId: 'older-video', title: existingPackage.titles.hybrid[0],
+        description: existingPackage.description }];
+    },
+    countPublicSeoVideos: async (channelId) => {
+      assert.equal(channelId, 'channel-1');
+      return 1;
+    },
+    claimSeoVideo: async () => claims++ === 0
+      ? { videoId: 'candidate-video', claimToken: 'claim', source: publicSource, context, attempts: 1 } : null,
+    finishSeoVideo: async (_id, _token, pkg) => { storedPackage = pkg; }
+  };
+  const youtube = { isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner' }) };
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: true,
+    json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) });
+  try {
+    const worker = createSeoWorker({ store, youtube,
+      env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'metadata-duplicate-worker' },
+      logger: { info() {}, error() {}, warn() {} } });
+    await worker.run();
+    assert.deepEqual(metadataLookup, { channelId: 'channel-1', limit: 5000 });
+    assert.deepEqual(storedPackage.metadataConflicts.map((item) => item.kind), ['title', 'description']);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('worker requires a complete public catalog before automatic edits', async () => {
+  let storedPackage;
+  let claims = 0;
+  const publicSource = { ...source, privacyStatus: 'public' };
+  const store = {
+    getSeoSyncState: async () => ({ channelId: 'channel-1', recentAt: new Date().toISOString(),
+      completed: true, viewPriorityScanVersion: 1, enabled: true }),
+    seoCounts: async () => ({ attemptedToday: 0 }),
+    listPublicSeoMetadata: async () => [{ videoId: 'older-video', title: 'Apex Legends old match',
+      description: 'Older public match notes with enough distinct words for metadata comparison.' }],
+    countPublicSeoVideos: async () => 2,
+    claimSeoVideo: async () => claims++ === 0
+      ? { videoId: 'candidate-video', claimToken: 'claim', source: publicSource, context, attempts: 1 } : null,
+    finishSeoVideo: async (_id, _token, pkg) => { storedPackage = pkg; }
+  };
+  const youtube = { isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner' }) };
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: true,
+    json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) });
+  try {
+    const worker = createSeoWorker({ store, youtube,
+      env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'incomplete-catalog-worker' },
+      logger: { info() {}, error() {}, warn() {} } });
+    await worker.run();
+    assert.equal(storedPackage.metadataCatalogComplete, false);
+    assert.ok(storedPackage.missingEvidence.some((warning) => /catalog is incomplete/i.test(warning)));
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test('worker can process more than five jobs in one run with default budget 200', async () => {
   let claimed = 0;
   let finished = 0;
@@ -745,6 +827,12 @@ test('five-year queue simulation drains the active backlog and requeues only leg
       for (const row of rows) statuses[row.status] = (statuses[row.status] || 0) + 1;
       return { statuses, attemptedToday: rows.filter((row) => row.lastAttemptDay === currentDay).length };
     },
+    listPublicSeoMetadata: async (_channelId, limit) => rows
+      .filter((row) => row.source.privacyStatus === 'public')
+      .slice(0, limit)
+      .map((row) => ({ videoId: row.videoId, title: row.source.title, description: row.source.description })),
+    countPublicSeoVideos: async (_channelId) =>
+      rows.filter((row) => row.source.privacyStatus === 'public').length,
     claimSeoVideo: async () => {
       const row = rows.find((candidate) => candidate.status === 'queued' ||
         candidate.status === 'retry' && candidate.nextAttemptDay <= currentDay ||
@@ -780,7 +868,7 @@ test('five-year queue simulation drains the active backlog and requeues only leg
   const createWorker = () => createSeoWorker({
     store, youtube, env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'two-year-simulation',
       SEO_DAILY_LIMIT: '200' }, logger: { info() {}, warn() {}, error() {} },
-    generate: async (videoSource, videoContext) => {
+    generate: async (videoSource, videoContext, options) => {
       const index = Number(videoSource.title.match(/\d+$/)?.[0] || 0);
       const candidateCount = 3 + (index % 13);
       const candidates = [];
@@ -788,8 +876,37 @@ test('five-year queue simulation drains the active backlog and requeues only leg
       for (let tagIndex = 0; candidates.length < candidateCount; tagIndex += 1) {
         candidates.push('NARAKA term ' + index + '-' + tagIndex);
       }
-      return validatePackage({ ...generated, tags: candidates }, videoSource, videoContext,
-        { summary: 'Observed gameplay from this video' });
+      const token = index.toString(36);
+      const route = (index * 3 + 7).toString(36);
+      const duel = (index * 7 + 11).toString(36);
+      const finish = (index * 11 + 17).toString(36);
+      const uniqueGenerated = {
+        ...generated,
+        titles: {
+          search: [
+            `${keyword}: match${token} route${route} duel${duel}`,
+            `${keyword}: path${duel} counter${finish} finish${token}`,
+            `${keyword}: fight${finish} reset${token} region${route}`
+          ],
+          curiosity: [
+            `Match${token} changes after counter${route} into duel${duel}`,
+            `Route${route} forces reset${finish} before a late fight`,
+            `A final exchange with angle${token} and position${duel}`
+          ],
+          hybrid: [
+            `NARAKA BLADEPOINT match${token} route${route} duel${duel} finish${finish}`,
+            `NARAKA counter${route} reset${duel} after ring${finish} match${token}`,
+            `NARAKA finale${finish} follows route${duel} swap${token} duel${route}`
+          ]
+        },
+        hook: `NARAKA BLADEPOINT guide: match${token} follows route${route} into a ${duel} duel, a ${finish} reset, and a ${route} finish.`,
+        paragraphs: [
+          `Match${token} uses route${route} through area${duel}, where squad${finish} repositions after objective${token}.`,
+          `Counter${route} creates reset${duel} before finish${finish}; frame${token} shows the recorded sequence and result.`
+        ]
+      };
+      return validatePackage({ ...uniqueGenerated, tags: candidates }, videoSource, videoContext,
+        { summary: 'Observed gameplay from this video' }, null, options.metadataPeers);
     }
   });
   let worker = createWorker();

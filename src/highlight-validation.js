@@ -32,6 +32,37 @@ function overlapRatio(left, right) {
   return overlap / Math.min(left.duration, right.duration);
 }
 
+function requireArchivedTwitchVod(vod, expectedVodId, broadcasterId) {
+  if (!vod) {
+    const error = new Error('Twitch archive VOD is not available yet');
+    error.status = 425;
+    throw error;
+  }
+  if (String(vod.id || '') !== String(expectedVodId || '')) {
+    const error = new Error('Twitch returned a different VOD than requested');
+    error.status = 409;
+    throw error;
+  }
+  if (String(vod.user_id || '') !== String(broadcasterId || '')) {
+    const error = new Error('Twitch VOD does not belong to the connected broadcaster');
+    error.status = 403;
+    throw error;
+  }
+  if (vod.type !== 'archive') {
+    const error = new Error('The supplied Twitch video is not an archived livestream VOD');
+    error.status = 422;
+    throw error;
+  }
+  try {
+    parseTwitchDuration(vod.duration);
+  } catch {
+    const error = new Error('Twitch archive VOD does not have a valid finished duration');
+    error.status = 422;
+    throw error;
+  }
+  return vod;
+}
+
 function validateHighlightMoments(items, vodDurationSeconds) {
   if (!Array.isArray(items) || !items.length) {
     throw new Error('timestamps must contain at least one AI highlight');
@@ -112,4 +143,6 @@ function verifyCreatedClip(moment, clip, vodId, toleranceSeconds = 2) {
   };
 }
 
-module.exports = { parseTwitchDuration, validateHighlightMoments, verifyCreatedClip };
+module.exports = {
+  parseTwitchDuration, requireArchivedTwitchVod, validateHighlightMoments, verifyCreatedClip
+};

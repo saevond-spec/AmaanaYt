@@ -5,6 +5,7 @@ const { descriptionChapters } = require('./seo-package');
 const { createThumbnailFromImage, thumbnailHeadline } = require('./video');
 const { rateThumbnailBriefs } = require('./thumbnail-rating');
 const { ensureCreatorTag, youtubeTagCharacters } = require('./channel-tags');
+const { findMetadataConflicts } = require('./metadata-uniqueness');
 
 function problem(message, status = 400) {
   const error = new Error(message);
@@ -32,6 +33,8 @@ const ALLOWED_VIDEO_PRIVACY_STATUSES = new Set(['public']);
 function auditVideo(item) {
   const source = item.source || {};
   const keyword = item.package?.primaryKeyword || item.context?.primaryKeyword || '';
+  const hasVerifiedChapters = source.durationSeconds >= 60 &&
+    descriptionChapters(source.description, source.durationSeconds).length > 0;
   const findings = [];
   if (!source.title?.trim()) findings.push('The video has no title.');
   if (source.title?.length > 70) findings.push('The title is long; review how it appears in search.');
@@ -46,10 +49,13 @@ function auditVideo(item) {
   if (/\[(?:add|insert|replace|your|tbd|todo)[^\]]*\]/i.test(source.description || '')) {
     findings.push('The public description appears to contain an unfinished placeholder.');
   }
-  if (source.durationSeconds >= 60 && !descriptionChapters(source.description, source.durationSeconds).length) {
+  if (source.durationSeconds >= 60 && !hasVerifiedChapters) {
     findings.push('No verified chapter markers were detected in the current description.');
   }
-  if (item.package?.missingEvidence?.length) findings.push('The SEO package has limited evidence.');
+  const evidence = Array.isArray(item.package?.missingEvidence) ? item.package.missingEvidence : [];
+  const unresolvedEvidence = evidence.filter((warning) =>
+    !hasVerifiedChapters || !/verified chapter markers/i.test(String(warning)));
+  if (unresolvedEvidence.length) findings.push('The SEO package has limited evidence.');
   return findings;
 }
 
@@ -72,6 +78,40 @@ function assertVideoMatchesCatalog(video, channelId, item) {
   if (!video.snippet.categoryId) throw problem('YouTube did not return the video category', 409);
 }
 
+function metadataOwnerReviewReason(item) {
+  const pkg = item?.package || {};
+  const warnings = Array.isArray(pkg.missingEvidence) ? pkg.missingEvidence : [];
+  if (pkg.metadataConflicts?.length || warnings.some((warning) =>
+    /duplicate titles|closely matches another public video/i.test(String(warning)))) {
+    return 'Generated title or description closely matches existing channel metadata; owner review is required';
+  }
+  if (pkg.metadataCatalogComplete === false || warnings.some((warning) =>
+    /public metadata catalog is incomplete/i.test(String(warning)))) {
+    return 'Public video metadata catalog is incomplete; owner review is required before automatic edits';
+  }
+  return null;
+}
+
+function verifiedPackageChapters(item, originalDescription) {
+  const pkg = item?.package || {};
+  const source = item?.source || {};
+  if (!['owner', 'twitch_highlight'].includes(pkg.evidence?.chapterSource)) return [];
+  if (descriptionChapters(originalDescription, source.durationSeconds).length) return [];
+  const existingTimestampLines = String(originalDescription || '').split(/\r?\n/)
+    .some((line) => /^\d{1,2}:\d{2}(?::\d{2})?\s*(?:[-–—|:]\s*|\s+).{2,100}$/.test(line.trim()));
+  if (existingTimestampLines) return [];
+  const contextMarkers = Array.isArray(item.context?.markers)
+    ? item.context.markers.filter((marker) => marker?.kind === 'chapter') : [];
+  if (contextMarkers.length < 3) return [];
+  const lines = Array.isArray(pkg.chapters) ? pkg.chapters.filter((line) =>
+    typeof line === 'string' && line.trim()) : [];
+  const parsed = descriptionChapters(lines.join('\n'), source.durationSeconds);
+  if (parsed.length < 3) return [];
+  const ownerTimes = new Set(contextMarkers.map((marker) => Number(marker.startSeconds))
+    .filter(Number.isFinite));
+  return parsed.every((marker) => ownerTimes.has(marker.startSeconds)) ? lines : [];
+}
+
 function automaticVideoEdit(item) {
   const source = item.source || {};
   const pkg = item.package;
@@ -79,6 +119,8 @@ function automaticVideoEdit(item) {
     throw problem('Only public videos can be automatically updated');
   }
   if (!pkg || !['ready', 'needs_review'].includes(item.status)) throw problem('No generated SEO package');
+  const ownerReviewReason = metadataOwnerReviewReason(item);
+  if (ownerReviewReason) throw problem(ownerReviewReason);
   const hasOwnerContext = Boolean(item.context?.takeaways?.trim());
   const hasVideoAnalysis = Boolean(item.analysis);
   const hasDescriptionEvidence = String(source.description || '').trim().length >= 100;
@@ -88,8 +130,13 @@ function automaticVideoEdit(item) {
   if (pkg.missingEvidence?.some((warning) => /script or key takeaways/i.test(warning))) {
     throw problem('The package has insufficient evidence for its claims');
   }
-  const title = (pkg.titles?.hybrid?.[0] || pkg.titles?.search?.[0] || '').trim();
-  if (!title || title.length > 100 || /[\r\n]/.test(title)) throw problem('Invalid generated title');
+  const sourceTitle = String(source.title || '').trim();
+  const title = (sourceTitle.length > 70
+    ? pkg.titles?.search?.[0] || pkg.titles?.hybrid?.[0]
+    : pkg.titles?.hybrid?.[0] || pkg.titles?.search?.[0] || '').trim();
+  if (!title || title.length > 59 || /[\r\n]/.test(title)) {
+    throw problem('Invalid generated title; automatic titles must be 59 characters or fewer');
+  }
   const summary = [pkg.hook, ...(pkg.paragraphs || [])].filter(Boolean).join('\n\n').trim();
   const prior = item.applied;
   const original = (prior && source.description === prior.description
@@ -98,8 +145,10 @@ function automaticVideoEdit(item) {
   if (/\[(?:add|insert|replace|your|tbd|todo)[^\]]*\]/i.test(summary) || !summary) {
     throw problem('Generated copy contains unfinished placeholders');
   }
-  // Keep existing links, disclosures, and verified timestamps verbatim.
-  let description = [summary, original, hashtags].filter(Boolean).join('\n\n');
+  const chapters = verifiedPackageChapters(item, original);
+  // Put useful context first; keep existing links, disclosures, and timestamps verbatim.
+  let description = [summary, chapters.length ? ['Chapters', ...chapters].join('\n') : '',
+    original, hashtags].filter(Boolean).join('\n\n');
   // A full existing description can still receive a better title and tags.
   // Keep its text intact instead of dropping links or disclosures to make room.
   if (Buffer.byteLength(description, 'utf8') > 5000) description = original;
@@ -309,9 +358,26 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
     return result;
   }
 
-  async function publishVideo(videoId) {
-    const item = await store.getSeoVideo(videoId);
+  async function publishVideo(videoId, currentPublicMetadata = null) {
+    let item = await store.getSeoVideo(videoId);
     if (!item || !item.package) return;
+    if (Array.isArray(currentPublicMetadata)) {
+      const title = item.package.titles?.hybrid?.[0] || item.package.titles?.search?.[0] || '';
+      const conflicts = findMetadataConflicts({
+        title, description: item.package.description || '', videoId, peers: currentPublicMetadata
+      });
+      const known = new Set((item.package.metadataConflicts || []).map((conflict) =>
+        String(conflict.kind) + ':' + String(conflict.videoId)));
+      const merged = [...(item.package.metadataConflicts || [])];
+      for (const conflict of conflicts) {
+        const key = String(conflict.kind) + ':' + String(conflict.videoId);
+        if (!known.has(key)) {
+          known.add(key);
+          merged.push(conflict);
+        }
+      }
+      if (merged.length) item = { ...item, package: { ...item.package, metadataConflicts: merged } };
+    }
     const privacyStatus = item.source?.privacyStatus;
     if (!ALLOWED_VIDEO_PRIVACY_STATUSES.has(privacyStatus)) return;
 
@@ -322,6 +388,14 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
     const metadataDone = sameGeneration && prior.state !== 'retry' && !legacyContextSkip;
     const thumbnailDone = sameGeneration && ['applied', 'skipped'].includes(prior.thumbnailState);
     if (metadataDone && thumbnailDone) return prior;
+
+    const ownerReviewReason = metadataOwnerReviewReason(item);
+    if (ownerReviewReason) {
+      return recordResult(videoId, generation,
+        { state: 'skipped', reason: ownerReviewReason },
+        { state: 'skipped', reason: 'All automatic SEO edits are blocked while metadata is in owner review' },
+        prior);
+    }
 
     let metadata = metadataDone ? { state: prior.state, reason: prior.reason } : null;
     let edit = null;
@@ -427,11 +501,11 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
     return recordResult(videoId, generation, metadata, thumbnail, prior);
   }
 
-  async function publishPending(limit = 20) {
+  async function publishPending(limit = 20, currentPublicMetadata = null) {
     const candidates = await store.listSeoAutoCandidates(limit);
     logger.info?.('SEO metadata and thumbnail candidates: ' + candidates.length);
     for (const candidate of candidates) {
-      const result = await publishVideo(candidate.videoId);
+      const result = await publishVideo(candidate.videoId, currentPublicMetadata);
       if (result?.deferred) break;
     }
   }

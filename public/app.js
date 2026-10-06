@@ -210,8 +210,10 @@ function playlistAssignmentText(result) {
   if (result.state === 'already_added') return 'already in ' + title;
   if (result.state === 'fallback_added') return 'needs review; added to private ' + title;
   if (result.state === 'fallback_already_added') return 'needs review; already in private ' + title;
-  if (result.state === 'no_match') return 'no confident metadata match; left unassigned';
-  if (result.state === 'ambiguous') return 'multiple playlists matched; left unassigned';
+  if (result.state === 'no_match') return 'no confident metadata match; left unassigned for owner review';
+  if (result.state === 'ambiguous') return 'multiple playlists matched; left unassigned for owner review';
+  if (result.state === 'manual_review') return 'playlist could not be used; left unassigned for owner review';
+  if (result.state === 'authorization_required') return 'paused until YouTube is reconnected';
   if (result.state === 'daily_limit') return 'waiting for the daily playlist quota';
   if (result.state === 'retry') return 'will retry: ' + (result.reason || 'temporary YouTube error');
   if (result.state === 'disabled') return 'automatic placement is disabled';
@@ -269,8 +271,8 @@ function renderDraft(draft) {
   }
   if (draft.status === 'awaiting_owner_approval' && draft.productionState === 'ready') {
     const message = isHighlight
-      ? 'Rendered highlight, Shorts, and thumbnail are complete. SEO jobs are queued; this video stays private until owner approval.'
-      : 'Rendered Short is complete. Its SEO job is queued; this video stays private until owner approval.';
+      ? 'The highlight and every Short passed media validation and YouTube processing. SEO is registered and thumbnail requirements are met. Review the bundle before publishing.'
+      : 'This Short passed media validation and YouTube processing, and its SEO package is registered. Review before publishing.';
     card.append(element('p', 'draft-meta', message));
   }
   if (draft.seoRegistrationError && !draft.error) {
@@ -967,7 +969,7 @@ seoPlaylistAudit.addEventListener('click', async () => {
     const queued = report.requeuedCount || 0;
     seoPlaylistAuditStatus.textContent =
       `Playlist coverage: ${report.coveredCount}/${report.catalogCount} videos in any playlist; ${report.publicCoverageCount} in public playlists; ${report.missingCount} missing. ${queued} missing videos queued for repair; ${scan}; ${read}.`;
-    showNotice(`Playlist audit checked ${report.catalogCount} channel videos across ${report.playlistCount} playlists. ${report.missingCount} videos lack playlist coverage; ${queued} queued for automatic matching and private review fallback.`);
+    showNotice(`Playlist audit checked ${report.catalogCount} channel videos across ${report.playlistCount} playlists. ${report.missingCount} videos lack playlist coverage; ${queued} previously assigned videos queued for repair. Unmatched videos remain unassigned for owner review.`);
     await loadSeo();
   } catch (error) {
     seoPlaylistAuditStatus.textContent = error.message;
