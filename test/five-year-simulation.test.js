@@ -16,17 +16,17 @@ test('five-year simulation reports draft volume, queue throughput, and quota hea
   assert.equal(result.seoBackfill.batchedQueueDays, 2.25);
   assert.equal(result.seoBackfill.bestCaseDaysToUpdatePublicCohortAtWriteLimit, 20);
   assert.equal(result.failureScenario.currentRepeatedAttemptsPerDay, 480);
-  assert.equal(result.youtubeApiQuota.maxPlaylistAssignmentsPerDay, 40);
+  assert.equal(result.youtubeApiQuota.maxPlaylistAssignmentsPerDay, 60);
   assert.equal(result.youtubeApiQuota.ownedPlaylistListMaxPages, 20);
-  assert.equal(result.youtubeApiQuota.automaticPlaylistDailyUnits, 2840);
+  assert.equal(result.youtubeApiQuota.automaticPlaylistDailyUnits, 3262);
   assert.equal(result.youtubeApiQuota.videoInsertCallsPerDay, 4);
   assert.equal(result.youtubeApiQuota.videoInsertQuotaFits, true);
   assert.equal(result.youtubeApiQuota.marketSearchCallsPerDay, 3);
   assert.equal(result.youtubeApiQuota.marketSearchQuotaFits, true);
   assert.equal(result.youtubeApiQuota.publicationDailyQuotaUnits, 204);
-  assert.equal(result.youtubeApiQuota.currentPipelineDailyQuotaUnits, 5594);
-  assert.equal(result.youtubeApiQuota.combinedDailyQuotaUnitsWith50PerDayThumbnailBackfill, 8094);
-  assert.equal(result.youtubeApiQuota.headroomWithBulkThumbnailBackfillBeforeReads, 1906);
+  assert.equal(result.youtubeApiQuota.currentPipelineDailyQuotaUnits, 6016);
+  assert.equal(result.youtubeApiQuota.combinedDailyQuotaUnitsWith50PerDayThumbnailBackfill, 8516);
+  assert.equal(result.youtubeApiQuota.headroomWithBulkThumbnailBackfillBeforeReads, 1484);
 });
 
 test('five-year lifecycle simulation exercises baseline and deterministic recovery stress', () => {
