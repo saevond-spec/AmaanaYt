@@ -33,6 +33,8 @@ const ALLOWED_VIDEO_PRIVACY_STATUSES = new Set(['public']);
 function auditVideo(item) {
   const source = item.source || {};
   const keyword = item.package?.primaryKeyword || item.context?.primaryKeyword || '';
+  const hasVerifiedChapters = source.durationSeconds >= 60 &&
+    descriptionChapters(source.description, source.durationSeconds).length > 0;
   const findings = [];
   if (!source.title?.trim()) findings.push('The video has no title.');
   if (source.title?.length > 70) findings.push('The title is long; review how it appears in search.');
@@ -47,10 +49,13 @@ function auditVideo(item) {
   if (/\[(?:add|insert|replace|your|tbd|todo)[^\]]*\]/i.test(source.description || '')) {
     findings.push('The public description appears to contain an unfinished placeholder.');
   }
-  if (source.durationSeconds >= 60 && !descriptionChapters(source.description, source.durationSeconds).length) {
+  if (source.durationSeconds >= 60 && !hasVerifiedChapters) {
     findings.push('No verified chapter markers were detected in the current description.');
   }
-  if (item.package?.missingEvidence?.length) findings.push('The SEO package has limited evidence.');
+  const evidence = Array.isArray(item.package?.missingEvidence) ? item.package.missingEvidence : [];
+  const unresolvedEvidence = evidence.filter((warning) =>
+    !hasVerifiedChapters || !/verified chapter markers/i.test(String(warning)));
+  if (unresolvedEvidence.length) findings.push('The SEO package has limited evidence.');
   return findings;
 }
 
@@ -87,6 +92,26 @@ function metadataOwnerReviewReason(item) {
   return null;
 }
 
+function verifiedPackageChapters(item, originalDescription) {
+  const pkg = item?.package || {};
+  const source = item?.source || {};
+  if (!['owner', 'twitch_highlight'].includes(pkg.evidence?.chapterSource)) return [];
+  if (descriptionChapters(originalDescription, source.durationSeconds).length) return [];
+  const existingTimestampLines = String(originalDescription || '').split(/\r?\n/)
+    .some((line) => /^\d{1,2}:\d{2}(?::\d{2})?\s*(?:[-–—|:]\s*|\s+).{2,100}$/.test(line.trim()));
+  if (existingTimestampLines) return [];
+  const contextMarkers = Array.isArray(item.context?.markers)
+    ? item.context.markers.filter((marker) => marker?.kind === 'chapter') : [];
+  if (contextMarkers.length < 3) return [];
+  const lines = Array.isArray(pkg.chapters) ? pkg.chapters.filter((line) =>
+    typeof line === 'string' && line.trim()) : [];
+  const parsed = descriptionChapters(lines.join('\n'), source.durationSeconds);
+  if (parsed.length < 3) return [];
+  const ownerTimes = new Set(contextMarkers.map((marker) => Number(marker.startSeconds))
+    .filter(Number.isFinite));
+  return parsed.every((marker) => ownerTimes.has(marker.startSeconds)) ? lines : [];
+}
+
 function automaticVideoEdit(item) {
   const source = item.source || {};
   const pkg = item.package;
@@ -105,8 +130,13 @@ function automaticVideoEdit(item) {
   if (pkg.missingEvidence?.some((warning) => /script or key takeaways/i.test(warning))) {
     throw problem('The package has insufficient evidence for its claims');
   }
-  const title = (pkg.titles?.hybrid?.[0] || pkg.titles?.search?.[0] || '').trim();
-  if (!title || title.length > 100 || /[\r\n]/.test(title)) throw problem('Invalid generated title');
+  const sourceTitle = String(source.title || '').trim();
+  const title = (sourceTitle.length > 70
+    ? pkg.titles?.search?.[0] || pkg.titles?.hybrid?.[0]
+    : pkg.titles?.hybrid?.[0] || pkg.titles?.search?.[0] || '').trim();
+  if (!title || title.length > 59 || /[\r\n]/.test(title)) {
+    throw problem('Invalid generated title; automatic titles must be 59 characters or fewer');
+  }
   const summary = [pkg.hook, ...(pkg.paragraphs || [])].filter(Boolean).join('\n\n').trim();
   const prior = item.applied;
   const original = (prior && source.description === prior.description
@@ -115,8 +145,10 @@ function automaticVideoEdit(item) {
   if (/\[(?:add|insert|replace|your|tbd|todo)[^\]]*\]/i.test(summary) || !summary) {
     throw problem('Generated copy contains unfinished placeholders');
   }
-  // Keep existing links, disclosures, and verified timestamps verbatim.
-  let description = [summary, original, hashtags].filter(Boolean).join('\n\n');
+  const chapters = verifiedPackageChapters(item, original);
+  // Put useful context first; keep existing links, disclosures, and timestamps verbatim.
+  let description = [summary, chapters.length ? ['Chapters', ...chapters].join('\n') : '',
+    original, hashtags].filter(Boolean).join('\n\n');
   // A full existing description can still receive a better title and tags.
   // Keep its text intact instead of dropping links or disclosures to make room.
   if (Buffer.byteLength(description, 'utf8') > 5000) description = original;

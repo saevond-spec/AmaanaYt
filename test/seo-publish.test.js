@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const { auditVideo, automaticVideoEdit, channelSuggestions, channelEdit,
   retryablePublishError, createSeoPublisher } = require('../src/seo-publish');
 const { createSeoWorker } = require('../src/seo-worker');
+const { descriptionChapters } = require('../src/seo-package');
 
 function item(overrides = {}) {
   return {
@@ -17,7 +18,7 @@ function item(overrides = {}) {
     analysis: { summary: 'Gameplay from ARC Raiders' },
     package: {
       primaryKeyword: 'ARC Raiders',
-      titles: { hybrid: ['ARC Raiders Gameplay Highlights'] },
+      titles: { search: ['ARC Raiders Raid Highlights'], hybrid: ['ARC Raiders Gameplay Highlights'] },
       hook: 'ARC Raiders gameplay and highlights from the stream.',
       paragraphs: ['A look at the match and reactions.'],
       tags: ['ARC Raiders', 'gaming highlights'],
@@ -37,6 +38,46 @@ test('automatic copy preserves existing links and disclosures without inserting 
   assert.doesNotMatch(edit.description, /\[add URL\]|Chapters/);
   assert.deepEqual(edit.tags, ['ARC Raiders', 'gaming highlights', '@saevond']);
   assert.ok(auditVideo(item()).some((finding) => finding.includes('keyword')));
+});
+
+test('autopilot shortens long titles, improves context, and adds only verified chapter markers', () => {
+  const base = item();
+  const markers = [
+    { kind: 'chapter', startSeconds: 0, title: 'Scouting the raid' },
+    { kind: 'chapter', startSeconds: 60, title: 'Holding the gate' },
+    { kind: 'chapter', startSeconds: 120, title: 'Escaping to extraction' }
+  ];
+  const row = item({
+    source: { ...base.source, title: 'ARC Raiders gameplay highlights with a complete squad extraction walkthrough episode 42',
+      description: 'Short description about the footage.' },
+    context: { takeaways: '', markers },
+    package: { ...base.package,
+      titles: { search: ['ARC Raiders Extraction Run: Clean Squad Escape'],
+        hybrid: ['An Unexpected Extraction Run With the Squad'] },
+      chapters: ['00:00 - Scouting the raid', '01:00 - Holding the gate', '02:00 - Escaping to extraction'],
+      evidence: { chapterSource: 'owner' },
+      missingEvidence: ['Three verified chapter markers, starting at 00:00, are needed']
+    }
+  });
+  const edit = automaticVideoEdit(row);
+  assert.equal(edit.title, 'ARC Raiders Extraction Run: Clean Squad Escape');
+  assert.ok(edit.title.length <= 59);
+  assert.ok(edit.description.indexOf(row.package.hook) < edit.description.indexOf('Chapters'));
+  assert.deepEqual(descriptionChapters(edit.description, 180).map((marker) => marker.startSeconds),
+    [0, 60, 120]);
+  const findings = auditVideo({ ...row, source: { ...row.source, ...edit } });
+  assert.equal(findings.some((finding) => finding.startsWith('The title is long')), false);
+  assert.equal(findings.some((finding) => finding.includes('description gives little context')), false);
+  assert.equal(findings.some((finding) => finding.includes('No verified chapter markers')), false);
+  assert.equal(findings.some((finding) => finding.includes('limited evidence')), false);
+
+  const unverified = item({ package: { ...base.package,
+    chapters: ['00:00 - Scouting', '01:00 - Holding', '02:00 - Extraction'],
+    evidence: { chapterSource: 'owner' } } });
+  const unsafeEdit = automaticVideoEdit(unverified);
+  assert.doesNotMatch(unsafeEdit.description, /Chapters/);
+  assert.ok(auditVideo({ ...unverified, source: { ...unverified.source, ...unsafeEdit } })
+    .some((finding) => finding.includes('No verified chapter markers')));
 });
 
 test('automatic SEO updates pause when generated title or description duplicates channel copy', () => {
@@ -555,19 +596,31 @@ test('730-day review queue simulation settles safe packages, retries transient e
     const description = blocked ? 'Short source description'
       : privacyStatus === 'public' ? base.source.description
         : 'Owner-provided match notes with grounded details. '.repeat(4);
-    const source = { ...base.source, title: 'ARC Raiders review ' + index,
+    const title = 'ARC Raiders gameplay highlights with complete squad extraction walkthrough episode ' + index;
+    const source = { ...base.source, title,
       description, privacyStatus };
+    const chapterMarkers = index < 65 ? [
+      { kind: 'chapter', startSeconds: 0, title: 'Scouting the raid' },
+      { kind: 'chapter', startSeconds: 60, title: 'Holding the gate' },
+      { kind: 'chapter', startSeconds: 120, title: 'Escaping to extraction' }
+    ] : [];
     const row = item({
       videoId: 'review-' + index,
       status: 'needs_review',
       generatedAt: new Date(Date.UTC(2026, 0, 1) + index * 86400000).toISOString(),
       source,
       context: blocked ? { takeaways: '' }
-        : privacyStatus === 'public' ? { takeaways: '' } : { takeaways: 'Owner supplied gameplay details' },
+        : privacyStatus === 'public' ? { takeaways: '', markers: chapterMarkers }
+          : { takeaways: 'Owner supplied gameplay details' },
       analysis: blocked ? null : privacyStatus === 'public' ? { summary: 'Observed match' } : null,
-      package: { ...base.package, missingEvidence: blocked
-        ? ['Script or key takeaways needed to confirm the description and thumbnail claims']
-        : ['Three verified chapter markers are needed'] }
+      package: { ...base.package,
+        titles: { ...base.package.titles, search: ['ARC Raiders Raid Review ' + index] },
+        chapters: chapterMarkers.map((marker) =>
+          new Date(marker.startSeconds * 1000).toISOString().slice(14, 19) + ' - ' + marker.title),
+        evidence: chapterMarkers.length ? { chapterSource: 'owner' } : {},
+        missingEvidence: blocked
+          ? ['Script or key takeaways needed to confirm the description and thumbnail claims']
+          : ['Three verified chapter markers, starting at 00:00, are needed'] }
     });
     rows.set(row.videoId, row);
     liveVideos.set(row.videoId, { snippet: { ...source, categoryId: '20', liveBroadcastContent: 'none' },
@@ -653,6 +706,14 @@ test('730-day review queue simulation settles safe packages, retries transient e
   assert.equal([...updateCalls.values()].filter((count) => count === 2).length, 5);
   assert.equal([...rows.values()].filter((row) => row.autoResult?.state === 'skipped').length, 4);
   assert.equal([...rows.values()].filter((row) => row.applied).length, 130);
+  for (let index = 0; index < 130; index += 1) {
+    const row = rows.get('review-' + index);
+    const findings = auditVideo(row);
+    assert.equal(findings.some((finding) => finding.startsWith('The title is long')), false);
+    assert.equal(findings.some((finding) => finding.includes('description gives little context')), false);
+    assert.equal(findings.some((finding) => finding.includes('No verified chapter markers')),
+      index >= 65, 'only videos without timestamp evidence retain the chapter warning');
+  }
   assert.ok(['review-134', 'review-135'].every((id) =>
     !rows.get(id).applied && !rows.get(id).autoResult &&
     liveVideos.get(id).snippet.title === rows.get(id).source.title));
