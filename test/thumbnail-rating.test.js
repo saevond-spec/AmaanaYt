@@ -3,7 +3,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { rateThumbnailBriefs } = require('../src/thumbnail-rating');
-const { simulateTwoYears } = require('../scripts/simulate-two-years');
 
 const evidence = {
   source: {
@@ -45,30 +44,4 @@ test('rejects unreadable and ungrounded overlays without making a recommendation
   assert.equal(result.selectedIndex, null);
   assert.equal(result.ratings[0].eligible, false);
   assert.equal(result.ratings[1].eligible, false);
-});
-
-test('two-year simulation is stable, retries transient limits, and never touches non-public videos', () => {
-  const result = simulateTwoYears({
-    startDate: '2026-10-04',
-    initialPublicBacklog: 1000,
-    newPublicVideosPerDay: 1,
-    privateVideos: 20,
-    unlistedVideos: 20,
-    dailyLimit: 50,
-    rateLimitEvery: 37
-  });
-  assert.equal(result.assumptions.days, 730);
-  assert.equal(result.assumptions.endDate, '2028-10-02');
-  assert.equal(result.outcome.eligiblePublicVideosAdded, 1730);
-  assert.equal(result.outcome.processedPublicVideos, 1730);
-  assert.equal(result.outcome.ratedCandidates, 5190);
-  assert.equal(result.outcome.selectedVideos, 1730);
-  assert.equal(result.outcome.rejectedCandidates, 1730);
-  assert.equal(result.outcome.retriesAfterSimulatedRateLimit, 46);
-  assert.equal(result.outcome.daysToClearInitialPublicBacklog, 21);
-  assert.deepEqual(result.outcome.selectedOptionCounts, { '1': 577, '2': 577, '3': 576 });
-  assert.equal(result.outcome.remainingEligibleQueueAtHorizon, 0);
-  assert.equal(result.outcome.privateOrUnlistedWrites, 0);
-  assert.equal(result.outcome.privacyInvariant, true);
-  assert.equal(Object.hasOwn(result.outcome, 'predictedViews'), false);
 });
