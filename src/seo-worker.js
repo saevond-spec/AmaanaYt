@@ -266,6 +266,8 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       }
       // Process the available daily budget even if scheduled wake-ups were delayed.
       const remaining = Math.max(0, dailyLimit - counts.attemptedToday);
+      const metadataPeers = remaining > 0 && typeof store.listPublicSeoMetadata === 'function'
+        ? await store.listPublicSeoMetadata(channel.id, 2000) : [];
       let channelUpdatedAfterPublish = false;
       for (let index = 0; index < remaining; index += 1) {
         const job = await store.claimSeoVideo();
@@ -283,16 +285,24 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           const analysis = await videoAnalysis(job, state);
           const marketEvidence = await market?.research(job.source)
             .catch((error) => { logger.warn?.(`SEO market lookup ${job.videoId} failed: ${error.message}`); }) || null;
+          const comparisonPeers = metadataPeers.filter((peer) => String(peer.videoId) !== String(job.videoId));
           const generated = await generate(job.source, context, {
             apiKey: env.SEO_AI_API_KEY, model: env.SEO_AI_MODEL,
             baseUrl, fallbackModel, secondaryNativeModel, finalNativeModel,
-            analysis, marketEvidence, timeoutMs: env.SEO_AI_TIMEOUT_MS, circuitBreaker,
+            analysis, marketEvidence, metadataPeers: comparisonPeers,
+            timeoutMs: env.SEO_AI_TIMEOUT_MS, circuitBreaker,
             ...(sleep ? { sleep } : {}),
             onFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying fallback model ${fallback}`),
             onNativeFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying native route with ${fallback}`),
             onSecondNativeFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying second native model ${fallback}`),
             onFinalNativeFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying final native model ${fallback}`)
           });
+          if (job.source.privacyStatus === 'public') {
+            metadataPeers.unshift({ videoId: job.videoId,
+              title: generated.titles?.hybrid?.[0] || generated.titles?.search?.[0] || '',
+              description: generated.description || '' });
+            if (metadataPeers.length > 2000) metadataPeers.pop();
+          }
           await store.finishSeoVideo(job.videoId, job.claimToken, generated, null);
           logger.info?.(`SEO package ${job.videoId} generated: ${generated.missingEvidence.length ? 'needs_review' : 'ready'}`);
           if (publisher) {

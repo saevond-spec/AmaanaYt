@@ -3,7 +3,10 @@ const assert = require('node:assert/strict');
 const {
   formatTimestamp,
   buildHighlightTimeline,
-  buildHighlightDescription
+  buildHighlightDescription,
+  buildHighlightTitle,
+  buildShortTitle,
+  buildShortDescription
 } = require('../src/highlight-metadata');
 const { thumbnailHeadline, thumbnailOverlay, createThumbnail } = require('../src/video');
 const fs = require('node:fs/promises');
@@ -23,6 +26,30 @@ test('measured segment lengths produce verified chapter timestamps from zero', (
   assert.equal(formatTimestamp(3661), '1:01:01');
   assert.deepEqual(timeline.chapters.map((item) => item.time), ['0:00', '0:12', '0:31']);
   assert.match(buildHighlightDescription('123456', timeline), /Chapters\n0:00 - Opening duel/);
+});
+
+test('highlight and Short titles and descriptions use their specific moment details', () => {
+  const timeline = buildHighlightTimeline([
+    { title: 'Last ring shield swap', reason: 'A final 1v3 after recovering the banner' },
+    { title: 'Last ring shield swap', reason: 'A final 1v3 after recovering the banner' }
+  ], [12, 18]);
+  const highlightTitle = buildHighlightTitle('Apex Legends ranked session', timeline);
+  const firstTitle = buildShortTitle({ ...timeline.timestamps[0], title: 'Last ring shield swap' },
+    'Apex Legends ranked session', [highlightTitle]);
+  const secondTitle = buildShortTitle({ ...timeline.timestamps[1], title: 'Last ring shield swap' },
+    'Apex Legends ranked session', [highlightTitle, firstTitle]);
+  const firstDescription = buildShortDescription('123456', 'abcdefghijk', {
+    ...timeline.timestamps[0], title: 'Last ring shield swap', reason: 'A final 1v3 after recovering the banner'
+  }, 'Apex Legends ranked session');
+  const secondDescription = buildShortDescription('123456', 'abcdefghijk', {
+    ...timeline.timestamps[1], title: 'Last ring shield swap', reason: 'A final 1v3 after recovering the banner'
+  }, 'Apex Legends ranked session');
+  assert.match(highlightTitle, /Last ring shield swap/);
+  assert.notEqual(firstTitle, secondTitle);
+  assert.ok(firstDescription.startsWith('Last ring shield swap (0:00)'));
+  assert.ok(secondDescription.startsWith('Last ring shield swap (0:12)'));
+  assert.notEqual(firstDescription, secondDescription);
+  assert.ok(firstDescription.includes('Source VOD: https://www.twitch.tv/videos/123456?t=0s'));
 });
 
 test('short or too few segments remain timestamp links without a chapter heading', () => {

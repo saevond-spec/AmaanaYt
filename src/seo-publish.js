@@ -79,6 +79,10 @@ function automaticVideoEdit(item) {
     throw problem('Only public videos can be automatically updated');
   }
   if (!pkg || !['ready', 'needs_review'].includes(item.status)) throw problem('No generated SEO package');
+  if (pkg.metadataConflicts?.length || pkg.missingEvidence?.some((warning) =>
+    /duplicate titles|closely matches another public video/i.test(warning))) {
+    throw problem('Generated title or description closely matches existing channel metadata; owner review is required');
+  }
   const hasOwnerContext = Boolean(item.context?.takeaways?.trim());
   const hasVideoAnalysis = Boolean(item.analysis);
   const hasDescriptionEvidence = String(source.description || '').trim().length >= 100;

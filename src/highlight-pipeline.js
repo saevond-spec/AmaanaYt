@@ -4,6 +4,8 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { validateHighlightMoments, verifyCreatedClip } = require('./highlight-validation');
+const { buildHighlightTitle: defaultBuildHighlightTitle, buildShortTitle: defaultBuildShortTitle,
+  buildShortDescription: defaultBuildShortDescription } = require('./highlight-metadata');
 
 function createBatchQueue(processJob, options = {}) {
   const schedule = options.schedule || setImmediate;
@@ -115,7 +117,9 @@ function requireCompletedYouTubeOutput(video, expectedVideoId, outputType = 'vid
 function createHighlightProcessor(dependencies) {
   const {
     uploadDir, store, twitch, video, youtube, seo, autoAssignPlaylist,
-    buildHighlightTimeline, buildHighlightDescription, cleanText,
+    buildHighlightTimeline, buildHighlightDescription,
+    buildHighlightTitle = defaultBuildHighlightTitle, buildShortTitle = defaultBuildShortTitle,
+    buildShortDescription = defaultBuildShortDescription, cleanText,
     idFactory = () => crypto.randomUUID(), logError = () => {},
     maxAutoAttempts = 12, autoPublish = true, now = () => Date.now()
   } = dependencies;
@@ -194,9 +198,9 @@ function createHighlightProcessor(dependencies) {
       const timeline = buildHighlightTimeline(batch.highlights, durations);
       await video.validateHighlight(montage, timeline.durationSeconds);
       const description = batch.pipelineVersion >= 2
-        ? buildHighlightDescription(batch.vodId, timeline)
+        ? buildHighlightDescription(batch.vodId, timeline, batch.streamTitle)
         : 'Highlights from https://www.twitch.tv/videos/' + batch.vodId;
-      const highlightTitle = cleanText((batch.streamTitle || 'Saevond livestream') + ' | Best moments', 100);
+      const highlightTitle = buildHighlightTitle(batch.streamTitle || 'Saevond livestream', timeline);
       const highlightTags = ['@saevond', 'gaming', 'livestream highlights'];
       const thumbnailPath = path.join(directory, 'highlight-thumbnail.jpg');
       let thumbnailStatus = batch.thumbnailStatus || 'pending';
@@ -299,17 +303,21 @@ function createHighlightProcessor(dependencies) {
       for (let index = 0; index < batch.highlights.length; index += 1) {
         const moment = batch.highlights[index];
         const length = Math.min(60, durations[index]);
-        const shortDescription = (moment.reason || 'Livestream highlight') +
-          '\n\nHighlight video: https://youtu.be/' + highlight.id + '\n#Saevond #Shorts';
         const shortTags = ['@saevond', 'gaming', 'Shorts'];
         const existingShort = shortsByIndex.get(index);
+        const seenShortTitles = [highlightTitle, ...[...shortsByIndex.entries()]
+          .filter(([shortIndex]) => Number(shortIndex) !== index)
+          .map(([, short]) => short.title).filter(Boolean)];
+        const shortTitle = existingShort?.title || buildShortTitle(moment, batch.streamTitle, seenShortTitles);
+        const shortDescription = existingShort?.description ||
+          buildShortDescription(batch.vodId, highlight.id, moment, batch.streamTitle);
         if (existingShort && existingShort.youtubeVideoId) {
           if (existingShort.publicationStatus !== 'published') {
             await store.updateDraft(existingShort.id, { status: 'clip_partial', productionState: 'processing' });
           }
           if (existingShort.seoRegistrationStatus !== 'registered') {
             const payload = {
-              title: existingShort.title || moment.title,
+              title: shortTitle,
               description: existingShort.description || shortDescription,
               tags: existingShort.tags || shortTags,
               durationSeconds: length,
@@ -336,11 +344,11 @@ function createHighlightProcessor(dependencies) {
           await video.shortFromHighlight(montage, offset, length, shortPath);
           await video.validateShort(shortPath, length);
           const uploaded = await youtube.uploadPrivate({
-            filePath: shortPath, title: moment.title, description: shortDescription, tags: shortTags
+            filePath: shortPath, title: shortTitle, description: shortDescription, tags: shortTags
           });
           const shortDraft = {
             id: idFactory(), sourceType: 'twitch_highlight_short', parentId: id,
-            highlightIndex: index, vodId: batch.vodId, title: moment.title,
+            highlightIndex: index, vodId: batch.vodId, title: shortTitle,
             description: shortDescription, tags: shortTags, youtubeVideoId: uploaded.id,
             mediaValidation: 'passed', playlistAssignment: { state: 'pending' },
             status: 'clip_partial', productionState: 'processing',
@@ -351,13 +359,13 @@ function createHighlightProcessor(dependencies) {
           await store.addDraft(shortDraft);
           shortsByIndex.set(index, shortDraft);
           const playlist = await autoAssignPlaylist({
-            id: uploaded.id, privacyStatus: 'private', title: moment.title,
+            id: uploaded.id, privacyStatus: 'private', title: shortTitle,
             description: shortDescription, tags: shortTags,
             context: { takeaways: moment.reason || moment.title, videoType: 'Gameplay' }
           });
           await store.updateDraft(shortDraft.id, { playlistAssignment: playlist });
           const registered = await registerSeo(shortDraft.id, uploaded.id, {
-            title: moment.title, description: shortDescription, tags: shortTags,
+            title: shortTitle, description: shortDescription, tags: shortTags,
             durationSeconds: length,
             context: { takeaways: moment.reason || moment.title, videoType: 'Gameplay' },
             markers: [{ kind: 'clip', startSeconds: 0, endSeconds: length,

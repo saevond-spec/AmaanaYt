@@ -391,6 +391,18 @@ async function countPublicSeoVideos() {
   return result.rows[0]?.count || 0;
 }
 
+async function listPublicSeoMetadata(channelId, limit = 2000) {
+  await init();
+  const safeChannelId = String(channelId || '').trim();
+  if (!safeChannelId) throw new Error('A YouTube channel ID is required for duplicate metadata checks');
+  const safeLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(5000, limit)) : 2000;
+  const result = await pool.query('SELECT video_id AS "videoId", source->>\'title\' AS title, ' +
+    'source->>\'description\' AS description FROM amaana_seo_packages ' +
+    'WHERE source->>\'privacyStatus\' = \'public\' AND source->>\'channelId\' = $1 ' +
+    'ORDER BY updated_at DESC, video_id ASC LIMIT $2', [safeChannelId, safeLimit]);
+  return result.rows;
+}
+
 async function listYoutubeSearchCandidates(limit = 20, offset = 0) {
   await init();
   const safeLimit = Math.max(1, Math.min(50, Number.isSafeInteger(limit) ? limit : 20));
@@ -762,6 +774,7 @@ module.exports = {
   getSeoVideo,
   listSeoVideos,
   countPublicSeoVideos,
+  listPublicSeoMetadata,
   listYoutubeSearchCandidates,
   saveYoutubeSearchSnapshots,
   saveGoogleSearchSnapshots,

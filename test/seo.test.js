@@ -70,6 +70,16 @@ test('uses only supplied markers for chapters and clips', () => {
   assert.ok(pkg.description.startsWith(hook));
 });
 
+test('marks title and substantive description duplicates for owner review', () => {
+  const baseline = validatePackage(generated, source, context);
+  const duplicate = validatePackage(generated, source, context, null, null, [{
+    videoId: 'older-video', title: baseline.titles.hybrid[0], description: baseline.description
+  }]);
+  assert.deepEqual(duplicate.metadataConflicts.map((item) => item.kind), ['title', 'description']);
+  assert.ok(duplicate.missingEvidence.some((warning) => /title closely matches/i.test(warning)));
+  assert.ok(duplicate.missingEvidence.some((warning) => /description closely matches/i.test(warning)));
+});
+
 test('shorter truthful hooks and focused tags pass, and market provenance is recorded', () => {
   const pkg = validatePackage({ ...generated,
     hook: 'NARAKA BLADEPOINT guide with a final fight from this match.',
@@ -406,6 +416,42 @@ test('worker grows consecutive 503 pauses to 120 minutes', async () => {
       assert.equal(state.consecutive503s, index + 1);
       assert.ok(Math.abs(Date.parse(state.providerBlockedUntil) - Date.now() - expectedMinutes * 60000) < 2000);
     }
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('worker checks generated metadata against the public channel catalog before publishing', async () => {
+  let storedPackage = null;
+  let metadataLookup = null;
+  let claims = 0;
+  const publicSource = { ...source, privacyStatus: 'public' };
+  const existingPackage = validatePackage(generated, publicSource, context);
+  const store = {
+    getSeoSyncState: async () => ({ channelId: 'channel-1', recentAt: new Date().toISOString(),
+      completed: true, viewPriorityScanVersion: 1, enabled: true }),
+    seoCounts: async () => ({ attemptedToday: 0 }),
+    listPublicSeoMetadata: async (channelId, limit) => {
+      metadataLookup = { channelId, limit };
+      return [{ videoId: 'older-video', title: existingPackage.titles.hybrid[0],
+        description: existingPackage.description }];
+    },
+    claimSeoVideo: async () => claims++ === 0
+      ? { videoId: 'candidate-video', claimToken: 'claim', source: publicSource, context, attempts: 1 } : null,
+    finishSeoVideo: async (_id, _token, pkg) => { storedPackage = pkg; }
+  };
+  const youtube = { isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner' }) };
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: true,
+    json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) });
+  try {
+    const worker = createSeoWorker({ store, youtube,
+      env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'metadata-duplicate-worker' },
+      logger: { info() {}, error() {}, warn() {} } });
+    await worker.run();
+    assert.deepEqual(metadataLookup, { channelId: 'channel-1', limit: 2000 });
+    assert.deepEqual(storedPackage.metadataConflicts.map((item) => item.kind), ['title', 'description']);
   } finally {
     global.fetch = originalFetch;
   }

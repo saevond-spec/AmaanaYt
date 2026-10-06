@@ -119,7 +119,7 @@ async function harness(t, options = {}) {
       const call = { kind: isShort ? 'short' : 'highlight', title: request.title,
         privacyStatus: 'private', succeeded: false };
       counters.uploads.push(call);
-      if (isShort && options.failShortTitle === request.title && !shortFailureUsed) {
+      if (isShort && request.title.startsWith(options.failShortTitle || '\u0000') && !shortFailureUsed) {
         shortFailureUsed = true;
         throw Object.assign(new Error('YouTube upload quota exceeded'), { status: 429 });
       }
@@ -127,7 +127,10 @@ async function harness(t, options = {}) {
         throw Object.assign(new Error('YouTube upload forbidden'), { status: 403 });
       }
       call.succeeded = true;
-      const id = isShort ? 'yt-short-' + request.title.toLowerCase().replaceAll(' ', '-') : 'yt-parent';
+      let id = isShort ? 'yt-short-' + request.title.split(' | ')[0].toLowerCase().replaceAll(' ', '-') : 'yt-parent';
+      if (isShort && youtubeVideos.has(id)) {
+        id += '-' + counters.uploads.filter((upload) => upload.kind === 'short').length;
+      }
       call.id = id;
       youtubeVideos.set(id, 'private');
       return { id };
@@ -178,7 +181,7 @@ async function harness(t, options = {}) {
   const seo = {
     async registerUpload(videoId, payload) {
       counters.seo.push({ videoId, title: payload.title });
-      if (options.failSeoTitle === payload.title && !seoFailureUsed) {
+      if (payload.title.startsWith(options.failSeoTitle || '\u0000') && !seoFailureUsed) {
         seoFailureUsed = true;
         throw Object.assign(new Error('SEO queue temporarily unavailable'), { status: 503 });
       }
@@ -226,6 +229,22 @@ test('complete production validates media and timestamps, then publishes all out
   assert.equal(h.counters.publications.length, 4);
   assert.equal(h.counters.visibilityMutations, 4);
   assert.equal(h.counters.publicationChecks.length, 8);
+});
+
+test('repeated moment labels produce unique titles and clip-specific descriptions within a batch', async (t) => {
+  const h = await harness(t);
+  const repeated = moments.map((moment) => ({ ...moment, title: 'Same clutch moment', reason: 'A clutch play' }));
+  h.batch.highlights = repeated;
+  await h.store.updateDraft(h.batch.id, { highlights: repeated });
+  await h.processor(h.batch.id);
+  const shorts = [...h.drafts.values()].filter((draft) => draft.sourceType === 'twitch_highlight_short');
+  assert.equal(shorts.length, 3);
+  assert.equal(new Set(shorts.map((draft) => draft.title)).size, 3);
+  assert.equal(new Set(shorts.map((draft) => draft.description)).size, 3);
+  assert.ok(shorts[1].title.includes('1:30'));
+  assert.ok(shorts[0].description.startsWith('Same clutch moment (0:30)'));
+  assert.ok(shorts[1].description.startsWith('Same clutch moment (1:30)'));
+  assert.ok(h.drafts.get(h.batch.id).title.includes('Highlights: Saevond ranked session — Same clutch moment'));
 });
 
 test('a transient Short upload failure schedules retry, then finishes without duplicate uploads', async (t) => {

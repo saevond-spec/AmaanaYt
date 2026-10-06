@@ -39,6 +39,12 @@ test('automatic copy preserves existing links and disclosures without inserting 
   assert.ok(auditVideo(item()).some((finding) => finding.includes('keyword')));
 });
 
+test('automatic SEO updates pause when generated title or description duplicates channel copy', () => {
+  const duplicate = item({ package: { ...item().package,
+    metadataConflicts: [{ kind: 'title', videoId: 'older-video' }] } });
+  assert.throws(() => automaticVideoEdit(duplicate), /closely matches existing channel metadata/);
+});
+
 test('automatic SEO edits only public videos and enforces evidence gates', () => {
   for (const privacyStatus of ['scheduled', 'private', 'unlisted']) {
     assert.throws(() => automaticVideoEdit(item({

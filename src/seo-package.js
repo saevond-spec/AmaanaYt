@@ -1,6 +1,7 @@
 const MAX_DESCRIPTION = 5000;
 const { rateThumbnailBriefs } = require('./thumbnail-rating');
 const { ensureCreatorTag } = require('./channel-tags');
+const { canonicalText, descriptionCore, findMetadataConflicts } = require('./metadata-uniqueness');
 
 function clean(value, max = 5000) {
   return String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -123,13 +124,15 @@ function focusedTags(rawTags, primaryKeyword) {
   return focused;
 }
 
-function validatePackage(raw, source, context, analysis = null, marketEvidence = null) {
+function validatePackage(raw, source, context, analysis = null, marketEvidence = null, metadataPeers = []) {
   const keyword = nonempty(raw.primaryKeyword, 'primary keyword', 100);
   if (keyword.length > 59) throw new Error('Primary keyword must be under 60 characters');
   if (context.primaryKeyword && keyword.toLocaleLowerCase() !== context.primaryKeyword.toLocaleLowerCase()) {
     throw new Error('The primary keyword must match the owner input');
   }
   const titles = {};
+  const titleOptionKeys = new Set();
+  let duplicateTitleOptions = false;
   for (const group of ['search', 'curiosity', 'hybrid']) {
     const options = raw.titles?.[group];
     if (!Array.isArray(options) || options.length !== 3) throw new Error(`Expected three ${group} titles`);
@@ -138,6 +141,9 @@ function validatePackage(raw, source, context, analysis = null, marketEvidence =
       if (group === 'search' && !title.toLocaleLowerCase().startsWith(keyword.toLocaleLowerCase())) {
         throw new Error('Search titles must start with the primary keyword');
       }
+      const titleKey = canonicalText(title);
+      if (titleOptionKeys.has(titleKey)) duplicateTitleOptions = true;
+      titleOptionKeys.add(titleKey);
       return title;
     });
   }
@@ -171,6 +177,7 @@ function validatePackage(raw, source, context, analysis = null, marketEvidence =
     provenance: item.provenance
   }));
   const missingEvidence = [];
+  if (duplicateTitleOptions) missingEvidence.push('Generated title options contain duplicate titles; owner review is required');
   if (!analysis && !context.takeaways && source.description.trim().length < 100) {
     missingEvidence.push('Script or key takeaways needed to confirm the description and thumbnail claims');
   }
@@ -189,6 +196,11 @@ function validatePackage(raw, source, context, analysis = null, marketEvidence =
     '', raw.hashtags.join(' ')
   ].join('\n');
   if (description.length > 5000) throw new Error('Description exceeds the YouTube character limit');
+  const selectedTitle = titles.hybrid[0] || titles.search[0];
+  const metadataConflicts = findMetadataConflicts({ title: selectedTitle, description, peers: metadataPeers });
+  for (const kind of new Set(metadataConflicts.map((conflict) => conflict.kind))) {
+    missingEvidence.push(`Generated ${kind} closely matches another public video; owner review is required`);
+  }
   return {
     primaryKeyword: keyword, titles,
     thumbnails: ratedThumbnails,
@@ -200,7 +212,7 @@ function validatePackage(raw, source, context, analysis = null, marketEvidence =
       reasons: thumbnailRating.selected?.reasons ?? []
     },
     hook, paragraphs, chapters,
-    description, tags, hashtags: raw.hashtags,
+    description, tags, hashtags: raw.hashtags, metadataConflicts,
     pinnedComment: nonempty(raw.pinnedComment, 'pinned comment', 500),
     communityPost: nonempty(raw.communityPost, 'community post', 600),
     shorts, missingEvidence,
@@ -246,7 +258,7 @@ const defaultCircuitBreaker = createModelCircuitBreaker();
 
 async function generatePackage(source, context, { apiKey, model, baseUrl, fallbackModel,
   secondaryNativeModel, finalNativeModel, onFallback, onNativeFallback, onSecondNativeFallback,
-  onFinalNativeFallback, analysis = null, marketEvidence = null, timeoutMs = process.env.SEO_AI_TIMEOUT_MS,
+  onFinalNativeFallback, analysis = null, marketEvidence = null, metadataPeers = [], timeoutMs = process.env.SEO_AI_TIMEOUT_MS,
   circuitBreaker = defaultCircuitBreaker, random = Math.random,
   fetchImpl = fetch, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   if (!apiKey || !model) throw new Error('Configure SEO_AI_API_KEY and SEO_AI_MODEL to generate packages');
@@ -261,6 +273,10 @@ async function generatePackage(source, context, { apiKey, model, baseUrl, fallba
       observedAt: marketEvidence.observedAt, windowDays: marketEvidence.windowDays,
       samples: marketEvidence.samples?.slice(0, 5)
     } : null,
+    existingChannelVideos: (Array.isArray(metadataPeers) ? metadataPeers : []).slice(0, 80).map((item) => ({
+      videoId: String(item.videoId || '').slice(0, 32), title: String(item.title || '').slice(0, 100),
+      descriptionOpening: descriptionCore(item.description).slice(0, 240)
+    })),
     groundedChapters: evidence.chapters.map((item) => ({ time: clock(item.startSeconds), title: item.title })),
     groundedClips: evidence.clips.map((item) => ({ start: clock(item.startSeconds), end: clock(item.endSeconds), title: item.title }))
   };
@@ -269,8 +285,8 @@ Return a single JSON object with exactly these keys:
 primaryKeyword (use ownerInput.primaryKeyword verbatim if supplied), titles: {search:[3],curiosity:[3],hybrid:[3]},
 thumbnails:[{visual,overlay,palette,hook} x3], hook, paragraphs:[2 or 3], tags:[3 to 8 focused strings],
 hashtags:[3 strings beginning #], pinnedComment, communityPost, clipHooks:[one per groundedClips, same order].
-All titles must be under 60 characters. Every search title starts with the primary keyword.
-The hook is 50 to 160 characters and includes the primary keyword naturally. The description paragraphs must say who, what, and why.
+All titles must be under 60 characters. Every search title starts with the primary keyword. Make all nine title options distinct from each other and from existingChannelVideos; do not rely on generic suffixes to disguise a duplicate.
+The hook is 50 to 160 characters and includes the primary keyword naturally. The description paragraphs must say who, what, and why. Make the first lines and body specific to this video's footage; shared links, chapter labels, and hashtags are boilerplate and do not count as unique copy. Avoid repeating openings in existingChannelVideos.
 Each thumbnail overlay has at most four words, complements its title, and has clear contrast in light and dark feeds.
 Return 3 to 8 focused tags, ordered from most relevant to least relevant. The first tag must be the exact primaryKeyword verbatim; then add exact game or mode terms, meaningful aliases, and common misspellings. Do not pad the list with generic tags. Only the first eight candidates are considered; the exact primary keyword is moved to the first position or added if missing, and total tag text stays under 450 characters. Treat tags as supporting metadata rather than a ranking driver.
 Keep each title and thumbnail promise accurate to the actual footage. Optimize for viewer satisfaction and watch time rather than click-through rate alone; a click is not a success if the video does not deliver on its promise.
@@ -371,7 +387,7 @@ DATA: ${JSON.stringify(payload)}`;
     .map((part) => part.text || '').join('') :
     body.choices?.[0]?.message?.content;
   if (!content || content.length > 30000) throw new Error('SEO provider returned an empty or oversized response');
-  return validatePackage(JSON.parse(content), source, context, analysis, marketEvidence);
+  return validatePackage(JSON.parse(content), source, context, analysis, marketEvidence, metadataPeers);
 }
 
 module.exports = { clean, clock, secondsFromIso, normalizeSource, normalizeContext,
