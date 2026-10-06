@@ -77,14 +77,14 @@ function isTransientError(error) {
     'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT'].includes(code);
 }
 
-function requireCompletedYouTubeOutput(video, expectedVideoId) {
+function requireCompletedYouTubeOutput(video, expectedVideoId, outputType = 'video') {
   if (!video) {
-    const error = new Error('YouTube output is not available for processing checks yet');
+    const error = new Error('YouTube ' + outputType + ' is not available for processing checks yet');
     error.status = 425;
     throw error;
   }
-  if (video.id && expectedVideoId && video.id !== expectedVideoId) {
-    const error = new Error('YouTube returned a different video during processing checks');
+  if (!expectedVideoId || video.id !== expectedVideoId) {
+    const error = new Error('YouTube returned a missing or different video during processing checks');
     error.status = 409;
     throw error;
   }
@@ -94,12 +94,18 @@ function requireCompletedYouTubeOutput(video, expectedVideoId) {
       ['failed'].includes(processingStatus)) {
     const reason = video.status?.rejectionReason || video.status?.failureReason ||
       video.processingDetails?.processingFailureReason;
-    const error = new Error('YouTube upload or processing failed' + (reason ? ': ' + reason : ''));
+    const error = new Error('YouTube ' + outputType + ' upload or processing failed' +
+      (reason ? ': ' + reason : ''));
     error.status = 422;
     throw error;
   }
+  if (video.snippet?.liveBroadcastContent !== 'none') {
+    const error = new Error('YouTube ' + outputType + ' is active, upcoming, or missing live-status confirmation');
+    error.status = 425;
+    throw error;
+  }
   if (uploadStatus !== 'processed' || processingStatus !== 'succeeded') {
-    const error = new Error('YouTube has not confirmed this output is fully processed');
+    const error = new Error('YouTube has not confirmed this ' + outputType + ' is fully processed');
     error.status = 425;
     throw error;
   }
@@ -397,11 +403,12 @@ function createHighlightProcessor(dependencies) {
           noteFailure('YouTube processing', error);
         } else {
           const outputChecks = await Promise.all(outputs.map(async (output) => {
+            const outputType = output.id === id ? 'video' : 'Short';
             const label = output.id === id ? 'highlight processing'
               : 'Short ' + (output.highlightIndex + 1) + ' processing';
             try {
               const current = await youtube.getVideo(output.youtubeVideoId);
-              requireCompletedYouTubeOutput(current, output.youtubeVideoId);
+              requireCompletedYouTubeOutput(current, output.youtubeVideoId, outputType);
               if (shouldAutoPublish && !['private', 'public'].includes(current.status?.privacyStatus)) {
                 const error = new Error('Output visibility changed before automatic publication');
                 error.status = current.status?.privacyStatus === 'unlisted' ? 409 : 425;
@@ -466,7 +473,8 @@ function createHighlightProcessor(dependencies) {
               throw new Error('YouTube publication checks are unavailable');
             }
             const current = await youtube.getVideo(output.youtubeVideoId);
-            requireCompletedYouTubeOutput(current, output.youtubeVideoId);
+            requireCompletedYouTubeOutput(current, output.youtubeVideoId,
+              output.id === id ? 'video' : 'Short');
             const privacyStatus = current.status?.privacyStatus;
             if (privacyStatus === 'private') {
               const published = await youtube.publish(output.youtubeVideoId);
@@ -553,5 +561,5 @@ function createHighlightProcessor(dependencies) {
 
 module.exports = {
   createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
-  findHighlightBatchByVodId, isTransientError
+  findHighlightBatchByVodId, isTransientError, requireCompletedYouTubeOutput
 };
