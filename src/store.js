@@ -505,18 +505,22 @@ async function listSeoChannelCandidates(limit = 100) {
   return result.rows;
 }
 
-async function listSeoNeedsPlaylist(limit = 20) {
+async function listSeoNeedsPlaylist(limit = 20, privacyGroup = 'all') {
   await init();
   const requestedLimit = Number(limit);
   const safeLimit = Number.isSafeInteger(requestedLimit) ? Math.max(1, Math.min(50, requestedLimit)) : 20;
+  const privacyStatuses = privacyGroup === 'public' ? ['public']
+    : privacyGroup === 'nonpublic' ? ['private', 'unlisted']
+      : privacyGroup === 'all' ? ['public', 'private', 'unlisted'] : null;
+  if (!privacyStatuses) throw new Error('Invalid playlist privacy queue');
   const result = await pool.query(`SELECT video_id AS "videoId", source, context, package
     FROM amaana_seo_packages
-    WHERE source->>'privacyStatus' IN ('public', 'private', 'unlisted')
+    WHERE source->>'privacyStatus' = ANY($2::text[])
       AND (playlist_result IS NULL OR
         (playlist_result->>'state' = 'retry' AND
          (playlist_result->>'at')::timestamptz < NOW() - INTERVAL '1 hour'))
     ORDER BY (source->>'publishedAt') ASC NULLS LAST, created_at ASC
-    LIMIT $1`, [safeLimit]);
+    LIMIT $1`, [safeLimit, privacyStatuses]);
   return result.rows;
 }
 
@@ -544,7 +548,17 @@ async function requeueSeoPlaylistResults(videoIds = []) {
   const result = await pool.query(`UPDATE amaana_seo_packages
     SET playlist_result = NULL, updated_at = NOW()
     WHERE video_id = ANY($1::text[])
-      AND source->>'privacyStatus' IN ('public', 'private', 'unlisted')`, [ids]);
+      AND source->>'privacyStatus' IN ('public', 'private', 'unlisted')
+      AND playlist_result->>'state' IN ('added', 'already_added', 'fallback_added', 'fallback_already_added')`, [ids]);
+  return result.rowCount;
+}
+
+async function requeueSeoPlaylistAuthorizationFailures() {
+  await init();
+  const result = await pool.query(`UPDATE amaana_seo_packages
+    SET playlist_result = NULL, updated_at = NOW()
+    WHERE playlist_result->>'state' = 'authorization_required'
+      AND source->>'privacyStatus' IN ('public', 'private', 'unlisted')`);
   return result.rowCount;
 }
 
@@ -756,6 +770,7 @@ module.exports = {
   markSeoPlaylistResult,
   resetSeoPlaylistResults,
   requeueSeoPlaylistResults,
+  requeueSeoPlaylistAuthorizationFailures,
   getVideoAnalysis,
   saveVideoAnalysis,
   seoCounts,
