@@ -58,7 +58,7 @@ test('catalog backlog classifies private and unlisted videos into private playli
   ];
   const assigner = createPlaylistAutoAssigner({
     store: {
-      listSeoNeedsPlaylist: async () => candidates,
+      listSeoNeedsPlaylist: async (_limit, group) => group === 'nonpublic' ? candidates : [],
       markSeoPlaylistResult: async (id, result) => results.push([id, result]),
       reservePlaylistAutoSlot: async (privacyStatus) => {
         reservations.push(privacyStatus);
@@ -92,40 +92,39 @@ test('playlist quota day follows YouTube midnight Pacific reset', () => {
   assert.equal(youtubeQuotaDate(Date.parse('2026-10-03T08:00:00Z')), '2026-10-03');
 });
 
-test('unmatched metadata is placed in a private review playlist', async () => {
-  const created = [];
-  const reservations = [];
-  const additions = [];
+test('ambiguous and unmatched videos remain unassigned for owner review', async () => {
+  let reservations = 0;
+  let additions = 0;
+  let playlistCreates = 0;
   const assigner = createPlaylistAutoAssigner({
-    now: () => Date.parse('2026-10-04T12:00:00Z'),
     store: {
-      reservePlaylistAutoSlot: async (...args) => { reservations.push(args); return { allowed: true }; }
+      reservePlaylistAutoSlot: async () => { reservations += 1; return { allowed: true }; }
     },
     youtube: {
-      listOwnedPlaylists: async () => [],
-      createPlaylist: async (input) => {
-        created.push(input);
-        return { id: 'PL-review', title: input.title, description: input.description, privacyStatus: 'private' };
-      },
-      addVideoToPlaylist: async (input) => { additions.push(input); return { alreadyAdded: false }; }
+      listOwnedPlaylists: async () => [
+        { id: 'PL-arc', title: 'ARC Raiders Highlights', privacyStatus: 'private' },
+        { id: 'PL-shorts', title: 'ARC Raiders Shorts', privacyStatus: 'private' }
+      ],
+      createPlaylist: async () => { playlistCreates += 1; },
+      addVideoToPlaylist: async () => { additions += 1; return { alreadyAdded: false }; }
     },
     logger: { warn() {} }
   });
 
-  const result = await assigner.assign({
-    id: 'abcdefghijk', title: 'Unrecognized variety gameplay',
-    description: '', tags: [], privacyStatus: 'unlisted'
+  const unmatched = await assigner.assign({
+    id: 'abcdefghijk', title: 'Unrecognized variety gameplay', tags: [], privacyStatus: 'private'
+  });
+  const ambiguous = await assigner.assign({
+    id: 'lmnopqrstuv', title: 'ARC Raiders', tags: ['Highlights', 'Shorts'], privacyStatus: 'private'
   });
 
-  assert.equal(result.state, 'fallback_added');
-  assert.equal(result.needsReview, true);
-  assert.equal(result.matchState, 'no_match');
-  assert.equal(result.playlistTitle, 'Needs Playlist Review');
-  assert.equal(result.privacyStatus, 'private');
-  assert.equal(created.length, 1);
-  assert.equal(created[0].privacyStatus, 'private');
-  assert.deepEqual(additions, [{ playlistId: 'PL-review', videoId: 'abcdefghijk' }]);
-  assert.deepEqual(reservations[0], ['private', 30, '2026-10-04']);
+  assert.equal(unmatched.state, 'no_match');
+  assert.equal(unmatched.needsReview, true);
+  assert.equal(ambiguous.state, 'ambiguous');
+  assert.equal(ambiguous.needsReview, true);
+  assert.equal(reservations, 0);
+  assert.equal(additions, 0);
+  assert.equal(playlistCreates, 0);
 });
 
 test('playlist coverage audit compares every channel upload with all owned playlists', async () => {
@@ -188,14 +187,14 @@ test('playlist repair uses a 30-per-privacy-bucket cap and a 50-item batch', asy
   const assigner = createPlaylistAutoAssigner({
     env: { YOUTUBE_AUTO_PLAYLIST_DAILY_LIMIT: '999' },
     store: {
-      listSeoNeedsPlaylist: async (limit) => { requestedBatchSize = limit; return []; },
+      listSeoNeedsPlaylist: async (limit, group) => { requestedBatchSize ||= []; requestedBatchSize.push([limit, group]); return []; },
       markSeoPlaylistResult: async () => {}
     },
     youtube: { listOwnedPlaylists: async () => [] }
   });
   assert.equal(assigner.dailyLimit, 30);
   const result = await assigner.assignCatalogBacklog();
-  assert.equal(requestedBatchSize, 50);
+  assert.deepEqual(requestedBatchSize, [[25, 'public'], [25, 'nonpublic']]);
   assert.deepEqual(result, { attempted: 0, assigned: 0 });
 });
 
@@ -212,7 +211,7 @@ test('a full public playlist quota does not block private playlist repairs', asy
   const assigner = createPlaylistAutoAssigner({
     env: { YOUTUBE_AUTO_PLAYLIST_DAILY_LIMIT: '1' },
     store: {
-      listSeoNeedsPlaylist: async () => candidates,
+      listSeoNeedsPlaylist: async (_limit, group) => group === 'public' ? [candidates[0]] : [candidates[1]],
       markSeoPlaylistResult: async (id, result) => marked.push([id, result]),
       reservePlaylistAutoSlot: async (bucket) => {
         reservations.push(bucket);
