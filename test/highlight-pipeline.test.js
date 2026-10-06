@@ -136,13 +136,19 @@ async function harness(t, options = {}) {
       counters.publicationChecks.push(videoId);
       const checkNumber = (processingChecks.get(videoId) || 0) + 1;
       processingChecks.set(videoId, checkNumber);
-      const privacyStatus = youtubeVideos.get(videoId) || options.initialPrivacyStatus || 'private';
+      const privacyStatus = options.unlistedVideoId === videoId ? 'unlisted'
+        : youtubeVideos.get(videoId) || options.initialPrivacyStatus || 'private';
       const sequence = options.processingStatuses?.[videoId];
       const processingStatus = Array.isArray(sequence)
         ? sequence[Math.min(checkNumber - 1, sequence.length - 1)]
         : options.unprocessedVideoId === videoId ? 'processing'
         : options.failedProcessingVideoId === videoId ? 'failed' : 'succeeded';
-      return { id: videoId, status: { privacyStatus }, processingDetails: { processingStatus } };
+      const uploadSequence = options.uploadStatuses?.[videoId];
+      const uploadStatus = Array.isArray(uploadSequence)
+        ? uploadSequence[Math.min(checkNumber - 1, uploadSequence.length - 1)]
+        : options.failedUploadVideoId === videoId ? 'failed'
+        : options.unprocessedUploadVideoId === videoId ? 'uploaded' : 'processed';
+      return { id: videoId, status: { privacyStatus, uploadStatus }, processingDetails: { processingStatus } };
     },
     async publish(videoId) {
       counters.publications.push(videoId);
@@ -217,7 +223,7 @@ test('complete production validates media and timestamps, then publishes all out
   assert.equal(h.counters.seo.length, 4);
   assert.equal(h.counters.publications.length, 4);
   assert.equal(h.counters.visibilityMutations, 4);
-  assert.equal(h.counters.publicationChecks.length, 4);
+  assert.equal(h.counters.publicationChecks.length, 8);
 });
 
 test('a transient Short upload failure schedules retry, then finishes without duplicate uploads', async (t) => {
@@ -363,6 +369,74 @@ test('an inaccurate Twitch VOD clip timestamp blocks all YouTube uploads', async
   assert.equal(h.drafts.get(h.batch.id).status, 'clip_failed');
   assert.equal(h.counters.uploads.filter((upload) => upload.succeeded).length, 0);
   assert.equal(h.counters.publications.length, 0);
+});
+
+test('owner review waits until every YouTube upload and processing state is complete', async (t) => {
+  const shortId = 'yt-short-moment-two';
+  const h = await harness(t, { autoPublish: false,
+    uploadStatuses: { [shortId]: ['uploaded', 'processed'] } });
+  await h.processor(h.batch.id);
+  assert.equal(h.drafts.get(h.batch.id).status, 'clip_retry_wait');
+  assert.equal(h.drafts.get(h.batch.id).productionState, 'retry_scheduled');
+  const pendingShort = [...h.drafts.values()].find((draft) => draft.youtubeVideoId === shortId);
+  assert.equal(pendingShort.status, 'clip_partial');
+  assert.equal(pendingShort.productionState, 'processing');
+  assert.equal(h.counters.publications.length, 0);
+  assert.equal(h.counters.visibilityMutations, 0);
+
+  await h.processor(h.batch.id);
+  assert.equal(h.drafts.get(h.batch.id).status, 'awaiting_owner_approval');
+  assert.equal(h.drafts.get(h.batch.id).productionState, 'ready');
+  const readyShort = [...h.drafts.values()].find((draft) => draft.youtubeVideoId === shortId);
+  assert.equal(readyShort.status, 'awaiting_owner_approval');
+  assert.equal(readyShort.productionState, 'ready');
+  assert.equal(h.counters.publications.length, 0);
+  assert.equal(h.counters.visibilityMutations, 0);
+});
+
+test('automatic publication waits for the complete bundle before making any output public', async (t) => {
+  const shortId = 'yt-short-moment-two';
+  const h = await harness(t, { processingStatuses: {
+    [shortId]: ['processing', 'succeeded']
+  } });
+  await h.processor(h.batch.id);
+  assert.equal(h.drafts.get(h.batch.id).status, 'clip_retry_wait');
+  assert.equal(h.drafts.get(h.batch.id).productionState, 'retry_scheduled');
+  assert.equal(h.counters.publications.length, 0);
+  assert.equal(h.counters.visibilityMutations, 0);
+  assert.ok(h.counters.uploads.every((upload) => upload.privacyStatus === 'private'));
+
+  await h.processor(h.batch.id);
+  assert.equal(h.drafts.get(h.batch.id).status, 'completed');
+  assert.equal(h.counters.publications.length, 4);
+  assert.equal(h.counters.visibilityMutations, 4);
+});
+
+test('terminated YouTube processing details do not count as a finished output', async (t) => {
+  const shortId = 'yt-short-moment-one';
+  const h = await harness(t, { processingStatuses: { [shortId]: ['terminated'] } });
+  await h.processor(h.batch.id);
+  assert.equal(h.drafts.get(h.batch.id).status, 'clip_retry_wait');
+  assert.equal(h.drafts.get(h.batch.id).productionState, 'retry_scheduled');
+  assert.equal(h.counters.publications.length, 0);
+  assert.equal(h.counters.visibilityMutations, 0);
+});
+
+test('failed uploads and unlisted outputs stop automatic publication before any write', async (t) => {
+  const failed = await harness(t, { failedUploadVideoId: 'yt-short-moment-three' });
+  await failed.processor(failed.batch.id);
+  assert.equal(failed.drafts.get(failed.batch.id).status, 'clip_partial');
+  assert.equal(failed.counters.publications.length, 0);
+  assert.equal(failed.counters.visibilityMutations, 0);
+  const failedShort = [...failed.drafts.values()].find((draft) =>
+    draft.youtubeVideoId === 'yt-short-moment-three');
+  assert.equal(failedShort.productionState, 'partial');
+
+  const unlisted = await harness(t, { unlistedVideoId: 'yt-short-moment-two' });
+  await unlisted.processor(unlisted.batch.id);
+  assert.equal(unlisted.drafts.get(unlisted.batch.id).status, 'clip_partial');
+  assert.equal(unlisted.counters.publications.length, 0);
+  assert.equal(unlisted.counters.visibilityMutations, 0);
 });
 
 test('YouTube processing and output validation must pass before any automatic publication', async (t) => {
