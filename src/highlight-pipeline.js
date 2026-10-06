@@ -77,6 +77,35 @@ function isTransientError(error) {
     'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT'].includes(code);
 }
 
+function requireCompletedYouTubeOutput(video, expectedVideoId) {
+  if (!video) {
+    const error = new Error('YouTube output is not available for processing checks yet');
+    error.status = 425;
+    throw error;
+  }
+  if (video.id && expectedVideoId && video.id !== expectedVideoId) {
+    const error = new Error('YouTube returned a different video during processing checks');
+    error.status = 409;
+    throw error;
+  }
+  const uploadStatus = video.status?.uploadStatus;
+  const processingStatus = video.processingDetails?.processingStatus;
+  if (['deleted', 'failed', 'rejected'].includes(uploadStatus) ||
+      ['failed'].includes(processingStatus)) {
+    const reason = video.status?.rejectionReason || video.status?.failureReason ||
+      video.processingDetails?.processingFailureReason;
+    const error = new Error('YouTube upload or processing failed' + (reason ? ': ' + reason : ''));
+    error.status = 422;
+    throw error;
+  }
+  if (uploadStatus !== 'processed' || processingStatus !== 'succeeded') {
+    const error = new Error('YouTube has not confirmed this output is fully processed');
+    error.status = 425;
+    throw error;
+  }
+  return video;
+}
+
 function createHighlightProcessor(dependencies) {
   const {
     uploadDir, store, twitch, video, youtube, seo, autoAssignPlaylist,
@@ -259,7 +288,7 @@ function createHighlightProcessor(dependencies) {
 
       const existingShorts = (await store.listDrafts()).filter((draft) => draft.parentId === id);
       const shortsByIndex = new Map(existingShorts.map((draft) => [draft.highlightIndex, draft]));
-      const readyShortIndexes = new Set();
+      const registeredShortIndexes = new Set();
       let offset = 0;
       for (let index = 0; index < batch.highlights.length; index += 1) {
         const moment = batch.highlights[index];
@@ -269,6 +298,9 @@ function createHighlightProcessor(dependencies) {
         const shortTags = ['@saevond', 'gaming', 'Shorts'];
         const existingShort = shortsByIndex.get(index);
         if (existingShort && existingShort.youtubeVideoId) {
+          if (existingShort.publicationStatus !== 'published') {
+            await store.updateDraft(existingShort.id, { status: 'clip_partial', productionState: 'processing' });
+          }
           if (existingShort.seoRegistrationStatus !== 'registered') {
             const payload = {
               title: existingShort.title || moment.title,
@@ -282,13 +314,12 @@ function createHighlightProcessor(dependencies) {
             const registered = await registerSeo(existingShort.id, existingShort.youtubeVideoId,
               payload, 'Short ' + (index + 1) + ' SEO', failures, noteFailure);
             if (registered) {
-              await store.updateDraft(existingShort.id, { status: 'awaiting_owner_approval', productionState: 'ready' });
-              readyShortIndexes.add(index);
+              registeredShortIndexes.add(index);
             } else {
               await store.updateDraft(existingShort.id, { status: 'clip_partial', productionState: 'partial' });
             }
           } else {
-            readyShortIndexes.add(index);
+            registeredShortIndexes.add(index);
           }
           offset += durations[index];
           continue;
@@ -327,8 +358,7 @@ function createHighlightProcessor(dependencies) {
               title: moment.title, provenance: 'twitch_highlight' }]
           }, 'Short ' + (index + 1) + ' SEO', failures, noteFailure);
           if (registered) {
-            await store.updateDraft(shortDraft.id, { status: 'awaiting_owner_approval', productionState: 'ready' });
-            readyShortIndexes.add(index);
+            registeredShortIndexes.add(index);
           } else {
             await store.updateDraft(shortDraft.id, { status: 'clip_partial', productionState: 'partial' });
           }
@@ -338,8 +368,8 @@ function createHighlightProcessor(dependencies) {
         offset += durations[index];
       }
 
-      if (readyShortIndexes.size !== batch.highlights.length) {
-        failures.push('shorts: ' + readyShortIndexes.size + ' of ' + batch.highlights.length + ' are complete');
+      if (registeredShortIndexes.size !== batch.highlights.length) {
+        failures.push('shorts: ' + registeredShortIndexes.size + ' of ' + batch.highlights.length + ' have SEO registration');
       }
       const finalBatch = await store.getDraft(id);
       const finalShorts = (await store.listDrafts()).filter((draft) => draft.parentId === id)
@@ -354,22 +384,69 @@ function createHighlightProcessor(dependencies) {
         finalShorts.every((draft) => draft.mediaValidation === 'passed') &&
         (finalBatch.twitchClips || []).length === batch.highlights.length &&
         finalBatch.twitchClips.every((clip) => clip.timestampVerification?.verified === true);
-      const productionReady = failures.length === 0 && readyShortIndexes.size === batch.highlights.length &&
-        allOutputIdsPresent && seoReady && mediaReady &&
-        (batch.pipelineVersion < 2 || thumbnailStatus === 'applied');
+      const shouldAutoPublish = autoPublish && batch.autoPublishEligible === true;
+      const localProductionReady = failures.length === 0 &&
+        registeredShortIndexes.size === batch.highlights.length && allOutputIdsPresent &&
+        seoReady && mediaReady && (batch.pipelineVersion < 2 || thumbnailStatus === 'applied');
+      let youtubeProcessingReady = false;
+      const outputs = [finalBatch, ...finalShorts];
+      if (localProductionReady) {
+        if (typeof youtube.getVideo !== 'function') {
+          const error = new Error('YouTube processing checks are unavailable');
+          error.status = 503;
+          noteFailure('YouTube processing', error);
+        } else {
+          const outputChecks = await Promise.all(outputs.map(async (output) => {
+            const label = output.id === id ? 'highlight processing'
+              : 'Short ' + (output.highlightIndex + 1) + ' processing';
+            try {
+              const current = await youtube.getVideo(output.youtubeVideoId);
+              requireCompletedYouTubeOutput(current, output.youtubeVideoId);
+              if (shouldAutoPublish && !['private', 'public'].includes(current.status?.privacyStatus)) {
+                const error = new Error('Output visibility changed before automatic publication');
+                error.status = current.status?.privacyStatus === 'unlisted' ? 409 : 425;
+                throw error;
+              }
+              return true;
+            } catch (error) {
+              noteFailure(label, error, 250);
+              return false;
+            }
+          }));
+          youtubeProcessingReady = outputChecks.every(Boolean);
+        }
+      }
+      const productionReady = localProductionReady && youtubeProcessingReady;
       const maxAttemptsAllowed = Number.isSafeInteger(maxAutoAttempts) && maxAutoAttempts > 0 ? maxAutoAttempts : 12;
       const retryDelay = Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attemptCount - 1)));
       if (!productionReady) {
         const canAutoRetry = hasRetryableFailure && !hasPermanentFailure && attemptCount < maxAttemptsAllowed;
         const nextClipAttemptAt = canAutoRetry ? new Date(now() + retryDelay).toISOString() : null;
         const error = failures.slice(0, 8).join('; ') || 'Production checks did not pass';
+        for (const short of finalShorts) {
+          if (short.publicationStatus !== 'published') {
+            await store.updateDraft(short.id, {
+              status: 'clip_partial',
+              productionState: canAutoRetry ? 'processing' : 'partial',
+              productionFailures: failures.length ? failures : [error], error
+            });
+          }
+        }
         await store.updateDraft(id, {
           status: canAutoRetry ? 'clip_retry_wait' : 'clip_partial',
           productionState: canAutoRetry ? 'retry_scheduled' : 'partial',
           productionFailures: failures.length ? failures : [error], error, nextClipAttemptAt,
           processedAt: new Date(now()).toISOString()
         });
-      } else if (!(autoPublish && batch.autoPublishEligible === true)) {
+      } else if (!shouldAutoPublish) {
+        for (const short of finalShorts) {
+          if (short.publicationStatus !== 'published') {
+            await store.updateDraft(short.id, {
+              status: 'awaiting_owner_approval', productionState: 'ready',
+              productionFailures: [], error: null
+            });
+          }
+        }
         await store.updateDraft(id, {
           status: 'awaiting_owner_approval', productionState: 'ready',
           publicationStatus: 'pending', productionFailures: [], error: null,
@@ -381,7 +458,6 @@ function createHighlightProcessor(dependencies) {
           publicationStatus: 'publishing', productionFailures: [], error: null,
           nextClipAttemptAt: new Date(now()).toISOString()
         });
-        const outputs = [finalBatch, ...finalShorts];
         for (const output of outputs) {
           if (output.publicationStatus === 'published') continue;
           const label = output.id === id ? 'highlight publication' : 'Short ' + (output.highlightIndex + 1) + ' publication';
@@ -390,22 +466,7 @@ function createHighlightProcessor(dependencies) {
               throw new Error('YouTube publication checks are unavailable');
             }
             const current = await youtube.getVideo(output.youtubeVideoId);
-            if (!current) {
-              const error = new Error('YouTube output is not available for publication checks yet');
-              error.status = 425;
-              throw error;
-            }
-            const processingStatus = current.processingDetails?.processingStatus;
-            if (processingStatus === 'failed' || processingStatus === 'terminated') {
-              const error = new Error('YouTube processing failed for this output');
-              error.status = 422;
-              throw error;
-            }
-            if (processingStatus !== 'succeeded') {
-              const error = new Error('YouTube is still processing this output');
-              error.status = 425;
-              throw error;
-            }
+            requireCompletedYouTubeOutput(current, output.youtubeVideoId);
             const privacyStatus = current.status?.privacyStatus;
             if (privacyStatus === 'private') {
               const published = await youtube.publish(output.youtubeVideoId);
@@ -448,6 +509,16 @@ function createHighlightProcessor(dependencies) {
           });
         } else {
           const canAutoRetry = hasRetryableFailure && !hasPermanentFailure && attemptCount < maxAttemptsAllowed;
+          if (!canAutoRetry) {
+            for (const short of publishedShorts) {
+              if (short.publicationStatus !== 'published') {
+                await store.updateDraft(short.id, {
+                  status: 'awaiting_owner_approval', productionState: 'ready',
+                  productionFailures: failures, error: failures.slice(0, 8).join('; ') || 'Automatic publication stopped'
+                });
+              }
+            }
+          }
           await store.updateDraft(id, {
             status: canAutoRetry ? 'clip_retry_wait' : 'awaiting_owner_approval',
             productionState: canAutoRetry ? 'retry_scheduled' : 'ready',
