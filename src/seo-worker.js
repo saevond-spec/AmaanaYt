@@ -384,6 +384,11 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
         source.durationSeconds, Boolean(fields.markers));
       await store.updateSeoContext(videoId, context);
     }
+    const playlistResult = fields.playlistAssignment;
+    if (playlistResult && !['daily_limit', 'disabled', 'ineligible'].includes(playlistResult.state) &&
+        typeof store.markSeoPlaylistResult === 'function') {
+      await store.markSeoPlaylistResult(videoId, playlistResult);
+    }
     schedule(true);
   }
 
@@ -418,6 +423,11 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
 
   async function resumeAfterYouTubeReconnect() {
     youtubeAuthBlockedUntil = 0;
+    playlistAuto?.resumeAfterYouTubeReconnect?.();
+    if (typeof store.requeueSeoPlaylistAuthorizationFailures === 'function') {
+      const requeued = await store.requeueSeoPlaylistAuthorizationFailures();
+      if (requeued) logger.info?.(`Requeued ${requeued} playlist assignments after YouTube reconnect`);
+    }
     if (typeof store.getSeoSyncState !== 'function' || typeof store.saveSeoSyncState !== 'function') return;
     const state = await store.getSeoSyncState();
     await store.saveSeoSyncState({ ...state,
