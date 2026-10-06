@@ -269,8 +269,8 @@ function renderDraft(draft) {
   }
   if (draft.status === 'awaiting_owner_approval' && draft.productionState === 'ready') {
     const message = isHighlight
-      ? 'Rendered highlight, Shorts, and thumbnail are complete. SEO jobs are queued; this video stays private until owner approval.'
-      : 'Rendered Short is complete. Its SEO job is queued; this video stays private until owner approval.';
+      ? 'The highlight and every Short passed media validation and YouTube processing. SEO is registered and thumbnail requirements are met. Review the bundle before publishing.'
+      : 'This Short passed media validation and YouTube processing, and its SEO package is registered. Review before publishing.';
     card.append(element('p', 'draft-meta', message));
   }
   if (draft.seoRegistrationError && !draft.error) {
