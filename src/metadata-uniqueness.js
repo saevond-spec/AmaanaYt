@@ -7,7 +7,25 @@ const GENERIC_TOKENS = new Set([
   'watch', 'subscribe', 'short', 'shorts', 'livestream', 'stream', 'highlight',
   'highlights', 'moment', 'moments', 'best'
 ]);
+// Internal review heuristics, not YouTube or Google ranking thresholds.
 const TITLE_DUPLICATE_THRESHOLD = 0.78;
+const TITLE_CACHE = new Map();
+const DESCRIPTION_CACHE = new Map();
+const SIGNATURE_CACHE_LIMIT = 6000;
+
+function memoizedSignature(cache, value, create) {
+  const key = String(value || '');
+  if (cache.has(key)) {
+    const cached = cache.get(key);
+    cache.delete(key);
+    cache.set(key, cached);
+    return cached;
+  }
+  const signature = create(key);
+  cache.set(key, signature);
+  if (cache.size > SIGNATURE_CACHE_LIMIT) cache.delete(cache.keys().next().value);
+  return signature;
+}
 
 function canonicalText(value) {
   return String(value || '').normalize('NFKC').toLocaleLowerCase('en-US')
@@ -28,13 +46,27 @@ function jaccard(left, right) {
   return intersection / (left.size + right.size - intersection);
 }
 
+function titleSignature(value) {
+  return memoizedSignature(TITLE_CACHE, value, (text) => ({
+    canonical: canonicalText(text),
+    tokens: usefulTokens(text)
+  }));
+}
+
+function descriptionSignature(value) {
+  return memoizedSignature(DESCRIPTION_CACHE, value, (text) => {
+    const core = canonicalText(descriptionCore(text));
+    return { canonical: core, tokens: usefulTokens(core) };
+  });
+}
+
 function titleSimilarity(left, right) {
-  const a = canonicalText(left);
-  const b = canonicalText(right);
-  if (!a || !b) return 0;
-  if (a === b) return 1;
-  const leftTokens = usefulTokens(left);
-  const rightTokens = usefulTokens(right);
+  const leftSignature = titleSignature(left);
+  const rightSignature = titleSignature(right);
+  if (!leftSignature.canonical || !rightSignature.canonical) return 0;
+  if (leftSignature.canonical === rightSignature.canonical) return 1;
+  const leftTokens = leftSignature.tokens;
+  const rightTokens = rightSignature.tokens;
   if (Math.min(leftTokens.size, rightTokens.size) < 3) return 0;
   let intersection = 0;
   for (const token of leftTokens) if (rightTokens.has(token)) intersection += 1;
@@ -59,12 +91,12 @@ function descriptionCore(value) {
 }
 
 function descriptionSimilarity(left, right) {
-  const a = canonicalText(descriptionCore(left));
-  const b = canonicalText(descriptionCore(right));
-  if (!a || !b) return 0;
-  if (a === b) return 1;
-  const leftTokens = usefulTokens(a);
-  const rightTokens = usefulTokens(b);
+  const leftSignature = descriptionSignature(left);
+  const rightSignature = descriptionSignature(right);
+  if (!leftSignature.canonical || !rightSignature.canonical) return 0;
+  if (leftSignature.canonical === rightSignature.canonical) return 1;
+  const leftTokens = leftSignature.tokens;
+  const rightTokens = rightSignature.tokens;
   if (Math.min(leftTokens.size, rightTokens.size) < 12) return 0;
   return jaccard(leftTokens, rightTokens);
 }
@@ -74,6 +106,7 @@ function conflictRecord(kind, candidate, peer, score) {
     kind,
     videoId: String(peer.videoId || peer.id || ''),
     title: String(peer.title || '').slice(0, 160),
+    descriptionOpening: descriptionCore(peer.description).slice(0, 240),
     similarity: Number(score.toFixed(3))
   };
 }
@@ -108,7 +141,7 @@ function makeDistinctTitle(title, discriminator, seenTitles = [], maxLength = 10
   const candidate = clean.slice(0, limit).trim();
   const seen = (Array.isArray(seenTitles) ? seenTitles : []).map((value) =>
     typeof value === 'string' ? value : String(value?.title || '')).filter(Boolean);
-  const sameTitle = (value) => canonicalText(candidate) === canonicalText(value);
+  const sameTitle = (value) => titleSimilarity(candidate, value) >= TITLE_DUPLICATE_THRESHOLD;
   if (!seen.some(sameTitle)) return candidate;
   const detail = String(discriminator || '').replace(/[\r\n\t]+/gu, ' ').replace(/\s+/gu, ' ').trim();
   if (!detail) throw new Error('A factual detail is required to distinguish a repeated title');

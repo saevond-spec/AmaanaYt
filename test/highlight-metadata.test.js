@@ -74,6 +74,16 @@ test('invalid clip durations or VOD identifiers are rejected', () => {
   }), /numeric Twitch VOD ID/);
 });
 
+test('near-repeated Shorts titles get distinct titles with their measured VOD timestamps', () => {
+  const first = buildShortTitle({ title: 'Last ring shield swap clutch', startSeconds: 42 }, 'Apex Legends Ranked');
+  const second = buildShortTitle({ title: 'Last ring shield swap clutch', startSeconds: 77 },
+    'Apex Legends Ranked', [first]);
+
+  assert.notEqual(second, first);
+  assert.match(second, /at 1:17$/);
+  assert.ok(second.length <= 100);
+});
+
 test('thumbnail headline is brief and safe for a high-contrast overlay', () => {
   assert.equal(thumbnailHeadline('💀 Insane parry! Final exchange'), 'INSANE PARRY FINAL');
   assert.equal(thumbnailHeadline(''), 'SAEVOND HIGHLIGHT');

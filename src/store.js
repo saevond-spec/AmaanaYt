@@ -383,19 +383,24 @@ async function listSeoVideos(limit = 50, offset = 0) {
   return result.rows;
 }
 
-async function countPublicSeoVideos() {
+async function countPublicSeoVideos(channelId) {
   await init();
-  const result = await pool.query(
-    "SELECT COUNT(*)::integer AS count FROM amaana_seo_packages " +
-    "WHERE source->>'privacyStatus' = 'public'");
+  const safeChannelId = String(channelId || '').trim();
+  const result = safeChannelId
+    ? await pool.query(
+      "SELECT COUNT(*)::integer AS count FROM amaana_seo_packages " +
+      "WHERE source->>'privacyStatus' = 'public' AND source->>'channelId' = $1", [safeChannelId])
+    : await pool.query(
+      "SELECT COUNT(*)::integer AS count FROM amaana_seo_packages " +
+      "WHERE source->>'privacyStatus' = 'public'");
   return result.rows[0]?.count || 0;
 }
 
-async function listPublicSeoMetadata(channelId, limit = 2000) {
+async function listPublicSeoMetadata(channelId, limit = 5000) {
   await init();
   const safeChannelId = String(channelId || '').trim();
   if (!safeChannelId) throw new Error('A YouTube channel ID is required for duplicate metadata checks');
-  const safeLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(5000, limit)) : 2000;
+  const safeLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(5000, limit)) : 5000;
   const result = await pool.query('SELECT video_id AS "videoId", source->>\'title\' AS title, ' +
     'source->>\'description\' AS description FROM amaana_seo_packages ' +
     'WHERE source->>\'privacyStatus\' = \'public\' AND source->>\'channelId\' = $1 ' +

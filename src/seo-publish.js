@@ -5,6 +5,7 @@ const { descriptionChapters } = require('./seo-package');
 const { createThumbnailFromImage, thumbnailHeadline } = require('./video');
 const { rateThumbnailBriefs } = require('./thumbnail-rating');
 const { ensureCreatorTag, youtubeTagCharacters } = require('./channel-tags');
+const { findMetadataConflicts } = require('./metadata-uniqueness');
 
 function problem(message, status = 400) {
   const error = new Error(message);
@@ -72,6 +73,20 @@ function assertVideoMatchesCatalog(video, channelId, item) {
   if (!video.snippet.categoryId) throw problem('YouTube did not return the video category', 409);
 }
 
+function metadataOwnerReviewReason(item) {
+  const pkg = item?.package || {};
+  const warnings = Array.isArray(pkg.missingEvidence) ? pkg.missingEvidence : [];
+  if (pkg.metadataConflicts?.length || warnings.some((warning) =>
+    /duplicate titles|closely matches another public video/i.test(String(warning)))) {
+    return 'Generated title or description closely matches existing channel metadata; owner review is required';
+  }
+  if (pkg.metadataCatalogComplete === false || warnings.some((warning) =>
+    /public metadata catalog is incomplete/i.test(String(warning)))) {
+    return 'Public video metadata catalog is incomplete; owner review is required before automatic edits';
+  }
+  return null;
+}
+
 function automaticVideoEdit(item) {
   const source = item.source || {};
   const pkg = item.package;
@@ -79,10 +94,8 @@ function automaticVideoEdit(item) {
     throw problem('Only public videos can be automatically updated');
   }
   if (!pkg || !['ready', 'needs_review'].includes(item.status)) throw problem('No generated SEO package');
-  if (pkg.metadataConflicts?.length || pkg.missingEvidence?.some((warning) =>
-    /duplicate titles|closely matches another public video/i.test(warning))) {
-    throw problem('Generated title or description closely matches existing channel metadata; owner review is required');
-  }
+  const ownerReviewReason = metadataOwnerReviewReason(item);
+  if (ownerReviewReason) throw problem(ownerReviewReason);
   const hasOwnerContext = Boolean(item.context?.takeaways?.trim());
   const hasVideoAnalysis = Boolean(item.analysis);
   const hasDescriptionEvidence = String(source.description || '').trim().length >= 100;
@@ -313,9 +326,26 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
     return result;
   }
 
-  async function publishVideo(videoId) {
-    const item = await store.getSeoVideo(videoId);
+  async function publishVideo(videoId, currentPublicMetadata = null) {
+    let item = await store.getSeoVideo(videoId);
     if (!item || !item.package) return;
+    if (Array.isArray(currentPublicMetadata)) {
+      const title = item.package.titles?.hybrid?.[0] || item.package.titles?.search?.[0] || '';
+      const conflicts = findMetadataConflicts({
+        title, description: item.package.description || '', videoId, peers: currentPublicMetadata
+      });
+      const known = new Set((item.package.metadataConflicts || []).map((conflict) =>
+        String(conflict.kind) + ':' + String(conflict.videoId)));
+      const merged = [...(item.package.metadataConflicts || [])];
+      for (const conflict of conflicts) {
+        const key = String(conflict.kind) + ':' + String(conflict.videoId);
+        if (!known.has(key)) {
+          known.add(key);
+          merged.push(conflict);
+        }
+      }
+      if (merged.length) item = { ...item, package: { ...item.package, metadataConflicts: merged } };
+    }
     const privacyStatus = item.source?.privacyStatus;
     if (!ALLOWED_VIDEO_PRIVACY_STATUSES.has(privacyStatus)) return;
 
@@ -326,6 +356,14 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
     const metadataDone = sameGeneration && prior.state !== 'retry' && !legacyContextSkip;
     const thumbnailDone = sameGeneration && ['applied', 'skipped'].includes(prior.thumbnailState);
     if (metadataDone && thumbnailDone) return prior;
+
+    const ownerReviewReason = metadataOwnerReviewReason(item);
+    if (ownerReviewReason) {
+      return recordResult(videoId, generation,
+        { state: 'skipped', reason: ownerReviewReason },
+        { state: 'skipped', reason: 'All automatic SEO edits are blocked while metadata is in owner review' },
+        prior);
+    }
 
     let metadata = metadataDone ? { state: prior.state, reason: prior.reason } : null;
     let edit = null;
@@ -431,11 +469,11 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
     return recordResult(videoId, generation, metadata, thumbnail, prior);
   }
 
-  async function publishPending(limit = 20) {
+  async function publishPending(limit = 20, currentPublicMetadata = null) {
     const candidates = await store.listSeoAutoCandidates(limit);
     logger.info?.('SEO metadata and thumbnail candidates: ' + candidates.length);
     for (const candidate of candidates) {
-      const result = await publishVideo(candidate.videoId);
+      const result = await publishVideo(candidate.videoId, currentPublicMetadata);
       if (result?.deferred) break;
     }
   }

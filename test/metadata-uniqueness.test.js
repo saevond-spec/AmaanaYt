@@ -48,6 +48,15 @@ test('reports cross-video conflicts but ignores the current video and shared boi
   assert.equal(conflicts[0].videoId, 'older');
 });
 
+test('near-duplicate bundle titles also gain a factual timestamp', () => {
+  const first = 'Apex Legends clutch: 1v3 finale';
+  const nearDuplicate = 'Apex Legends clutch: 1v3 finale highlight';
+  assert.ok(titleSimilarity(first, nearDuplicate) >= 0.78);
+  const second = makeDistinctTitle(nearDuplicate, 'at 0:47', [first], 100);
+  assert.ok(second.includes('| at 0:47'));
+  assert.ok(second.length <= 100);
+});
+
 test('repeated bundle titles gain a factual timestamp and stay under YouTube title limit', () => {
   const first = 'Last ring shield swap wins the final Apex Legends fight';
   const second = makeDistinctTitle(first, 'at 0:42', [first], 100);

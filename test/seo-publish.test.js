@@ -43,6 +43,39 @@ test('automatic SEO updates pause when generated title or description duplicates
   const duplicate = item({ package: { ...item().package,
     metadataConflicts: [{ kind: 'title', videoId: 'older-video' }] } });
   assert.throws(() => automaticVideoEdit(duplicate), /closely matches existing channel metadata/);
+  assert.throws(() => automaticVideoEdit(item({
+    package: { ...item().package, metadataCatalogComplete: false }
+  })), /public metadata catalog is incomplete/i);
+});
+
+test('publisher blocks metadata and thumbnail edits when duplicate metadata needs owner review', async () => {
+  const baseRow = item();
+  const row = item({ package: { ...baseRow.package,
+    metadataConflicts: [{ kind: 'title', videoId: 'older-video', title: 'ARC Raiders Gameplay Highlights' }] } });
+  const calls = [];
+  let outcome;
+  const publisher = createSeoPublisher({
+    store: {
+      getSeoVideo: async () => row,
+      markSeoAutoResult: async (_id, result) => { outcome = result; calls.push('record-result'); }
+    },
+    youtube: {
+      ownedChannel: async () => { calls.push('read-channel'); return { id: 'channel-1' }; },
+      assertTargetChannel: async () => calls.push('assert-channel'),
+      getVideo: async () => { calls.push('read-video'); return {}; },
+      updateVideoSeo: async () => calls.push('update-metadata'),
+      setThumbnail: async () => calls.push('update-thumbnail')
+    },
+    logger: { info() {}, warn() {} }
+  });
+
+  const result = await publisher.publishVideo(row.videoId);
+
+  assert.deepEqual(calls, ['record-result']);
+  assert.equal(result.state, 'skipped');
+  assert.equal(result.thumbnailState, 'skipped');
+  assert.match(result.reason, /owner review is required/);
+  assert.match(result.thumbnailReason, /all automatic seo edits are blocked/i);
 });
 
 test('automatic SEO edits only public videos and enforces evidence gates', () => {
@@ -121,6 +154,35 @@ test('publisher does not write private or unlisted video metadata', async () => 
     await publisher.publishVideo(row.videoId);
     assert.deepEqual(writes, []);
   }
+});
+
+test('publisher rechecks a pending package against current channel metadata', async () => {
+  const row = item();
+  const writes = [];
+  const publisher = createSeoPublisher({
+    store: {
+      getSeoVideo: async () => row,
+      markSeoAutoResult: async () => writes.push('record')
+    },
+    youtube: {
+      ownedChannel: async () => writes.push('read-channel'),
+      assertTargetChannel: async () => writes.push('assert-channel'),
+      getVideo: async () => writes.push('read-video'),
+      updateVideoSeo: async () => writes.push('update-metadata'),
+      setThumbnail: async () => writes.push('update-thumbnail')
+    },
+    logger: { info() {}, warn() {} }
+  });
+  const result = await publisher.publishVideo(row.videoId, [{
+    videoId: 'older-video',
+    title: row.package.titles.hybrid[0],
+    description: 'Older description with enough distinct words for a non-matching description.'
+  }]);
+
+  assert.deepEqual(writes, ['record']);
+  assert.equal(result.state, 'skipped');
+  assert.equal(result.thumbnailState, 'skipped');
+  assert.match(result.reason, /owner review is required/);
 });
 
 test('publisher skips when live visibility differs from the scanned visibility', async () => {
@@ -345,6 +407,14 @@ test('worker analyzes a public upload, publishes its SEO, and updates channel ke
     getVideoAnalysis: async () => null,
     saveVideoAnalysis: async (id, analysis) => { rows.get(id).analysis = analysis; },
     seoCounts: async () => ({ statuses: {}, attemptedToday: 0 }),
+    listPublicSeoMetadata: async (_channelId, limit) => {
+      assert.equal(limit, 5000);
+      return [...rows.values()].filter((row) => row.source?.privacyStatus === 'public').map((row) => ({
+        videoId: row.videoId, title: row.source.title, description: row.source.description
+      }));
+    },
+    countPublicSeoVideos: async (_channelId) => [...rows.values()]
+      .filter((row) => row.source?.privacyStatus === 'public').length,
     claimSeoVideo: async () => {
       const row = [...rows.values()].find((candidate) =>
         candidate.status === 'queued' && candidate.source.privacyStatus === 'public');

@@ -436,6 +436,10 @@ test('worker checks generated metadata against the public channel catalog before
       return [{ videoId: 'older-video', title: existingPackage.titles.hybrid[0],
         description: existingPackage.description }];
     },
+    countPublicSeoVideos: async (channelId) => {
+      assert.equal(channelId, 'channel-1');
+      return 1;
+    },
     claimSeoVideo: async () => claims++ === 0
       ? { videoId: 'candidate-video', claimToken: 'claim', source: publicSource, context, attempts: 1 } : null,
     finishSeoVideo: async (_id, _token, pkg) => { storedPackage = pkg; }
@@ -450,8 +454,40 @@ test('worker checks generated metadata against the public channel catalog before
       env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'metadata-duplicate-worker' },
       logger: { info() {}, error() {}, warn() {} } });
     await worker.run();
-    assert.deepEqual(metadataLookup, { channelId: 'channel-1', limit: 2000 });
+    assert.deepEqual(metadataLookup, { channelId: 'channel-1', limit: 5000 });
     assert.deepEqual(storedPackage.metadataConflicts.map((item) => item.kind), ['title', 'description']);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('worker requires a complete public catalog before automatic edits', async () => {
+  let storedPackage;
+  let claims = 0;
+  const publicSource = { ...source, privacyStatus: 'public' };
+  const store = {
+    getSeoSyncState: async () => ({ channelId: 'channel-1', recentAt: new Date().toISOString(),
+      completed: true, viewPriorityScanVersion: 1, enabled: true }),
+    seoCounts: async () => ({ attemptedToday: 0 }),
+    listPublicSeoMetadata: async () => [{ videoId: 'older-video', title: 'Apex Legends old match',
+      description: 'Older public match notes with enough distinct words for metadata comparison.' }],
+    countPublicSeoVideos: async () => 2,
+    claimSeoVideo: async () => claims++ === 0
+      ? { videoId: 'candidate-video', claimToken: 'claim', source: publicSource, context, attempts: 1 } : null,
+    finishSeoVideo: async (_id, _token, pkg) => { storedPackage = pkg; }
+  };
+  const youtube = { isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner' }) };
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: true,
+    json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) });
+  try {
+    const worker = createSeoWorker({ store, youtube,
+      env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'incomplete-catalog-worker' },
+      logger: { info() {}, error() {}, warn() {} } });
+    await worker.run();
+    assert.equal(storedPackage.metadataCatalogComplete, false);
+    assert.ok(storedPackage.missingEvidence.some((warning) => /catalog is incomplete/i.test(warning)));
   } finally {
     global.fetch = originalFetch;
   }

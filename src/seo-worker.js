@@ -209,6 +209,27 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
         logger.info?.('Low-view SEO catalog refresh completed');
       }
       catalogScanIncomplete = state.enabled !== false && !state.completed;
+      const metadataPeerLimit = 5000;
+      let metadataPeers = [];
+      let metadataPeerCatalogComplete = false;
+      if (state.enabled !== false && state.completed === true &&
+          typeof store.listPublicSeoMetadata === 'function' &&
+          typeof store.countPublicSeoVideos === 'function') {
+        try {
+          metadataPeers = await store.listPublicSeoMetadata(channel.id, metadataPeerLimit);
+          const publicCatalogCount = Number(await store.countPublicSeoVideos(channel.id));
+          metadataPeerCatalogComplete = Array.isArray(metadataPeers) &&
+            Number.isSafeInteger(publicCatalogCount) &&
+            publicCatalogCount === metadataPeers.length && publicCatalogCount <= metadataPeerLimit &&
+            !catalogScanIncomplete;
+          if (!metadataPeerCatalogComplete) {
+            logger.info?.('SEO metadata autopilot paused: public metadata catalog is incomplete');
+          }
+        } catch (error) {
+          metadataPeers = [];
+          logger.warn?.('SEO public metadata catalog could not be verified:', error.message);
+        }
+      }
       if (typeof youtube.hasAnalyticsReadAccess === 'function' &&
           typeof youtube.googleSearchTraffic === 'function' &&
           typeof store.countPublicSeoVideos === 'function' &&
@@ -228,7 +249,11 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       const coverageAudit = await auditPlaylistCoverage(state);
       if (coverageAudit?.requeuedCount) await assignCatalogPlaylists();
       if (publisher && state.enabled !== false) {
-        await publisher.publishPending().catch((error) => logger.warn?.('SEO auto publish scan failed:', error.message));
+        if (metadataPeerCatalogComplete) {
+          await publisher.publishPending(20, metadataPeers).catch((error) => logger.warn?.('SEO auto publish scan failed:', error.message));
+        } else {
+          logger.info?.('SEO automatic video edits remain paused until the public metadata catalog is complete');
+        }
         await publisher.updateChannel().catch((error) => logger.warn?.('SEO channel update failed:', error.message));
       }
       const gemini = (env.SEO_AI_BASE_URL || '').startsWith('https://generativelanguage.googleapis.com/');
@@ -266,8 +291,6 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       }
       // Process the available daily budget even if scheduled wake-ups were delayed.
       const remaining = Math.max(0, dailyLimit - counts.attemptedToday);
-      const metadataPeers = remaining > 0 && typeof store.listPublicSeoMetadata === 'function'
-        ? await store.listPublicSeoMetadata(channel.id, 2000) : [];
       let channelUpdatedAfterPublish = false;
       for (let index = 0; index < remaining; index += 1) {
         const job = await store.claimSeoVideo();
@@ -286,7 +309,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           const marketEvidence = await market?.research(job.source)
             .catch((error) => { logger.warn?.(`SEO market lookup ${job.videoId} failed: ${error.message}`); }) || null;
           const comparisonPeers = metadataPeers.filter((peer) => String(peer.videoId) !== String(job.videoId));
-          const generated = await generate(job.source, context, {
+          let generated = await generate(job.source, context, {
             apiKey: env.SEO_AI_API_KEY, model: env.SEO_AI_MODEL,
             baseUrl, fallbackModel, secondaryNativeModel, finalNativeModel,
             analysis, marketEvidence, metadataPeers: comparisonPeers,
@@ -298,15 +321,24 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
             onFinalNativeFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying final native model ${fallback}`)
           });
           if (job.source.privacyStatus === 'public') {
+            generated.metadataCatalogComplete = metadataPeerCatalogComplete;
+            if (!metadataPeerCatalogComplete) {
+              generated.missingEvidence = Array.isArray(generated.missingEvidence)
+                ? generated.missingEvidence : [];
+              if (!generated.missingEvidence.some((warning) => /public metadata catalog is incomplete/i.test(String(warning)))) {
+                generated.missingEvidence.push('Public metadata catalog is incomplete; owner review is required before automatic edits');
+              }
+            }
+            metadataPeers = metadataPeers.filter((peer) => String(peer.videoId) !== String(job.videoId));
             metadataPeers.unshift({ videoId: job.videoId,
               title: generated.titles?.hybrid?.[0] || generated.titles?.search?.[0] || '',
               description: generated.description || '' });
-            if (metadataPeers.length > 2000) metadataPeers.pop();
+            if (metadataPeers.length > metadataPeerLimit) metadataPeers.pop();
           }
           await store.finishSeoVideo(job.videoId, job.claimToken, generated, null);
           logger.info?.(`SEO package ${job.videoId} generated: ${generated.missingEvidence.length ? 'needs_review' : 'ready'}`);
           if (publisher) {
-            const outcome = await publisher.publishVideo(job.videoId)
+            const outcome = await publisher.publishVideo(job.videoId, metadataPeers)
               .catch((error) => { logger.warn?.(`SEO auto publish ${job.videoId} failed:`, error.message); });
             if (outcome?.state === 'applied' && !channelUpdatedAfterPublish) {
               await publisher.updateChannel()
