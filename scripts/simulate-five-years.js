@@ -1,5 +1,7 @@
 'use strict';
 
+const { simulatePlaylistAutopilot } = require('./simulate-playlist-autopilot');
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function positiveInteger(value, fallback, minimum = 1) {
@@ -245,15 +247,38 @@ function simulateFiveYears(input = {}) {
   const defaultQuota = positiveInteger(input.defaultQuota ?? process.env.SIM_YOUTUBE_DAILY_QUOTA, 10000);
   const updateUnits = positiveInteger(input.updateUnits ?? process.env.SIM_VIDEO_UPDATE_UNITS, 50);
   const thumbnailUnits = positiveInteger(input.thumbnailUnits ?? process.env.SIM_THUMBNAIL_SET_UNITS, 50);
-  const playlistAutoDailyLimit = positiveInteger(input.playlistAutoDailyLimit ?? process.env.YOUTUBE_AUTO_PLAYLIST_DAILY_LIMIT, 20);
+  const playlistAutoDailyLimit = positiveInteger(input.playlistAutoDailyLimit ?? process.env.YOUTUBE_AUTO_PLAYLIST_DAILY_LIMIT, 30);
   const playlistInsertUnits = positiveInteger(input.playlistInsertUnits ?? process.env.SIM_PLAYLIST_ITEM_INSERT_UNITS, 50);
   const playlistCheckUnits = positiveInteger(input.playlistCheckUnits ?? process.env.SIM_PLAYLIST_ITEM_CHECK_UNITS, 1);
-  const playlistListMaxPages = positiveInteger(input.playlistListMaxPages ?? process.env.SIM_PLAYLIST_LIST_MAX_PAGES, 20);
+  const playlistListUnits = positiveInteger(input.playlistListUnits ?? process.env.SIM_PLAYLIST_LIST_UNITS, 1);
+  const playlistListMaxPages = Math.min(20, positiveInteger(input.playlistListMaxPages ?? process.env.SIM_PLAYLIST_LIST_MAX_PAGES, 20));
   const videoListUnits = positiveInteger(input.videoListUnits ?? process.env.SIM_VIDEO_LIST_UNITS, 1, 0);
   const marketSearchCallsPerDay = positiveInteger(input.marketSearchCallsPerDay ?? process.env.SIM_MARKET_SEARCH_CALLS_PER_DAY, 3, 0);
   const marketSearchDailyLimit = positiveInteger(input.marketSearchDailyLimit ?? process.env.SIM_YOUTUBE_SEARCH_DAILY_LIMIT, 100);
   const videoInsertDailyLimit = positiveInteger(input.videoInsertDailyLimit ?? process.env.SIM_YOUTUBE_VIDEO_INSERT_DAILY_LIMIT, 100);
   const autoPublish = input.autoPublish !== false && String(process.env.SIM_AUTO_PUBLISH || 'true').toLowerCase() !== 'false';
+  const playlistStreamsPerWeek = positiveInteger(input.playlistStreamsPerWeek ?? process.env.SIM_PLAYLIST_STREAMS_PER_WEEK, 2, 0);
+  const playlistExistingBacklog = positiveInteger(input.playlistExistingBacklog ?? process.env.SIM_PLAYLIST_EXISTING_BACKLOG, 3491, 0);
+  const playlistPublicBacklogShare = fraction(input.playlistPublicBacklogShare ?? process.env.SIM_PLAYLIST_PUBLIC_SHARE, 0.5);
+  const playlistExistingCoveredVideos = positiveInteger(input.playlistExistingCoveredVideos ?? process.env.SIM_PLAYLIST_EXISTING_COVERED, 1000, 0);
+  const playlistBatchSize = Math.min(50, positiveInteger(input.playlistBatchSize ?? process.env.YOUTUBE_AUTO_PLAYLIST_BATCH_SIZE, 50));
+  const playlistCount = positiveInteger(input.playlistCount ?? process.env.SIM_PLAYLIST_COUNT, 5);
+  const playlistAutopilot = simulatePlaylistAutopilot({
+    days: window.days,
+    streamsPerWeek: playlistStreamsPerWeek,
+    momentsPerStream,
+    existingMissingVideos: playlistExistingBacklog,
+    existingPublicShare: playlistPublicBacklogShare,
+    existingCoveredVideos: playlistExistingCoveredVideos,
+    dailyLimit: playlistAutoDailyLimit,
+    batchSize: playlistBatchSize,
+    playlistCount,
+    dailyApiQuota: defaultQuota,
+    playlistReadUnits: playlistListUnits,
+    membershipCheckUnits: playlistCheckUnits,
+    membershipInsertUnits: playlistInsertUnits,
+    ...(input.playlistFaults || {})
+  });
 
   const streams = window.days * streamsPerDay;
   const missingAnalysisVideos = Math.ceil(publicVideos * missingAnalysisShare);
@@ -265,8 +290,11 @@ function simulateFiveYears(input = {}) {
   const batchedQueueDays = missingAnalysisVideos
     ? analysisQueueWaitDays + Math.ceil(missingAnalysisVideos / batchedAnalysisPerDay) : 0;
   const playlistAutoAssignmentsPerDay = playlistAutoDailyLimit * 2;
-  const playlistAutoDailyUnits = playlistAutoAssignmentsPerDay *
-    (playlistInsertUnits + playlistCheckUnits + playlistListMaxPages);
+  const playlistAutoDailyUnits = Math.max(
+    playlistAutopilot.sustainable.apiQuota.maxPlaylistQuotaUnitsPerDay,
+    playlistAutopilot.threeStreamCeiling.apiQuota.maxPlaylistQuotaUnitsPerDay,
+    playlistAutopilot.recoveryStress.apiQuota.maxPlaylistQuotaUnitsPerDay
+  );
   const uploadsPerStream = 1 + momentsPerStream;
   const videoInsertCallsPerDay = streamsPerDay * uploadsPerStream;
   const videoPublicationCallsPerDay = autoPublish ? videoInsertCallsPerDay : 0;
@@ -284,7 +312,8 @@ function simulateFiveYears(input = {}) {
     assumptions: { startDate: window.start, endDate: window.end, days: window.days, streamsPerDay,
       hoursPerStream, momentsPerStream, existingPublicVideoStressCohort: publicVideos,
       missingAnalysisShare, analysisBatchSize, analysisDailyLimit, seoWriteDailyLimit,
-      playlistAutoDailyLimitPerPrivacy: playlistAutoDailyLimit },
+      playlistAutoDailyLimitPerPrivacy: playlistAutoDailyLimit,
+      playlistStreamsPerWeek, playlistExistingBacklog, playlistBatchSize },
     fiveYearPipeline: { streams, activeStreamHours: streams * hoursPerStream,
       privateLandscapeDrafts: streams, privateShortDrafts: streams * momentsPerStream,
       totalPrivateDrafts: streams * (1 + momentsPerStream),
@@ -298,6 +327,7 @@ function simulateFiveYears(input = {}) {
       afterFixCandidatesFreedOnNextScan: permanentForbiddenHead,
       behavior: 'Permanent permission/channel errors are skipped; quota and transient errors remain retryable.' },
     productionReliability: simulateProductionHorizon(input, window.days),
+    playlistAutopilot,
     youtubeApiQuota: { defaultDailyUnits: defaultQuota, videoUpdateUnits: updateUnits,
       videoListUnits, videoInsertCallsPerDay, videoInsertDailyLimit,
       videoInsertQuotaFits: videoInsertCallsPerDay <= videoInsertDailyLimit,
@@ -306,6 +336,7 @@ function simulateFiveYears(input = {}) {
       automaticPublicationEnabled: autoPublish, publicationVideoUpdatesPerDay: videoPublicationCallsPerDay,
       publicationDailyQuotaUnits: publicationDailyUnits, playlistItemInsertUnits: playlistInsertUnits,
       playlistItemCheckUnits: playlistCheckUnits, ownedPlaylistListMaxPages: playlistListMaxPages,
+      playlistQuotaCostsSourceDate: '2026-09-15',
       maxPlaylistAssignmentsPerDay: playlistAutoAssignmentsPerDay,
       automaticPlaylistDailyUnits: playlistAutoDailyUnits, currentPipelineDailyQuotaUnits: currentDailyUnits,
       currentPipelineQuotaHeadroom: defaultQuota - currentDailyUnits,
