@@ -6,6 +6,7 @@ const { createThumbnailFromImage, thumbnailHeadline } = require('./video');
 const { rateThumbnailBriefs } = require('./thumbnail-rating');
 const { ensureCreatorTag, youtubeTagCharacters } = require('./channel-tags');
 const { findMetadataConflicts } = require('./metadata-uniqueness');
+const SEO_AUTOPILOT_VERSION = require('./seo-autopilot-version');
 
 function problem(message, status = 400) {
   const error = new Error(message);
@@ -338,7 +339,8 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
     const result = {
       ...(metadata || { state: 'skipped', reason: 'Metadata update was not eligible' }),
       at,
-      packageGeneratedAt: generation
+      packageGeneratedAt: generation,
+      autopilotVersion: SEO_AUTOPILOT_VERSION
     };
     if (thumbnail) {
       result.thumbnailState = thumbnail.state;
@@ -385,7 +387,8 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
     const prior = item.autoResult || {};
     const sameGeneration = prior.packageGeneratedAt === generation;
     const legacyContextSkip = sameGeneration && prior.state === 'skipped' && prior.reason === legacyContextBlock;
-    const metadataDone = sameGeneration && prior.state !== 'retry' && !legacyContextSkip;
+    const metadataDone = sameGeneration && prior.autopilotVersion === SEO_AUTOPILOT_VERSION &&
+      prior.state !== 'retry' && !legacyContextSkip;
     const thumbnailDone = sameGeneration && ['applied', 'skipped'].includes(prior.thumbnailState);
     if (metadataDone && thumbnailDone) return prior;
 
@@ -502,7 +505,7 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
   }
 
   async function publishPending(limit = 20, currentPublicMetadata = null) {
-    const candidates = await store.listSeoAutoCandidates(limit);
+    const candidates = await store.listSeoAutoCandidates(limit, SEO_AUTOPILOT_VERSION);
     logger.info?.('SEO metadata and thumbnail candidates: ' + candidates.length);
     for (const candidate of candidates) {
       const result = await publishVideo(candidate.videoId, currentPublicMetadata);

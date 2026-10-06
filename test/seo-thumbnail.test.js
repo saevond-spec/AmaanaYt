@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createSeoPublisher } = require('../src/seo-publish');
+const SEO_AUTOPILOT_VERSION = require('../src/seo-autopilot-version');
 
 function makeItem(index, privacyStatus = 'public') {
   const videoId = 'thumb' + String(index).padStart(6, '0');
@@ -230,7 +231,8 @@ test('private and unlisted videos never receive SEO or thumbnail writes', async 
 test('already-applied SEO can retry a transient thumbnail failure without repeating metadata', async () => {
   const h = makeHarness(1, { failFirstThumbnail: new Set(['thumb000000']), failed: new Set() });
   const row = h.rows.get('thumb000000');
-  row.autoResult = { state: 'applied', packageGeneratedAt: row.generatedAt, thumbnailState: 'retry',
+  row.autoResult = { state: 'applied', packageGeneratedAt: row.generatedAt,
+    autopilotVersion: SEO_AUTOPILOT_VERSION, thumbnailState: 'retry',
     at: '2026-10-03T00:00:00.000Z' };
   row.applied = { title: 'ARC Raiders floating raider 0', description: row.source.description,
     tags: row.source.tags, at: '2026-10-03T00:00:00.000Z', privacyStatus: 'public' };
