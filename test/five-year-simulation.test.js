@@ -70,7 +70,7 @@ test('five-year lifecycle simulation exercises baseline and deterministic recove
   assert.ok(stress.activeLivestreamDeferrals > 0);
   assert.equal(stress.rejectedYouTubeOutputs, 2);
   assert.equal(stress.outputIdentityFailures, 3);
-  assert.ok(stress.finishedGateRetries > 0);
+  assert.ok(stress.finishedGateBlocks > 0);
   assert.ok(stress.finishedBundlePreflightChecks > stress.submittedBatches);
   assert.equal(stress.publicationAttempts >= stress.generatedPublicVideos, true);
   assert.equal(stress.duplicateParentUploads, 0);
