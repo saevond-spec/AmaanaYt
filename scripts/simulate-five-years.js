@@ -59,7 +59,7 @@ function simulateProductionScenario({ days, streamsPerDay, momentsPerStream, att
     activeLivestreamDeferrals: 0,
     rejectedYouTubeOutputs: 0,
     outputIdentityFailures: 0,
-    finishedGateRetries: 0,
+    finishedGateBlocks: 0,
     publicationsAfterFinishedPreflight: 0,
     existingVisibilityMutations: 0
   };
@@ -208,7 +208,7 @@ function simulateProductionScenario({ days, streamsPerDay, momentsPerStream, att
       }
     }
     if (finishedGateFailures.length) {
-      metrics.finishedGateRetries += 1;
+      metrics.finishedGateBlocks += 1;
       return finishedGateFailures.some((error) => error.status !== 425)
         ? { permanent: true } : { retry: true };
     }
