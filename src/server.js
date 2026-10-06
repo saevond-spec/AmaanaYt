@@ -386,7 +386,8 @@ const processHighlightBatch = createHighlightProcessor({
   uploadDir, store, twitch, video, youtube, seo, autoAssignPlaylist,
   buildHighlightTimeline, buildHighlightDescription, cleanText,
   maxAutoAttempts: highlightMaxAutoAttempts,
-  autoPublish: !['false', '0', 'off'].includes(String(process.env.HIGHLIGHT_AUTO_PUBLISH || '').toLowerCase()),
+  // Newly produced Twitch bundles stay private until the owner publishes from review.
+  autoPublish: false,
   logError: (id, error) => console.error('Highlight batch ' + id + ' failed:', error.message)
 });const highlightBatchQueue = createBatchQueue(processHighlightBatch, {
   onError: (id, error) => console.error('Highlight batch queue failed for ' + id + ':', error.message)
