@@ -45,7 +45,7 @@ test('automatic SEO updates pause when generated title or description duplicates
   assert.throws(() => automaticVideoEdit(duplicate), /closely matches existing channel metadata/);
   assert.throws(() => automaticVideoEdit(item({
     package: { ...item().package, metadataCatalogComplete: false }
-  })), /public metadata catalog is incomplete/i);
+  })), /metadata catalog is incomplete/i);
 });
 
 test('publisher blocks metadata and thumbnail edits when duplicate metadata needs owner review', async () => {
