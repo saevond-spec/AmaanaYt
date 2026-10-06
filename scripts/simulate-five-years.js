@@ -1,6 +1,8 @@
 'use strict';
 
 const { simulatePlaylistAutopilot } = require('./simulate-playlist-autopilot');
+const { requireCompletedYouTubeOutput } = require('../src/highlight-pipeline');
+const { requireArchivedTwitchVod } = require('../src/highlight-validation');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -48,6 +50,17 @@ function simulateProductionScenario({ days, streamsPerDay, momentsPerStream, att
     generatedPublicVideos: 0,
     prematurePublicVideos: 0,
     publicationAttempts: 0,
+    publicationGateViolations: 0,
+    archivedStreamVodsQualified: 0,
+    youtubeOutputChecks: 0,
+    finishedYouTubeOutputs: 0,
+    finishedBundlePreflightChecks: 0,
+    processingGateDeferrals: 0,
+    activeLivestreamDeferrals: 0,
+    rejectedYouTubeOutputs: 0,
+    outputIdentityFailures: 0,
+    finishedGateRetries: 0,
+    publicationsAfterFinishedPreflight: 0,
     existingVisibilityMutations: 0
   };
 
@@ -70,6 +83,21 @@ function simulateProductionScenario({ days, streamsPerDay, momentsPerStream, att
         usedFaults: new Set(),
         parentUploaded: false,
         thumbnailApplied: false,
+        archivedVod: { id: String(serial), user_id: 'sim-broadcaster', type: 'archive', duration: '6h' },
+        archivedVodQualified: false,
+        outputStates: Array.from({ length: momentsPerStream + 1 }, (_, outputIndex) => {
+          const outputSerial = serial * (momentsPerStream + 1) + outputIndex + 1;
+          return {
+            id: 'sim-output-' + serial + '-' + outputIndex,
+            uploadPendingChecksRemaining: every(outputSerial, faults.youtubeUploadPendingEvery) ? 2 : 0,
+            processingPendingChecksRemaining: every(outputSerial, faults.youtubeProcessingPendingEvery) ? 2 : 0,
+            activeBroadcastChecksRemaining: every(outputSerial, faults.youtubeActiveBroadcastEvery) ? 1 : 0,
+            rejected: outputIndex === momentsPerStream && every(serial, faults.youtubeRejectedEvery),
+            mismatchedId: outputIndex === momentsPerStream && every(serial, faults.youtubeMismatchedOutputEvery),
+            missingId: outputIndex === momentsPerStream && every(serial, faults.youtubeMissingOutputIdEvery),
+            finished: false
+          };
+        }),
         fault: {
           twitch429: every(serial, faults.twitch429Every),
           renderFailure: every(serial, faults.renderFailureEvery),
@@ -96,6 +124,11 @@ function simulateProductionScenario({ days, streamsPerDay, momentsPerStream, att
   function runAttempt(job) {
     job.attempts += 1;
     metrics.workerAttempts += 1;
+    if (!job.archivedVodQualified) {
+      requireArchivedTwitchVod(job.archivedVod, job.archivedVod.id, 'sim-broadcaster');
+      job.archivedVodQualified = true;
+      metrics.archivedStreamVodsQualified += 1;
+    }
     for (let index = 0; index < momentsPerStream; index += 1) {
       if (job.clipCreated[index]) continue;
       if (transient(job, 'twitch429')) return { retry: true };
@@ -136,11 +169,60 @@ function simulateProductionScenario({ days, streamsPerDay, momentsPerStream, att
       job.seoRegistered.add(index);
       metrics.seoRegistrations += 1;
     }
-    // All media, thumbnails, and SEO registrations have passed before visibility changes start.
+    const finishedGateFailures = [];
+    for (let index = 0; index < job.outputStates.length; index += 1) {
+      const state = job.outputStates[index];
+      const outputType = index === 0 ? 'video' : 'Short';
+      metrics.youtubeOutputChecks += 1;
+      const uploadPending = state.uploadPendingChecksRemaining > 0;
+      const processingPending = !uploadPending && state.processingPendingChecksRemaining > 0;
+      const activeBroadcast = state.activeBroadcastChecksRemaining > 0;
+      if (uploadPending) state.uploadPendingChecksRemaining -= 1;
+      if (processingPending) state.processingPendingChecksRemaining -= 1;
+      if (activeBroadcast) state.activeBroadcastChecksRemaining -= 1;
+      const uploadStatus = state.rejected ? 'rejected' : uploadPending ? 'uploaded' : 'processed';
+      const processingStatus = uploadPending || processingPending ? 'processing' : 'succeeded';
+      const returnedId = state.missingId ? undefined
+        : state.mismatchedId ? state.id + '-other' : state.id;
+      try {
+        requireCompletedYouTubeOutput({
+          id: returnedId,
+          snippet: { liveBroadcastContent: activeBroadcast ? 'live' : 'none' },
+          status: { uploadStatus },
+          processingDetails: { processingStatus }
+        }, state.id, outputType);
+        if (!state.finished) {
+          state.finished = true;
+          metrics.finishedYouTubeOutputs += 1;
+        }
+      } catch (error) {
+        finishedGateFailures.push(error);
+        if (error.status === 425) {
+          if (activeBroadcast) metrics.activeLivestreamDeferrals += 1;
+          else metrics.processingGateDeferrals += 1;
+        } else if (error.status === 409) {
+          metrics.outputIdentityFailures += 1;
+        } else if (error.status === 422) {
+          metrics.rejectedYouTubeOutputs += 1;
+        }
+      }
+    }
+    if (finishedGateFailures.length) {
+      metrics.finishedGateRetries += 1;
+      return finishedGateFailures.some((error) => error.status !== 425)
+        ? { permanent: true } : { retry: true };
+    }
+    metrics.finishedBundlePreflightChecks += 1;
+    // Every output is rechecked after local media, thumbnail, and SEO work and before visibility changes.
+    if (!job.outputStates.every((state) => state.finished)) {
+      metrics.publicationGateViolations += 1;
+      return { permanent: true };
+    }
     const publicationCount = momentsPerStream + 1;
     for (let index = 0; index < publicationCount; index += 1) {
       if (job.published[index]) continue;
       metrics.publicationAttempts += 1;
+      metrics.publicationsAfterFinishedPreflight += 1;
       if (index === 0 && transient(job, 'youtubePublish429')) return { retry: true };
       if (index === 1 && job.fault.youtubePublish403 && !job.usedFaults.has('youtubePublish403')) {
         job.usedFaults.add('youtubePublish403');
@@ -202,7 +284,13 @@ function simulateProductionHorizon(input, days) {
     restartEvery: interval(supplied.restartEvery, 89),
     youtube403Every: interval(supplied.youtube403Every, 997),
     youtubePublish429Every: interval(supplied.youtubePublish429Every, 101),
-    youtubePublish403Every: interval(supplied.youtubePublish403Every, 991)
+    youtubePublish403Every: interval(supplied.youtubePublish403Every, 991),
+    youtubeUploadPendingEvery: interval(supplied.youtubeUploadPendingEvery, 43),
+    youtubeProcessingPendingEvery: interval(supplied.youtubeProcessingPendingEvery, 47),
+    youtubeActiveBroadcastEvery: interval(supplied.youtubeActiveBroadcastEvery, 113),
+    youtubeRejectedEvery: interval(supplied.youtubeRejectedEvery, 661),
+    youtubeMismatchedOutputEvery: interval(supplied.youtubeMismatchedOutputEvery, 887),
+    youtubeMissingOutputIdEvery: interval(supplied.youtubeMissingOutputIdEvery, 1499)
   };
   const noFaults = Object.fromEntries(Object.keys(stressFaults).map((key) => [key, 0]));
   return {
@@ -210,6 +298,8 @@ function simulateProductionHorizon(input, days) {
       modelDays: days, streamsPerDay, momentsPerStream, workerAttemptsPerDay: attemptsPerDay,
       maxAttemptsPerBatch: maxAttempts,
       timestampSource: 'SweatyClanker supplies candidate VOD timestamps; the app checks them against Twitch VOD and clip metadata.',
+      finishedOutputDefinition: 'Livestreams qualify as source material only when Twitch returns the broadcaster-owned archived VOD with a valid duration. Each YouTube video and Short needs the expected video ID, liveBroadcastContent=none, uploadStatus=processed, and processingStatus=succeeded before any bundle output can publish.',
+      studioChecksLimit: 'YouTube Data API processing state does not report Studio copyright or suitability checks; this run does not claim those checks are clear.',
       stressSchedule: 'Deterministic fault intervals are repeatable test injections, not measured production failure rates.'
     },
     baseline: simulateProductionScenario({
@@ -317,7 +407,7 @@ function simulateFiveYears(input = {}) {
     fiveYearPipeline: { streams, activeStreamHours: streams * hoursPerStream,
       privateLandscapeDrafts: streams, privateShortDrafts: streams * momentsPerStream,
       totalPrivateDrafts: streams * (1 + momentsPerStream),
-      visibilityRule: 'New highlight and Short uploads start private and publish only after timestamp, render, thumbnail, SEO-registration, and YouTube-processing checks pass; existing private and unlisted videos are untouched.' },
+      visibilityRule: 'New highlight and Short uploads start private and publish only after archived-stream, clip timestamp, local render, thumbnail, SEO-registration, and every YouTube output processing check passes; existing private and unlisted videos are untouched.' },
     seoBackfill: { missingAnalysisVideos, currentQueueDays: Number(currentQueueDays.toFixed(2)),
       batchedQueueDays: Number(batchedQueueDays.toFixed(2)),
       bestCaseDaysToUpdatePublicCohortAtWriteLimit: Math.ceil(publicVideos / seoWriteDailyLimit),
