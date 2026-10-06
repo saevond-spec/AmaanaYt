@@ -148,7 +148,9 @@ async function harness(t, options = {}) {
         ? uploadSequence[Math.min(checkNumber - 1, uploadSequence.length - 1)]
         : options.failedUploadVideoId === videoId ? 'failed'
         : options.unprocessedUploadVideoId === videoId ? 'uploaded' : 'processed';
-      return { id: videoId, status: { privacyStatus, uploadStatus }, processingDetails: { processingStatus } };
+      const liveBroadcastContent = options.liveBroadcastContent?.[videoId] ?? 'none';
+      return { id: videoId, snippet: { liveBroadcastContent }, status: { privacyStatus, uploadStatus },
+        processingDetails: { processingStatus } };
     },
     async publish(videoId) {
       counters.publications.push(videoId);
@@ -410,6 +412,32 @@ test('automatic publication waits for the complete bundle before making any outp
   assert.equal(h.drafts.get(h.batch.id).status, 'completed');
   assert.equal(h.counters.publications.length, 4);
   assert.equal(h.counters.visibilityMutations, 4);
+});
+
+test('every video and Short must finish YouTube processing before any bundle output can publish', async (t) => {
+  const outputIds = ['yt-parent', 'yt-short-moment-one', 'yt-short-moment-two', 'yt-short-moment-three'];
+  for (const outputId of outputIds) {
+    const h = await harness(t, { processingStatuses: { [outputId]: ['processing', 'succeeded'] } });
+    await h.processor(h.batch.id);
+    assert.equal(h.drafts.get(h.batch.id).status, 'clip_retry_wait', outputId);
+    assert.equal(h.counters.publications.length, 0, outputId);
+    assert.equal(h.counters.visibilityMutations, 0, outputId);
+    assert.ok(h.counters.uploads.every((upload) => upload.privacyStatus === 'private'), outputId);
+
+    await h.processor(h.batch.id);
+    assert.equal(h.drafts.get(h.batch.id).status, 'completed', outputId);
+    assert.equal(h.counters.publications.length, 4, outputId);
+  }
+});
+
+test('active and upcoming YouTube livestream outputs cannot pass the finished media gate', async (t) => {
+  for (const [outputId, state] of [['yt-parent', 'live'], ['yt-short-moment-one', 'upcoming']]) {
+    const h = await harness(t, { liveBroadcastContent: { [outputId]: state } });
+    await h.processor(h.batch.id);
+    assert.equal(h.drafts.get(h.batch.id).status, 'clip_retry_wait', outputId);
+    assert.equal(h.counters.publications.length, 0, outputId);
+    assert.equal(h.counters.visibilityMutations, 0, outputId);
+  }
 });
 
 test('terminated YouTube processing details do not count as a finished output', async (t) => {
