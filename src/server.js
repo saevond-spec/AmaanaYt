@@ -351,7 +351,8 @@ async function processTwitchClipDraft(id) {
       durationSeconds: draft.duration,
       context: { takeaways: draft.reason || draft.title, videoType: 'Gameplay' },
       markers: [{ kind: 'clip', startSeconds: 0, endSeconds: draft.duration,
-        title: draft.title, provenance: 'twitch_highlight' }]
+        title: draft.title, provenance: 'twitch_highlight' }],
+      playlistAssignment
     }).catch((error) => console.error('Short SEO registration failed:', error.message));
   } catch (error) {
     console.error(`Twitch clip job ${id} failed:`, error.message);
@@ -896,7 +897,8 @@ app.post('/api/drafts', agentOrAdmin, upload.single('video'), async (req, res, n
       createdAt: new Date().toISOString()
     });
     await seo.registerUpload(uploaded.id, { title, description: String(req.body.description || ''),
-      tags, context }).catch((error) => console.error('Upload SEO registration failed:', error.message));
+      tags, context, playlistAssignment })
+      .catch((error) => console.error('Upload SEO registration failed:', error.message));
     res.status(201).json(draft);
   } catch (error) {
     if (req.file) fs.unlink(req.file.path, () => {});
@@ -970,6 +972,11 @@ app.post('/api/drafts/:id/approve', admin, async (req, res, next) => {
     const playlistAssignment = req.body.publishAt
       ? draft.playlistAssignment
       : await autoAssignPublishedPlaylist(draft.youtubeVideoId, draft);
+    if (!req.body.publishAt && playlistAssignment &&
+        !['daily_limit', 'disabled', 'ineligible'].includes(playlistAssignment.state) &&
+        typeof store.markSeoPlaylistResult === 'function') {
+      await store.markSeoPlaylistResult(draft.youtubeVideoId, playlistAssignment);
+    }
     const updated = await store.updateDraft(draft.id, {
       playlistAssignment,
       status: req.body.publishAt ? 'scheduled' : 'published',
