@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { Pool } = require('pg');
 const { prioritizeSeoAutoCandidates } = require('./seo-priority');
+const SEO_AUTOPILOT_VERSION = require('./seo-autopilot-version');
 
 function databaseConnectionString(value, production = false) {
   if (!production || !value) return value;
@@ -694,7 +695,7 @@ async function markSeoAutoResult(videoId, result) {
     WHERE video_id = $1`, [videoId, JSON.stringify(result)]);
 }
 
-async function listSeoAutoCandidates(limit = 20) {
+async function listSeoAutoCandidates(limit = 20, autopilotVersion = SEO_AUTOPILOT_VERSION) {
   await init();
   const result = await pool.query(`SELECT video_id AS "videoId", status,
       CASE WHEN status = 'ready' THEN 0
@@ -709,13 +710,14 @@ async function listSeoAutoCandidates(limit = 20) {
       AND source->>'privacyStatus' = 'public'
       AND generated_at IS NOT NULL
       AND (auto_result IS NULL
+        OR auto_result->>'autopilotVersion' IS DISTINCT FROM $1
         OR (auto_result->>'packageGeneratedAt')::timestamptz IS DISTINCT FROM generated_at
         OR (auto_result->>'state' = 'retry' AND (auto_result->>'at')::timestamptz < NOW() - INTERVAL '1 hour')
         OR auto_result->>'reason' = 'Video analysis or owner supplied video context is required for automatic publishing'
         OR ((auto_result->>'packageGeneratedAt')::timestamptz = generated_at
           AND auto_result->>'thumbnailState' IS NULL)
         OR (auto_result->>'thumbnailState' = 'retry' AND (auto_result->>'at')::timestamptz < NOW() - INTERVAL '1 hour'))
-    ORDER BY generated_at ASC NULLS LAST, video_id ASC`);
+    ORDER BY generated_at ASC NULLS LAST, video_id ASC`, [autopilotVersion]);
   return prioritizeSeoAutoCandidates(result.rows, limit);
 }
 

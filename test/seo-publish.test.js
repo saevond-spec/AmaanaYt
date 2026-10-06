@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { auditVideo, automaticVideoEdit, channelSuggestions, channelEdit,
   retryablePublishError, createSeoPublisher } = require('../src/seo-publish');
+const SEO_AUTOPILOT_VERSION = require('../src/seo-autopilot-version');
 const { createSeoWorker } = require('../src/seo-worker');
 const { descriptionChapters } = require('../src/seo-package');
 
@@ -344,9 +345,45 @@ test('publisher respects an already applied package and retries temporary API fa
   await publisher.publishVideo(row.videoId);
   assert.equal(result.state, 'retry');
   assert.equal(calls, 1);
-  row.autoResult = { state: 'applied', packageGeneratedAt: row.generatedAt };
+  row.autoResult = { state: 'applied', packageGeneratedAt: row.generatedAt,
+    autopilotVersion: SEO_AUTOPILOT_VERSION };
   await publisher.publishVideo(row.videoId);
   assert.equal(calls, 1);
+});
+
+test('publisher reprocesses older same-package results once after an autopilot fix', async () => {
+  const row = item();
+  row.autoResult = {
+    state: 'applied',
+    packageGeneratedAt: row.generatedAt,
+    thumbnailState: 'applied',
+    thumbnailAt: '2026-10-01T00:00:00.000Z'
+  };
+  let updateCalls = 0;
+  let savedResult = null;
+  const store = {
+    getSeoVideo: async () => row,
+    getSeoSyncState: async () => ({ channelId: 'channel-1' }),
+    markSeoAutoResult: async (_id, value) => { row.autoResult = value; savedResult = value; },
+    markSeoApplied: async (_id, value) => { row.applied = value; },
+    upsertSeoVideo: async (_id, value) => { row.source = value; }
+  };
+  const youtube = {
+    ownedChannel: async () => ({ id: 'channel-1' }),
+    assertTargetChannel: async () => {},
+    getVideo: async () => ({ snippet: { ...row.source, categoryId: '20' },
+      status: { privacyStatus: 'public' } }),
+    updateVideoSeo: async () => { updateCalls += 1; }
+  };
+  const publisher = createSeoPublisher({ store, youtube, logger: { warn() {}, info() {} } });
+
+  const replayed = await publisher.publishVideo(row.videoId);
+  assert.equal(replayed.state, 'applied');
+  assert.equal(savedResult.autopilotVersion, SEO_AUTOPILOT_VERSION);
+  assert.equal(updateCalls, 1);
+
+  await publisher.publishVideo(row.videoId);
+  assert.equal(updateCalls, 1, 'the current result must not be applied repeatedly');
 });
 
 test('channel keywords derive from analyzed public videos and retain existing description', async () => {
