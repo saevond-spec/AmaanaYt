@@ -19,6 +19,7 @@ const { createSeoMarket, detectGame } = require('./seo-market');
 const { normalizeContext } = require('./seo-package');
 const { buildHighlightTimeline, buildHighlightDescription } = require('./highlight-metadata');
 const { parseTwitchDuration, validateHighlightMoments } = require('./highlight-validation');
+const { buildGameplayEditPlan } = require('./gameplay-editor');
 const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries, findHighlightBatchByVodId } = require('./highlight-pipeline');
 const { auditVideo, channelSuggestions, problem, assertVideoMatchesCatalog } = require('./seo-publish');
 const { createSessionStore } = require('./session-store');
@@ -917,24 +918,32 @@ app.post('/api/twitch/vod-clips', vodWebhookOrAgentOrAdmin, async (req, res, nex
     if (existing) {
       return res.status(202).json({
         accepted: true,
-        highlightVideo: { id: existing.id, status: existing.status, title: existing.title },
+        highlightVideo: { id: existing.id, status: existing.status, title: existing.title,
+          editingStyle: existing.editingStyle || 'chronological' },
         shortsPlanned: existing.highlights.length
       });
     }
     const vod = await twitch.getVod(vodId);
     const vodDurationSeconds = parseTwitchDuration(vod.duration);
     const highlights = validateHighlightMoments(req.body?.timestamps, vodDurationSeconds);
+    const editingStyle = req.body?.editingStyle == null || req.body.editingStyle === ''
+      ? 'story' : cleanText(req.body.editingStyle, 24);
+    if (!['story', 'chronological'].includes(editingStyle)) {
+      return res.status(400).json({ error: 'editingStyle must be story or chronological' });
+    }
+    const editPlan = buildGameplayEditPlan(highlights, editingStyle);
     const channel = cleanText(req.body?.channel || 'saevond', 50);
     const streamTitle = cleanText(req.body?.streamTitle, 80);
     const batch = await store.addDraft({ id: crypto.randomUUID(), sourceType: 'twitch_highlight_batch',
-      sourceChannel: channel, vodId, vodDurationSeconds, highlights, streamTitle,
+      sourceChannel: channel, vodId, vodDurationSeconds, highlights, streamTitle, editingStyle, editPlan,
       title: cleanText(`${streamTitle || 'Saevond livestream'} | Best moments`, 100),
-      pipelineVersion: 2, thumbnailStatus: 'pending', autoPublishEligible: true,
+      pipelineVersion: 3, thumbnailStatus: 'pending', autoPublishEligible: true,
       publicationStatus: 'pending', status: 'clip_queued', createdAt: new Date().toISOString() });
     enqueueHighlightBatch(batch.id);
     res.status(202).json({
       accepted: true,
-      highlightVideo: { id: batch.id, status: batch.status, title: batch.title },
+      highlightVideo: { id: batch.id, status: batch.status, title: batch.title,
+        editingStyle, openingMoment: editPlan.hookTitle },
       shortsPlanned: batch.highlights.length
     });
   } catch (error) {

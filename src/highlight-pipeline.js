@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { validateHighlightMoments, verifyCreatedClip } = require('./highlight-validation');
+const { buildGameplayEditPlan } = require('./gameplay-editor');
 const { buildHighlightTitle: defaultBuildHighlightTitle, buildShortTitle: defaultBuildShortTitle,
   buildShortDescription: defaultBuildShortDescription } = require('./highlight-metadata');
 
@@ -149,6 +150,10 @@ function createHighlightProcessor(dependencies) {
       if (batch.autoPublishEligible) {
         validateHighlightMoments(batch.highlights, batch.vodDurationSeconds);
       }
+      const editPlan = buildGameplayEditPlan(batch.highlights,
+        batch.pipelineVersion >= 3 ? (batch.editingStyle || 'story') : 'chronological');
+      const orderedIndexes = editPlan.orderedIndexes;
+      const montageHighlights = orderedIndexes.map((index) => batch.highlights[index]);
 
       const attemptCount = (Number(batch.clipAttemptCount) || 0) + 1;
       const failures = [];
@@ -164,7 +169,7 @@ function createHighlightProcessor(dependencies) {
       await fs.promises.mkdir(directory, { recursive: true });
       await store.updateDraft(id, {
         status: 'creating_twitch_clips', productionState: 'processing',
-        clipAttemptCount: attemptCount, nextClipAttemptAt: null, error: null, productionFailures: []
+        clipAttemptCount: attemptCount, nextClipAttemptAt: null, error: null, productionFailures: [], editPlan
       });
 
       const sources = [];
@@ -194,8 +199,18 @@ function createHighlightProcessor(dependencies) {
 
       const montage = path.join(directory, 'highlight.mp4');
       await store.updateDraft(id, { status: 'assembling_highlight_video' });
-      const durations = await video.assembleHighlights(sources, montage, directory);
-      const timeline = buildHighlightTimeline(batch.highlights, durations);
+      const montageSources = orderedIndexes.map((index) => sources[index]);
+      const segmentDurations = await video.assembleHighlights(montageSources, montage, directory);
+      const durationByIndex = new Map();
+      const montageOffsetByIndex = new Map();
+      let montageOffset = 0;
+      for (let slot = 0; slot < orderedIndexes.length; slot += 1) {
+        const index = orderedIndexes[slot];
+        durationByIndex.set(index, segmentDurations[slot]);
+        montageOffsetByIndex.set(index, montageOffset);
+        montageOffset += Number(segmentDurations[slot]);
+      }
+      const timeline = buildHighlightTimeline(montageHighlights, segmentDurations);
       await video.validateHighlight(montage, timeline.durationSeconds);
       const description = batch.pipelineVersion >= 2
         ? buildHighlightDescription(batch.vodId, timeline, batch.streamTitle)
@@ -209,16 +224,16 @@ function createHighlightProcessor(dependencies) {
       let thumbnailReady = false;
 
       if (batch.pipelineVersion >= 2 && thumbnailStatus !== 'applied') {
-        const selectedIndex = batch.highlights.reduce((best, item, index, all) =>
+        const selectedIndex = montageHighlights.reduce((best, item, index, all) =>
           (Number(item.score) || 0) > (Number(all[best] && all[best].score) || 0) ? index : best, 0);
-        const selected = batch.highlights[selectedIndex];
-        const frameOffset = Math.min(durations[selectedIndex] / 2,
-          Math.max(0.25, durations[selectedIndex] - 0.25));
+        const selected = montageHighlights[selectedIndex];
+        const frameOffset = Math.min(segmentDurations[selectedIndex] / 2,
+          Math.max(0.25, segmentDurations[selectedIndex] - 0.25));
         thumbnailHeadline = video.thumbnailHeadline(selected.title || highlightTitle);
         try {
           // The montage is normalized to 1280x720. Extract from the original Twitch clip instead
           // so the thumbnail renderer can retain any higher-resolution source frames.
-          await video.createThumbnail(sources[selectedIndex] || montage, thumbnailPath, {
+          await video.createThumbnail(montageSources[selectedIndex] || montage, thumbnailPath, {
             timestampSeconds: frameOffset, headline: thumbnailHeadline
           });
           thumbnailReady = true;
@@ -254,7 +269,7 @@ function createHighlightProcessor(dependencies) {
       const playlistAssignment = await autoAssignPlaylist({
         id: highlight.id, privacyStatus: 'private', title: highlightTitle, description,
         tags: highlightTags,
-        context: { topic: batch.streamTitle || '', takeaways: batch.highlights.map((moment) =>
+        context: { topic: batch.streamTitle || '', takeaways: montageHighlights.map((moment) =>
           moment.title + ': ' + moment.reason).join('\n'), videoType: 'Gameplay' }
       });
       await store.updateDraft(id, { playlistAssignment });
@@ -277,8 +292,8 @@ function createHighlightProcessor(dependencies) {
       }
 
       let markerOffset = 0;
-      const markers = batch.highlights.flatMap((moment, index) => {
-        const length = durations[index];
+      const markers = montageHighlights.flatMap((moment, index) => {
+        const length = segmentDurations[index];
         const chapter = { kind: 'chapter', startSeconds: markerOffset, title: moment.title, provenance: 'twitch_highlight' };
         const clip = { kind: 'clip', startSeconds: markerOffset, endSeconds: markerOffset + Math.min(60, length),
           title: moment.title, provenance: 'twitch_highlight' };
@@ -287,7 +302,7 @@ function createHighlightProcessor(dependencies) {
       });
       const highlightSeoPayload = {
         title: highlightTitle, description, tags: highlightTags, durationSeconds: markerOffset,
-        context: { topic: batch.streamTitle || '', takeaways: batch.highlights.map((moment) =>
+        context: { topic: batch.streamTitle || '', takeaways: montageHighlights.map((moment) =>
           moment.title + ': ' + moment.reason).join('\n'), videoType: 'Gameplay' },
         markers
       };
@@ -299,10 +314,10 @@ function createHighlightProcessor(dependencies) {
       const existingShorts = (await store.listDrafts()).filter((draft) => draft.parentId === id);
       const shortsByIndex = new Map(existingShorts.map((draft) => [draft.highlightIndex, draft]));
       const registeredShortIndexes = new Set();
-      let offset = 0;
       for (let index = 0; index < batch.highlights.length; index += 1) {
         const moment = batch.highlights[index];
-        const length = Math.min(60, durations[index]);
+        const length = Math.min(60, durationByIndex.get(index));
+        const offset = montageOffsetByIndex.get(index);
         const shortTags = ['@saevond', 'gaming', 'Shorts'];
         const existingShort = shortsByIndex.get(index);
         const seenShortTitles = [highlightTitle, ...[...shortsByIndex.entries()]
@@ -335,8 +350,7 @@ function createHighlightProcessor(dependencies) {
           } else {
             registeredShortIndexes.add(index);
           }
-          offset += durations[index];
-          continue;
+                    continue;
         }
 
         const shortPath = path.join(directory, 'short-' + index + '.mp4');
@@ -379,8 +393,7 @@ function createHighlightProcessor(dependencies) {
         } catch (error) {
           noteFailure('Short ' + (index + 1), error, 150);
         }
-        offset += durations[index];
-      }
+              }
 
       if (registeredShortIndexes.size !== batch.highlights.length) {
         failures.push('shorts: ' + registeredShortIndexes.size + ' of ' + batch.highlights.length + ' have SEO registration');

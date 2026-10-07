@@ -28,7 +28,7 @@ async function harness(t, options = {}) {
   const counters = {
     clipCreates: 0, uploads: [], thumbnailSets: 0, thumbnailCreates: 0,
     thumbnailSource: null, thumbnailOptions: null,
-    shortRenders: 0, seo: [], playlists: [], visibilityMutations: 0,
+    shortRenders: 0, shortOffsets: [], montageSources: [], seo: [], playlists: [], visibilityMutations: 0,
     publicationChecks: [], publications: [], errors: []
   };
   const processingChecks = new Map();
@@ -96,6 +96,7 @@ async function harness(t, options = {}) {
       await fs.writeFile(destination, 'fixture thumbnail');
     },
     async assembleHighlights(sources, destination) {
+      counters.montageSources = sources.map((source) => path.basename(source));
       await fs.writeFile(destination, 'fixture montage');
       return options.invalidDuration ? sources.map(() => 0) : sources.map(() => 30);
     },
@@ -105,8 +106,9 @@ async function harness(t, options = {}) {
     async validateShort() {
       if (options.failShortValidation) throw new Error('Short validation failed');
     },
-    async shortFromHighlight(_source, _offset, _length, destination) {
+    async shortFromHighlight(_source, offset, _length, destination) {
       counters.shortRenders += 1;
+      counters.shortOffsets.push(offset);
       await fs.writeFile(destination, 'fixture short');
     }
   };
@@ -547,4 +549,46 @@ test('permanent publication permission failure stops with owner review and leave
   assert.equal(h.drafts.get(h.batch.id).productionState, 'ready');
   assert.equal(h.drafts.get(h.batch.id).publicationStatus, 'failed');
   assert.equal(h.counters.publications.length, 1);
+});
+
+
+test('story-first gaming edit opens on the highest scored supplied moment and keeps all Shorts aligned', async (t) => {
+  const h = await harness(t, { autoPublish: false });
+  h.batch.pipelineVersion = 3;
+  h.batch.editingStyle = 'story';
+  h.batch.highlights[2].score = 99;
+  h.drafts.set(h.batch.id, h.batch);
+
+  await h.processor(h.batch.id);
+
+  const parent = h.drafts.get(h.batch.id);
+  assert.equal(parent.status, 'awaiting_owner_approval');
+  assert.equal(parent.editPlan.style, 'story');
+  assert.equal(parent.editPlan.hookIndex, 2);
+  assert.equal(parent.editPlan.hookTitle, 'Moment three');
+  assert.deepEqual(h.counters.montageSources, ['source-2.mp4', 'source-0.mp4', 'source-1.mp4']);
+  assert.ok(parent.title.includes('Moment three'));
+  assert.equal(parent.chapterTimestamps[0].title, 'Moment three');
+  assert.deepEqual(h.counters.shortOffsets, [30, 60, 0]);
+  assert.equal([...h.drafts.values()].filter((draft) =>
+    draft.sourceType === 'twitch_highlight_short').length, 3);
+  assert.equal(h.counters.publications.length, 0);
+  assert.equal(h.counters.visibilityMutations, 0);
+});
+
+test('story edit falls back to full chronological gameplay order when scores are absent', async (t) => {
+  const h = await harness(t, { autoPublish: false });
+  h.batch.pipelineVersion = 3;
+  h.batch.editingStyle = 'story';
+  h.batch.highlights = h.batch.highlights.map((moment) => ({ ...moment, score: null }));
+  h.drafts.set(h.batch.id, h.batch);
+
+  await h.processor(h.batch.id);
+
+  const parent = h.drafts.get(h.batch.id);
+  assert.equal(parent.editPlan.hookIndex, null);
+  assert.deepEqual(parent.editPlan.orderedIndexes, [0, 1, 2]);
+  assert.deepEqual(h.counters.montageSources, ['source-0.mp4', 'source-1.mp4', 'source-2.mp4']);
+  assert.equal(parent.status, 'awaiting_owner_approval');
+  assert.equal(h.counters.publications.length, 0);
 });

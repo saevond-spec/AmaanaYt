@@ -250,7 +250,16 @@ function renderDraft(draft) {
       card.append(twitchLink);
     }
   }
-  if (isHighlight) card.append(element('p', 'draft-meta', `Twitch VOD ${draft.vodId} · ${(draft.highlights || []).length} selected moments · highlight video`));
+  if (isHighlight) {
+    card.append(element('p', 'draft-meta', `Twitch VOD ${draft.vodId} · ${(draft.highlights || []).length} selected moments · highlight video`));
+    const plan = draft.editPlan;
+    const editSummary = plan?.style === 'story' && plan.hookTitle
+      ? 'Story edit: “' + plan.hookTitle + '” opens the reel; the other selected moments stay in stream order.'
+      : plan?.style === 'story'
+        ? 'Story edit: no scored moment was supplied, so the reel stays in stream order.'
+        : 'Chronological edit: selected moments stay in stream order.';
+    card.append(element('p', 'draft-meta', editSummary));
+  }
   if (isHighlight && draft.chapterStatus) {
     const moments = draft.chapters?.length ? draft.chapters : (draft.chapterTimestamps || []);
     const label = draft.chapterStatus === 'chapters_added'
