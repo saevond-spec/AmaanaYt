@@ -350,7 +350,7 @@ function createHighlightProcessor(dependencies) {
           } else {
             registeredShortIndexes.add(index);
           }
-                    continue;
+          continue;
         }
 
         const shortPath = path.join(directory, 'short-' + index + '.mp4');
@@ -393,7 +393,7 @@ function createHighlightProcessor(dependencies) {
         } catch (error) {
           noteFailure('Short ' + (index + 1), error, 150);
         }
-              }
+      }
 
       if (registeredShortIndexes.size !== batch.highlights.length) {
         failures.push('shorts: ' + registeredShortIndexes.size + ' of ' + batch.highlights.length + ' have SEO registration');

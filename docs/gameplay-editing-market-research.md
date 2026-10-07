@@ -14,7 +14,7 @@
 
 ## Product decision
 
-Amaana's default story edit puts the highest nonzero supplied moment score first, then keeps the other supplied moments in chronological stream order. It does not remove any selected moment. Equal scores resolve to the earliest source timestamp. If scores are absent or zero, it keeps chronology. A request can set editingStyle: "chronological" to disable the story-first order.
+Amaana's default story edit puts the highest nonzero supplied moment score first, then keeps the other supplied moments in chronological stream order. It does not remove any selected moment. Equal scores resolve to the earliest source timestamp. If scores are absent or zero, it keeps chronology. A request can set `editingStyle` to `chronological` to disable the story-first order.
 
 Amaana does not inspect gameplay to invent moments, captions, claims, or scores. SweatyClanker supplies candidate timestamps, titles, reasons, and any score. One YouTube Short remains tied to each supplied moment. No music or commentary is added automatically.
 
