@@ -4,7 +4,7 @@ const path = require('path');
 const { descriptionChapters } = require('./seo-package');
 const { createThumbnailFromImage, thumbnailHeadline } = require('./video');
 const { rateThumbnailBriefs } = require('./thumbnail-rating');
-const { ensureCreatorTag, youtubeTagCharacters } = require('./channel-tags');
+const { ensureCreatorTag, youtubeTagCharacters, isYouTubeAuthorizationError } = require('./channel-tags');
 const { findMetadataConflicts } = require('./metadata-uniqueness');
 const SEO_AUTOPILOT_VERSION = require('./seo-autopilot-version');
 
@@ -15,14 +15,29 @@ function problem(message, status = 400) {
 }
 
 function retryablePublishError(error) {
-  const code = Number(error.status || error.response?.status || error.code);
+  if (isYouTubeAuthorizationError(error)) return true;
+  const code = Number(error?.status || error?.response?.status || error?.code);
   if ([401, 408, 425, 429, 500, 502, 503, 504].includes(code)) return true;
-  if (code !== 403) return ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED', 'EPIPE'].includes(error.code);
-  const apiError = error.response?.data?.error || {};
+  if (code !== 403) return ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED', 'EPIPE'].includes(error?.code);
+  const apiError = error?.response?.data?.error || {};
   const reasons = [apiError.status, apiError.message, ...(apiError.errors || []).map((entry) => entry.reason),
-    error.message].filter(Boolean).join(' ').toLowerCase();
+    error?.message].filter(Boolean).join(' ').toLowerCase();
   return ['quotaexceeded', 'ratelimitexceeded', 'userratelimitexceeded', 'backenderror']
     .some((reason) => reasons.includes(reason));
+}
+
+function publishErrorMessage(error) {
+  const data = error?.response?.data || {};
+  const rawError = data.error;
+  const apiError = rawError && typeof rawError === 'object' ? rawError : {};
+  const details = [
+    typeof rawError === 'string' ? rawError : '',
+    apiError.code, apiError.status, apiError.message, apiError.error_description,
+    data.error_description,
+    ...(apiError.errors || []).map((entry) => entry?.reason || '')
+  ].filter(Boolean);
+  return [...new Set([error?.message, ...details].filter(Boolean).map(String))]
+    .join(': ').slice(0, 300);
 }
 
 function sameTags(left, right) {
@@ -40,7 +55,6 @@ function auditVideo(item) {
   if (!source.title?.trim()) findings.push('The video has no title.');
   if (source.title?.length > 70) findings.push('The title is long; review how it appears in search.');
   if ((source.description || '').trim().length < 100) findings.push('The description gives little context about the video.');
-  if (!source.tags?.length) findings.push('No relevant video tags are set.');
   if (keyword && !source.title?.toLocaleLowerCase().includes(keyword.toLocaleLowerCase())) {
     findings.push('The suggested primary keyword is absent from the current title.');
   }
@@ -141,7 +155,10 @@ function automaticVideoEdit(item) {
   const summary = [pkg.hook, ...(pkg.paragraphs || [])].filter(Boolean).join('\n\n').trim();
   const prior = item.applied;
   const original = (prior && source.description === prior.description
-    ? prior.originalDescription : source.description || '').trim();
+    ? prior.originalDescription : source.description || '').trim()
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*\[Add verified chapters after reviewing footage\]\s*$/i.test(line))
+    .join('\n').trim();
   const hashtags = (pkg.hashtags || []).join(' ');
   if (/\[(?:add|insert|replace|your|tbd|todo)[^\]]*\]/i.test(summary) || !summary) {
     throw problem('Generated copy contains unfinished placeholders');
@@ -406,7 +423,7 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
       try {
         edit = automaticVideoEdit(item);
       } catch (error) {
-        metadata = { state: 'skipped', reason: String(error.message).slice(0, 300) };
+        metadata = { state: 'skipped', reason: publishErrorMessage(error) };
       }
     }
 
@@ -449,10 +466,10 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
     } catch (error) {
       const retry = retryablePublishError(error);
       if (metadataWritePending) metadata = { state: retry ? 'retry' : 'skipped',
-        reason: String(error.message).slice(0, 300) };
+        reason: publishErrorMessage(error) };
       if (thumbnailWritePending) thumbnail = { state: retry ? 'retry' : 'skipped',
-        reason: String(error.message).slice(0, 300) };
-      logger.warn?.('SEO auto publish ' + videoId + ': ' + String(error.message).slice(0, 300));
+        reason: publishErrorMessage(error) };
+      logger.warn?.('SEO auto publish ' + videoId + ': ' + publishErrorMessage(error));
       return recordResult(videoId, generation, metadata, thumbnail, prior);
     }
 
@@ -480,9 +497,9 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
         logger.info?.('SEO metadata applied to public video ' + videoId);
       } catch (error) {
         const retry = retryablePublishError(error);
-        metadata = { state: retry ? 'retry' : 'skipped', reason: String(error.message).slice(0, 300) };
+        metadata = { state: retry ? 'retry' : 'skipped', reason: publishErrorMessage(error) };
         if (thumbnailWritePending) thumbnail = { state: retry ? 'retry' : 'skipped',
-          reason: 'Thumbnail waits for metadata write: ' + String(error.message).slice(0, 220) };
+          reason: 'Thumbnail waits for metadata write: ' + publishErrorMessage(error).slice(0, 220) };
         logger.warn?.('SEO auto publish ' + videoId + ': ' + metadata.reason);
       }
     }
@@ -496,7 +513,7 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
         if (result.state === 'applied') logger.info?.('SEO thumbnail applied to public video ' + videoId);
       } catch (error) {
         const retry = retryablePublishError(error);
-        thumbnail = { state: retry ? 'retry' : 'skipped', reason: String(error.message).slice(0, 300) };
+        thumbnail = { state: retry ? 'retry' : 'skipped', reason: publishErrorMessage(error) };
         logger.warn?.('SEO thumbnail ' + videoId + ': ' + thumbnail.reason);
       }
     }

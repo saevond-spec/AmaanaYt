@@ -606,6 +606,50 @@ test('one-time owner approval resumes a paused catalog, then respects a later ma
   assert.equal(logs.filter((line) => line === 'SEO backfill resumed by one-time owner approval').length, 1);
 });
 
+test('automatic SEO removes its own missing-chapters placeholder without inventing chapters or prioritizing tags', () => {
+  const base = item();
+  const row = item({
+    source: { ...base.source, tags: [],
+      description: `Short existing description.\n[Add verified chapters after reviewing footage]` }
+  });
+  const edit = automaticVideoEdit(row);
+  assert.doesNotMatch(edit.description, /\[Add verified chapters after reviewing footage\]/i);
+  assert.doesNotMatch(edit.description, /^Chapters$/m);
+  const findings = auditVideo(row);
+  assert.ok(findings.some((finding) => /chapter markers/i.test(finding)));
+  assert.equal(findings.some((finding) => /video tags/i.test(finding)), false);
+});
+
+test('Google invalid_grant is retried with its OAuth detail preserved for reconnect recovery', async () => {
+  const row = item();
+  let result;
+  const error = Object.assign(new Error('Request failed with status code 400'), {
+    status: 400,
+    response: { status: 400, data: {
+      error: 'invalid_grant',
+      error_description: 'Token has been expired or revoked.'
+    } }
+  });
+  const publisher = createSeoPublisher({
+    store: {
+      getSeoVideo: async () => row,
+      getSeoSyncState: async () => ({ channelId: 'channel-1' }),
+      markSeoAutoResult: async (_id, value) => { result = value; }
+    },
+    youtube: {
+      ownedChannel: async () => ({ id: 'channel-1' }),
+      assertTargetChannel: async () => {},
+      getVideo: async () => { throw error; }
+    },
+    logger: { warn() {}, info() {} }
+  });
+  await publisher.publishVideo(row.videoId);
+  assert.equal(result.state, 'retry');
+  assert.equal(result.thumbnailState, 'retry');
+  assert.match(result.reason, /invalid_grant/i);
+  assert.match(result.reason, /expired or revoked/i);
+});
+
 test('permanent permission errors are skipped but quota and transient errors retry', () => {
   assert.equal(retryablePublishError({ status: 403, message: 'Video is not on the connected channel' }), false);
   assert.equal(retryablePublishError({ status: 403, response: { data: { error: {

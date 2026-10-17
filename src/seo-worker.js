@@ -470,6 +470,10 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       const requeued = await store.requeueSeoPlaylistAuthorizationFailures();
       if (requeued) logger.info?.(`Requeued ${requeued} playlist assignments after YouTube reconnect`);
     }
+    if (typeof store.requeueSeoAuthorizationFailures === 'function') {
+      const requeued = await store.requeueSeoAuthorizationFailures();
+      if (requeued) logger.info?.(`Requeued ${requeued} public SEO updates after YouTube reconnect`);
+    }
     if (typeof store.getSeoSyncState !== 'function' || typeof store.saveSeoSyncState !== 'function') return;
     const state = await store.getSeoSyncState();
     await store.saveSeoSyncState({ ...state,
