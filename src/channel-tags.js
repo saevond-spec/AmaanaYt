@@ -99,11 +99,17 @@ function buildCreatorTagUpdate(video, channelId, options = {}) {
 }
 
 function isYouTubeAuthorizationError(error) {
-  const apiError = error?.response?.data?.error || {};
+  const data = error?.response?.data || {};
+  const rawError = data.error;
+  const apiError = rawError && typeof rawError === 'object' ? rawError : {};
   const reason = (apiError.errors || []).map((item) => item?.reason || '').join(' ');
-  const status = Number(error?.response?.status || error?.status || apiError.code);
-  const text = [error?.code, error?.status, apiError.status, apiError.message, reason, error?.message]
-    .filter(Boolean).join(' ').toLocaleLowerCase();
+  const status = Number(error?.response?.status || error?.status || apiError.code || data.code);
+  const text = [
+    error?.code, error?.status, status,
+    typeof rawError === 'string' ? rawError : '',
+    apiError.code, apiError.status, apiError.message, apiError.error_description,
+    data.error_description, reason, error?.message
+  ].filter(Boolean).join(' ').toLocaleLowerCase();
   return status === 401 || /invalid_grant|invalid credentials|autherror|unauthenticated|insufficient.{0,30}(scope|permission)|refresh token.{0,30}(expired|revoked|invalid)|(?:expired|revoked).{0,30}refresh token/.test(text);
 }
 
