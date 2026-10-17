@@ -616,8 +616,13 @@ function renderSeoVideo(item) {
     `SEO applied to this video on ${new Date(item.applied.at).toLocaleString()}.`));
   if (item.autoResult?.state === 'skipped') card.append(element('p', 'draft-meta',
     `Automatic SEO skipped: ${item.autoResult.reason}`));
-  if (item.autoResult?.state === 'retry') card.append(element('p', 'draft-meta',
-    `Automatic SEO will retry: ${item.autoResult.reason}`));
+  if (item.autoResult?.state === 'retry') {
+    const reconnectNeeded = /invalid_grant|invalid credentials|autherror|unauthenticated|insufficient.{0,30}(scope|permission)|refresh token.{0,30}(expired|revoked|invalid)/i
+      .test(item.autoResult.reason || '');
+    card.append(element('p', reconnectNeeded ? 'draft-error' : 'draft-meta', reconnectNeeded
+      ? 'YouTube authorization failed; reconnect to resume this public SEO edit automatically.'
+      : `Automatic SEO will retry: ${item.autoResult.reason}`));
+  }
   if (item.autoResult?.thumbnailState === 'applied') card.append(element('p', 'draft-meta',
     `SEO thumbnail updated: ${item.autoResult.thumbnailHeadline || 'thumbnail'}`));
   const thumbnailSelection = item.autoResult?.thumbnailSelection;
@@ -759,7 +764,7 @@ async function loadSeo() {
       coverageStatus,
       status.youtubeAnalyticsAuthorized
         ? (status.youtubeSearchAnalyticsNeedsReconnect
-          ? 'Google rejected the saved YouTube token; reconnect to resume Analytics collection'
+          ? 'Google rejected the saved YouTube token; reconnect to resume Analytics and queued public SEO edits'
           : status.youtubeSearchAnalyticsLastAttemptAt
           ? 'Read-only search-traffic autopilot active; last batch ' +
             new Date(status.youtubeSearchAnalyticsLastAttemptAt).toLocaleString()
