@@ -695,6 +695,37 @@ async function markSeoAutoResult(videoId, result) {
     WHERE video_id = $1`, [videoId, JSON.stringify(result)]);
 }
 
+async function requeueSeoAuthorizationFailures() {
+  await init();
+  const pattern = '(invalid_grant|invalid credentials|autherror|unauthenticated|insufficient.{0,30}(scope|permission)|refresh token.{0,30}(expired|revoked|invalid)|expired.{0,30}refresh token|revoked.{0,30}refresh token)';
+  const result = await pool.query(`UPDATE amaana_seo_packages
+    SET auto_result = jsonb_set(
+      jsonb_set(
+        CASE WHEN COALESCE(auto_result->>'reason', '') ~* $1
+          THEN jsonb_set(auto_result, '{state}', '"retry"'::jsonb, true)
+          ELSE auto_result END,
+        '{thumbnailState}',
+        CASE WHEN COALESCE(auto_result->>'thumbnailReason', '') ~* $1
+          THEN '"retry"'::jsonb
+          ELSE COALESCE(auto_result->'thumbnailState', 'null'::jsonb)
+        END,
+        true
+      ),
+      '{at}', to_jsonb((NOW() - INTERVAL '1 hour' - INTERVAL '1 second')::text), true
+    ),
+    updated_at = NOW()
+    WHERE source->>'privacyStatus' = 'public'
+      AND auto_result IS NOT NULL
+      AND (
+        (auto_result->>'state' IN ('skipped', 'retry')
+          AND COALESCE(auto_result->>'reason', '') ~* $1)
+        OR (auto_result->>'thumbnailState' IN ('skipped', 'retry')
+          AND COALESCE(auto_result->>'thumbnailReason', '') ~* $1)
+      )
+    RETURNING video_id`, [pattern]);
+  return result.rowCount;
+}
+
 async function listSeoAutoCandidates(limit = 20, autopilotVersion = SEO_AUTOPILOT_VERSION) {
   await init();
   const result = await pool.query(`SELECT video_id AS "videoId", status,
@@ -800,6 +831,7 @@ module.exports = {
   finishSeoVideo,
   markSeoApplied,
   markSeoAutoResult,
+  requeueSeoAuthorizationFailures,
   listSeoAutoCandidates,
   seoUpdatesToday,
   listSeoNeedsAnalysis,
