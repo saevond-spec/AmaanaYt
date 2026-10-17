@@ -1068,3 +1068,28 @@ test('catalog scan processes a bounded batch of older uploads per run', async ()
   assert.equal(state.cursor, 'page-3');
   assert.equal(state.completed, false);
 });
+
+test('YouTube reconnect releases public SEO authorization retries before the next low-view pass', async () => {
+  let state = { youtubeSearchAnalyticsNeedsReconnect: true,
+    youtubeSearchAnalyticsRetryAfter: '2026-10-18T00:00:00.000Z',
+    youtubeSearchAnalyticsLastError: 'invalid_grant',
+    youtubeSearchAnalyticsRunDate: '2026-10-17' };
+  let releaseCalls = 0;
+  const logs = [];
+  const store = {
+    requeueSeoAuthorizationFailures: async () => { releaseCalls += 1; return 3; },
+    getSeoSyncState: async () => state,
+    saveSeoSyncState: async (next) => { state = next; }
+  };
+  const worker = createSeoWorker({ store, youtube: {}, env: {},
+    logger: { info: (message) => logs.push(message) } });
+
+  await worker.resumeAfterYouTubeReconnect();
+
+  assert.equal(releaseCalls, 1);
+  assert.equal(state.youtubeSearchAnalyticsNeedsReconnect, false);
+  assert.equal(state.youtubeSearchAnalyticsRetryAfter, null);
+  assert.equal(state.youtubeSearchAnalyticsLastError, null);
+  assert.equal(state.youtubeSearchAnalyticsRunDate, null);
+  assert.ok(logs.some((message) => /Requeued 3 public SEO updates/.test(message)));
+});
