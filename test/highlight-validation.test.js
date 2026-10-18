@@ -2,7 +2,8 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseTwitchDuration, validateHighlightMoments, verifyCreatedClip } = require('../src/highlight-validation');
+const { parseTwitchDuration, validateHighlightMoments, verifyCreatedClip,
+  verifyClipCreationRequest } = require('../src/highlight-validation');
 
 test('parses Twitch archive duration strings', () => {
   assert.equal(parseTwitchDuration('6h26m14s'), 23174);
@@ -49,6 +50,22 @@ test('deduplicates overlapping detections by confidence and caps the list at eig
   assert.equal(result.length, 8);
   assert.deepEqual(result.map((item) => item.startSeconds), [5, 60, 160, 200, 240, 280, 320, 360]);
   assert.equal(result[0].title, 'higher overlap');
+});
+
+test('verifies the VOD source and moment in Amaana accepted clip requests', () => {
+  assert.deepEqual(verifyClipCreationRequest({ startSeconds: 30, duration: 30 }, {
+    id: 'created-clip', requestedVodId: '123', requestedVodOffset: 60, requestedDuration: 30
+  }, '123'), {
+    sourceVodId: '123', startSeconds: 30, endSeconds: 60, duration: 30,
+    verified: true, verificationMethod: 'twitch_vod_clip_request'
+  });
+
+  assert.throws(() => verifyClipCreationRequest({ startSeconds: 30, duration: 30 }, {
+    id: 'created-clip', requestedVodId: '999', requestedVodOffset: 60, requestedDuration: 30
+  }, '123'), { status: 409, code: 'TWITCH_CLIP_WRONG_VOD' });
+  assert.throws(() => verifyClipCreationRequest({ startSeconds: 30, duration: 30 }, {
+    id: 'created-clip', requestedVodId: '123', requestedVodOffset: 80, requestedDuration: 30
+  }, '123'), { status: 422, code: 'TWITCH_CLIP_REQUEST_MISMATCH' });
 });
 
 test('checks that each created Twitch clip points back to the requested VOD moment', () => {

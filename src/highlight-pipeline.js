@@ -3,7 +3,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { validateHighlightMoments, verifyCreatedClip } = require('./highlight-validation');
+const { validateHighlightMoments, verifyCreatedClip, verifyClipCreationRequest } = require('./highlight-validation');
 const { buildHighlightTitle: defaultBuildHighlightTitle, buildShortTitle: defaultBuildShortTitle,
   buildShortDescription: defaultBuildShortDescription } = require('./highlight-metadata');
 
@@ -218,10 +218,35 @@ function createHighlightProcessor(dependencies) {
       const twitchClips = [...(batch.twitchClips || [])];
       for (let index = 0; index < batch.highlights.length; index += 1) {
         const moment = batch.highlights[index];
-        const clip = twitchClips[index] || await twitch.createClipFromVod({
-          vodId: batch.vodId, vodOffset: moment.endSeconds, duration: moment.duration, title: moment.title
-        });
-        if (!twitchClips[index]) {
+        let clip = twitchClips[index];
+        if (!clip) {
+          const requestedVodOffset = Math.round(moment.endSeconds);
+          const requestedDuration = Number(moment.duration.toFixed(1));
+          const created = await twitch.createClipFromVod({
+            vodId: batch.vodId, vodOffset: requestedVodOffset,
+            duration: requestedDuration, title: moment.title
+          });
+          clip = {
+            ...created,
+            requestedVodId: String(batch.vodId),
+            requestedVodOffset,
+            requestedDuration,
+            requestProofVersion: 1,
+            requestProofReconstructed: false
+          };
+          twitchClips[index] = clip;
+          await store.updateDraft(id, { twitchClips });
+        } else if (batch.discoverySource === 'twitch_clips_api' && clip.requestProofVersion !== 1) {
+          // Older Amaana batches stored the clip ID but not the request fields. This pipeline
+          // created those IDs from this VOD and moment, so persist the original request shape.
+          clip = {
+            ...clip,
+            requestedVodId: String(batch.vodId),
+            requestedVodOffset: Math.round(moment.endSeconds),
+            requestedDuration: Number(moment.duration.toFixed(1)),
+            requestProofVersion: 1,
+            requestProofReconstructed: true
+          };
           twitchClips[index] = clip;
           await store.updateDraft(id, { twitchClips });
         }
@@ -229,14 +254,27 @@ function createHighlightProcessor(dependencies) {
           clipId: clip.id, broadcasterId: clip.broadcasterId, editorId: clip.editorId
         });
         if (typeof twitch.getClip !== 'function') throw new Error('Twitch clip timestamp verification is unavailable');
-        const verifiedTimestamp = await waitForVerifiedClipMetadata({
-          getClip: () => twitch.getClip(clip.id),
-          moment,
-          vodId: batch.vodId,
-          sleep,
-          pollIntervalMs: clipMetadataPollIntervalMs,
-          maxAttempts: clipMetadataMaxAttempts
-        });
+        let verifiedTimestamp;
+        if (batch.discoverySource === 'twitch_clips_api') {
+          try {
+            verifiedTimestamp = verifyCreatedClip(moment, await twitch.getClip(clip.id), batch.vodId);
+          } catch (error) {
+            if (Number(error && error.status) !== 425) throw error;
+            // Twitch may leave video_id and vod_offset empty after clip media is downloadable.
+            // Use the exact accepted VOD request only for Amaana-created VOD clips; non-pending
+            // metadata mismatches still fail closed above.
+            verifiedTimestamp = verifyClipCreationRequest(moment, clip, batch.vodId);
+          }
+        } else {
+          verifiedTimestamp = await waitForVerifiedClipMetadata({
+            getClip: () => twitch.getClip(clip.id),
+            moment,
+            vodId: batch.vodId,
+            sleep,
+            pollIntervalMs: clipMetadataPollIntervalMs,
+            maxAttempts: clipMetadataMaxAttempts
+          });
+        }
         twitchClips[index] = { ...twitchClips[index], timestampVerification: verifiedTimestamp };
         await store.updateDraft(id, { twitchClips });
         const url = download.landscape_download_url || download.portrait_download_url;

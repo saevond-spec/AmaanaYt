@@ -150,6 +150,43 @@ function verifyCreatedClip(moment, clip, vodId, toleranceSeconds = 2) {
   };
 }
 
+function verifyClipCreationRequest(moment, clip, vodId, toleranceSeconds = 2) {
+  const clipId = String(clip && clip.id || '').trim();
+  const requestedVodId = String(clip && clip.requestedVodId || '').trim();
+  const requestedOffset = asSeconds(clip && clip.requestedVodOffset);
+  const requestedDuration = asSeconds(clip && clip.requestedDuration);
+  if (requestedVodId && requestedVodId !== String(vodId)) {
+    const error = new Error('Twitch clip request points to a different VOD than requested');
+    error.status = 409;
+    error.code = 'TWITCH_CLIP_WRONG_VOD';
+    throw error;
+  }
+  if (!clipId || requestedVodId !== String(vodId) || !Number.isFinite(requestedOffset) ||
+      !Number.isFinite(requestedDuration)) {
+    const error = new Error('Amaana is missing the accepted Twitch VOD clip request details');
+    error.status = 422;
+    error.code = 'TWITCH_CLIP_REQUEST_UNVERIFIED';
+    throw error;
+  }
+  const requestedStart = requestedOffset - requestedDuration;
+  if (requestedStart < 0 || Math.abs(requestedStart - Number(moment.startSeconds)) > toleranceSeconds ||
+      Math.abs(requestedDuration - Number(moment.duration)) > 1) {
+    const error = new Error('Twitch VOD clip request does not match the detected highlight moment');
+    error.status = 422;
+    error.code = 'TWITCH_CLIP_REQUEST_MISMATCH';
+    throw error;
+  }
+  return {
+    sourceVodId: requestedVodId,
+    startSeconds: requestedStart,
+    endSeconds: requestedOffset,
+    duration: requestedDuration,
+    verified: true,
+    verificationMethod: 'twitch_vod_clip_request'
+  };
+}
+
 module.exports = {
-  parseTwitchDuration, requireArchivedTwitchVod, validateHighlightMoments, verifyCreatedClip
+  parseTwitchDuration, requireArchivedTwitchVod, validateHighlightMoments,
+  verifyCreatedClip, verifyClipCreationRequest
 };
