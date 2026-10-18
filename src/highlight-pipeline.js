@@ -71,6 +71,15 @@ function findDueHighlightRetries(drafts, now = Date.now()) {
     draft.status === 'clip_retry_wait' && Date.parse(draft.nextClipAttemptAt || 0) <= now);
 }
 
+function shouldPullForwardTwitchMetadataRetry(draft, now = Date.now(), minimumDelayMs = 2 * 60 * 1000) {
+  const nextAttemptAt = Date.parse(draft && draft.nextClipAttemptAt || '');
+  const minimumDelay = Math.max(0, Number(minimumDelayMs) || 0);
+  return draft?.sourceType === 'twitch_highlight_batch' &&
+    draft.status === 'clip_retry_wait' &&
+    String(draft.error || '').includes('Twitch clip metadata is not linked to the requested VOD yet') &&
+    Number.isFinite(nextAttemptAt) && nextAttemptAt > Number(now) + minimumDelay;
+}
+
 function isTransientError(error) {
   const status = Number(error && (error.status || error.statusCode || error.response && error.response.status));
   if ([408, 425, 429].includes(status) || status >= 500 && status <= 599) return true;
@@ -81,7 +90,7 @@ function isTransientError(error) {
 
 async function waitForVerifiedClipMetadata({
   getClip, moment, vodId, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  pollIntervalMs = 5000, maxAttempts = 36
+  pollIntervalMs = 5000, maxAttempts = 72
 }) {
   if (typeof getClip !== 'function') throw new Error('Twitch clip metadata lookup is unavailable');
   const parsedAttempts = Math.floor(Number(maxAttempts));
@@ -93,11 +102,23 @@ async function waitForVerifiedClipMetadata({
   let lastError;
   for (let attempt = 0; attempt < attemptLimit; attempt += 1) {
     if (attempt > 0 && interval > 0) await sleep(interval);
+    let lastClip = null;
     try {
-      return verifyCreatedClip(moment, await getClip(), vodId);
+      lastClip = await getClip();
+      return verifyCreatedClip(moment, lastClip, vodId);
     } catch (error) {
+      if (Number(error && error.status) === 425 && !error.code) {
+        error.code = 'TWITCH_CLIP_METADATA_PENDING';
+      }
       lastError = error;
-      if (!isTransientError(error) || attempt === attemptLimit - 1) throw error;
+      if (!isTransientError(error) || attempt === attemptLimit - 1) {
+        if (error.code === 'TWITCH_CLIP_METADATA_PENDING' && lastClip) {
+          error.message += ' after ' + (attempt + 1) + ' checks; last Twitch metadata: video_id=' +
+            (String(lastClip.video_id || '').trim() || 'empty') + ', vod_offset=' +
+            (lastClip.vod_offset ?? 'null') + ', duration=' + (lastClip.duration ?? 'null');
+        }
+        throw error;
+      }
     }
   }
   throw lastError || new Error('Twitch clip metadata did not become available');
@@ -147,7 +168,7 @@ function createHighlightProcessor(dependencies) {
     idFactory = () => crypto.randomUUID(), logError = () => {},
     maxAutoAttempts = 12, autoPublish = true, now = () => Date.now(),
     sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-    clipMetadataPollIntervalMs = 5000, clipMetadataMaxAttempts = 36
+    clipMetadataPollIntervalMs = 5000, clipMetadataMaxAttempts = 72
   } = dependencies;
 
   async function registerSeo(draftId, videoId, payload, label, failures, noteFailure) {
@@ -583,7 +604,9 @@ function createHighlightProcessor(dependencies) {
       const attemptCount = (Number(batch && batch.clipAttemptCount) || 0) + 1;
       const canAutoRetry = isTransientError(error) && attemptCount <
         (Number.isSafeInteger(maxAutoAttempts) && maxAutoAttempts > 0 ? maxAutoAttempts : 12);
-      const retryDelay = Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attemptCount - 1)));
+      const retryDelay = error.code === 'TWITCH_CLIP_METADATA_PENDING'
+        ? 2 * 60 * 1000
+        : Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attemptCount - 1)));
       logError(id, error);
       await store.updateDraft(id, {
         status: canAutoRetry ? 'clip_retry_wait' : 'clip_failed',
@@ -602,5 +625,6 @@ function createHighlightProcessor(dependencies) {
 
 module.exports = {
   createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
-  findHighlightBatchByVodId, isTransientError, waitForVerifiedClipMetadata, requireCompletedYouTubeOutput
+  findHighlightBatchByVodId, isTransientError, shouldPullForwardTwitchMetadataRetry,
+  waitForVerifiedClipMetadata, requireCompletedYouTubeOutput
 };
