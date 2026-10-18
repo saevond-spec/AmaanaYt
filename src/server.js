@@ -19,7 +19,7 @@ const { createSeoMarket, detectGame } = require('./seo-market');
 const { normalizeContext } = require('./seo-package');
 const { buildHighlightTimeline, buildHighlightDescription } = require('./highlight-metadata');
 const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
-  shouldPullForwardTwitchMetadataRetry } = require('./highlight-pipeline');
+  shouldPullForwardTwitchMetadataRetry, shouldRequeueUnexpectedTwitchDownloadHost } = require('./highlight-pipeline');
 const { createTwitchHighlightDiscovery } = require('./twitch-highlight-discovery');
 const { auditVideo, channelSuggestions, problem, assertVideoMatchesCatalog } = require('./seo-publish');
 const { createSessionStore } = require('./session-store');
@@ -404,6 +404,18 @@ async function scheduleDueHighlightRetries() {
     const drafts = await store.listDrafts();
     const timestamp = Date.now();
     for (const draft of drafts) {
+      if (shouldRequeueUnexpectedTwitchDownloadHost(draft)) {
+        const retryAt = new Date(timestamp).toISOString();
+        await store.updateDraft(draft.id, {
+          status: 'clip_retry_wait',
+          productionState: 'retry_scheduled',
+          nextClipAttemptAt: retryAt,
+          twitchDownloadHostDiagnosticRetryAt: retryAt
+        });
+        console.warn('Requeued one failed Twitch download-host batch for diagnosis: ' + draft.id);
+        enqueueHighlightBatch(draft.id);
+        continue;
+      }
       if (!shouldPullForwardTwitchMetadataRetry(draft, timestamp)) continue;
       const nextClipAttemptAt = new Date(timestamp + 60 * 1000).toISOString();
       await store.updateDraft(draft.id, { nextClipAttemptAt });
