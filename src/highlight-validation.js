@@ -121,12 +121,19 @@ function validateHighlightMoments(items, vodDurationSeconds) {
 }
 
 function verifyCreatedClip(moment, clip, vodId, toleranceSeconds = 2) {
+  const actualVodId = String(clip?.video_id || '').trim();
   const actualOffset = asSeconds(clip?.vod_offset);
   const actualDuration = asSeconds(clip?.duration);
-  if (String(clip?.video_id || '') !== String(vodId) || !Number.isFinite(actualOffset) ||
-      !Number.isFinite(actualDuration)) {
+  if (actualVodId && actualVodId !== String(vodId)) {
+    const error = new Error('Twitch clip metadata points to a different VOD than requested');
+    error.status = 409;
+    error.code = 'TWITCH_CLIP_WRONG_VOD';
+    throw error;
+  }
+  if (!actualVodId || !Number.isFinite(actualOffset) || !Number.isFinite(actualDuration)) {
     const error = new Error('Twitch clip metadata is not linked to the requested VOD yet');
     error.status = 425;
+    error.code = 'TWITCH_CLIP_METADATA_PENDING';
     throw error;
   }
   if (Math.abs(actualOffset - Number(moment.startSeconds)) > toleranceSeconds ||
