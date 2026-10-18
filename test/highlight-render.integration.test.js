@@ -35,12 +35,13 @@ test('real FFmpeg produces a measured landscape montage, vertical Short, and 16:
   }
 
   const montage = path.join(directory, 'montage.mp4');
-  const durations = await assembleHighlights(sources, montage, directory);
+  const durations = await assembleHighlights(sources, montage, directory, [2.5, 2.7]);
   assert.equal(durations.length, 2);
-  assert.ok(durations.every((duration) => duration > 2.8 && duration < 3.2));
+  assert.ok(durations[0] > 2.3 && durations[0] < 2.65);
+  assert.ok(durations[1] > 2.5 && durations[1] < 2.85);
   const montageInfo = inspectMedia(montage);
   assert.deepEqual([montageInfo.width, montageInfo.height], [1280, 720]);
-  assert.ok(montageInfo.seconds > 5.8 && montageInfo.seconds < 6.3);
+  assert.ok(montageInfo.seconds > 4.8 && montageInfo.seconds < 5.5);
 
   const short = path.join(directory, 'short.mp4');
   await shortFromHighlight(montage, 0, Math.min(2.5, durations[0]), short);
