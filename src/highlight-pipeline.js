@@ -78,6 +78,14 @@ function shouldRequeueUnexpectedTwitchDownloadHost(draft) {
     !draft.twitchDownloadHostDiagnosticRetryAt;
 }
 
+function shouldPullForwardAllowedTwitchDownloadHost(draft) {
+  const expectedError = 'Twitch returned an unexpected clip download host: d1ndex63qxojbr.cloudfront.net';
+  return draft?.sourceType === 'twitch_highlight_batch' &&
+    ['clip_failed', 'clip_retry_wait'].includes(draft.status) &&
+    String(draft.error || '').includes(expectedError) &&
+    !draft.twitchDownloadHostAllowlistRetryAt;
+}
+
 function shouldPullForwardTwitchMetadataRetry(draft, now = Date.now(), minimumDelayMs = 2 * 60 * 1000) {
   const nextAttemptAt = Date.parse(draft && draft.nextClipAttemptAt || '');
   const minimumDelay = Math.max(0, Number(minimumDelayMs) || 0);
@@ -672,6 +680,6 @@ function createHighlightProcessor(dependencies) {
 module.exports = {
   createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
   findHighlightBatchByVodId, isTransientError, shouldPullForwardTwitchMetadataRetry,
-  shouldRequeueUnexpectedTwitchDownloadHost,
+  shouldRequeueUnexpectedTwitchDownloadHost, shouldPullForwardAllowedTwitchDownloadHost,
   waitForVerifiedClipMetadata, requireCompletedYouTubeOutput
 };
