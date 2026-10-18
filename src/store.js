@@ -152,6 +152,10 @@ const saveTwitchTokens = (tokens) => saveEncryptedState('twitch_tokens', tokens)
 const getTwitchTokens = () => getEncryptedState('twitch_tokens');
 const saveTikTokTokens = (tokens) => saveEncryptedState('tiktok_tokens', tokens);
 const getTikTokTokens = () => getEncryptedState('tiktok_tokens');
+const saveTwitchHighlightDiscoveryState = (state) =>
+  saveEncryptedState('twitch_highlight_discovery', state);
+const getTwitchHighlightDiscoveryState = () =>
+  getEncryptedState('twitch_highlight_discovery');
 
 async function listDrafts() {
   await init();
@@ -796,6 +800,8 @@ module.exports = {
   getTwitchTokens,
   saveTikTokTokens,
   getTikTokTokens,
+  saveTwitchHighlightDiscoveryState,
+  getTwitchHighlightDiscoveryState,
   listDrafts,
   getDraft,
   addDraft,

@@ -158,6 +158,61 @@ async function getVod(vodId) {
   return requireArchivedTwitchVod(vod, vodId, user.id);
 }
 
+async function listRecentArchivedVods({ first = 20 } = {}) {
+  const user = await currentUser();
+  const requestedFirst = Math.floor(Number(first));
+  const pageSize = Number.isFinite(requestedFirst) && requestedFirst > 0
+    ? Math.min(100, Math.max(1, requestedFirst)) : 20;
+  const [videosPayload, streamsPayload] = await Promise.all([
+    helix('/videos', { query: { user_id: user.id, type: 'archive', first: pageSize } }),
+    helix('/streams', { query: { user_id: user.id, first: 100 } })
+  ]);
+  const activeStreamIds = new Set((streamsPayload.data || [])
+    .map((stream) => String(stream.id || '')).filter(Boolean));
+  return (videosPayload.data || [])
+    .filter((vod) => vod && vod.type === 'archive' && String(vod.user_id || '') === String(user.id))
+    .filter((vod) => !activeStreamIds.has(String(vod.stream_id || '')) &&
+      !activeStreamIds.has(String(vod.id || '')))
+    .map((vod) => {
+      try { return requireArchivedTwitchVod(vod, vod.id, user.id); }
+      catch { return null; }
+    })
+    .filter(Boolean);
+}
+
+async function listClipsForVod(vod, { maxPages = 10 } = {}) {
+  const user = await currentUser();
+  const archive = requireArchivedTwitchVod(vod, vod && vod.id, user.id);
+  const now = Date.now();
+  const createdAt = Date.parse(archive.created_at || '');
+  const weekAgo = now - 7 * 24 * 60 * 60 * 1000;
+  const startedAt = Math.max(Number.isFinite(createdAt) ? createdAt - 24 * 60 * 60 * 1000 : weekAgo, weekAgo);
+  if (startedAt >= now) return [];
+  const pageLimitValue = Math.floor(Number(maxPages));
+  const pageLimit = Number.isFinite(pageLimitValue) && pageLimitValue > 0
+    ? Math.min(10, pageLimitValue) : 10;
+  const clips = [];
+  const seenCursors = new Set();
+  let after;
+  for (let page = 0; page < pageLimit; page += 1) {
+    const payload = await helix('/clips', {
+      query: {
+        broadcaster_id: user.id,
+        started_at: new Date(startedAt).toISOString(),
+        ended_at: new Date(now).toISOString(),
+        first: 100,
+        after
+      }
+    });
+    clips.push(...(payload.data || []).filter((clip) => String(clip.video_id || '') === String(archive.id)));
+    const cursor = payload.pagination && payload.pagination.cursor;
+    if (!cursor || seenCursors.has(cursor)) break;
+    seenCursors.add(cursor);
+    after = cursor;
+  }
+  return clips;
+}
+
 async function getClip(clipId) {
   const payload = await helix('/clips', { query: { id: String(clipId) } });
   const clip = payload.data?.find((item) => String(item.id) === String(clipId));
@@ -258,6 +313,8 @@ module.exports = {
   exchangeCode,
   createClipFromVod,
   getVod,
+  listRecentArchivedVods,
+  listClipsForVod,
   getClip,
   waitForClipDownload,
   downloadClip

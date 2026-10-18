@@ -18,8 +18,8 @@ const { createMonetizationWorker } = require('./monetization-worker');
 const { createSeoMarket, detectGame } = require('./seo-market');
 const { normalizeContext } = require('./seo-package');
 const { buildHighlightTimeline, buildHighlightDescription } = require('./highlight-metadata');
-const { parseTwitchDuration, validateHighlightMoments } = require('./highlight-validation');
-const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries, findHighlightBatchByVodId } = require('./highlight-pipeline');
+const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries } = require('./highlight-pipeline');
+const { createTwitchHighlightDiscovery } = require('./twitch-highlight-discovery');
 const { auditVideo, channelSuggestions, problem, assertVideoMatchesCatalog } = require('./seo-publish');
 const { createSessionStore } = require('./session-store');
 const { canAddVideoToPlaylist } = require('./youtube-playlists');
@@ -254,12 +254,6 @@ function agentOrAdmin(req, res, next) {
   return agentKey(req, res, next);
 }
 
-function vodWebhookOrAgentOrAdmin(req, res, next) {
-  const key = process.env.VOD_WEBHOOK_KEY;
-  if (key && keysMatch(req.get('x-agent-key'), key)) return next();
-  return agentOrAdmin(req, res, next);
-}
-
 function cleanText(value, maxLength) {
   return String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maxLength);
 }
@@ -396,6 +390,9 @@ const processHighlightBatch = createHighlightProcessor({
 function enqueueHighlightBatch(id) {
   return highlightBatchQueue.enqueue(id);
 }
+const twitchHighlightDiscovery = createTwitchHighlightDiscovery({
+  twitch, store, enqueueBatch: enqueueHighlightBatch
+});
 let highlightRetryScanRunning = false;
 async function scheduleDueHighlightRetries() {
   if (highlightRetryScanRunning) return;
@@ -624,6 +621,10 @@ app.get('/api/twitch/status', admin, async (_req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+app.get('/api/twitch/highlight-discovery/status', admin, (_req, res) => {
+  res.json(twitchHighlightDiscovery.status());
 });
 
 app.get('/api/tiktok/status', admin, async (_req, res, next) => {
@@ -906,36 +907,29 @@ app.post('/api/drafts', agentOrAdmin, upload.single('video'), async (req, res, n
   }
 });
 
-app.post('/api/twitch/vod-clips', vodWebhookOrAgentOrAdmin, async (req, res, next) => {
+app.post('/api/twitch/vod-clips', admin, async (req, res, next) => {
   try {
     const vodId = cleanText(req.body?.vodId, 40);
     if (!/^\d+$/.test(vodId)) return res.status(400).json({ error: 'vodId must be a Twitch VOD number' });
     const twitchStatus = await twitch.connectionStatus();
-    if (!twitchStatus.connected) return res.status(409).json({ error: twitchStatus.error || 'Connect Twitch in the Amaana dashboard first' });
-    const existingDrafts = await store.listDrafts();
-    const existing = findHighlightBatchByVodId(existingDrafts, vodId);
-    if (existing) {
-      return res.status(202).json({
-        accepted: true,
-        highlightVideo: { id: existing.id, status: existing.status, title: existing.title },
-        shortsPlanned: existing.highlights.length
+    if (!twitchStatus.connected) {
+      return res.status(409).json({ error: twitchStatus.error || 'Connect Twitch in the Amaana dashboard first' });
+    }
+    const result = await twitchHighlightDiscovery.scanVod(vodId);
+    if (result.status === 'no_candidates') {
+      return res.json({
+        accepted: false,
+        retryScheduled: true,
+        message: 'No linked Twitch community clips with usable timestamps are available yet. Amaana will check again automatically.'
       });
     }
-    const vod = await twitch.getVod(vodId);
-    const vodDurationSeconds = parseTwitchDuration(vod.duration);
-    const highlights = validateHighlightMoments(req.body?.timestamps, vodDurationSeconds);
-    const channel = cleanText(req.body?.channel || 'saevond', 50);
-    const streamTitle = cleanText(req.body?.streamTitle, 80);
-    const batch = await store.addDraft({ id: crypto.randomUUID(), sourceType: 'twitch_highlight_batch',
-      sourceChannel: channel, vodId, vodDurationSeconds, highlights, streamTitle,
-      title: cleanText(`${streamTitle || 'Saevond livestream'} | Best moments`, 100),
-      pipelineVersion: 2, thumbnailStatus: 'pending', autoPublishEligible: true,
-      publicationStatus: 'pending', status: 'clip_queued', createdAt: new Date().toISOString() });
-    enqueueHighlightBatch(batch.id);
+    const batch = result.batch;
     res.status(202).json({
       accepted: true,
-      highlightVideo: { id: batch.id, status: batch.status, title: batch.title },
-      shortsPlanned: batch.highlights.length
+      status: result.status,
+      highlightVideo: batch ? { id: batch.id, status: batch.status, title: batch.title } : null,
+      shortsPlanned: Array.isArray(batch?.highlights) ? batch.highlights.length : 0,
+      discoverySource: 'twitch_clips_api'
     });
   } catch (error) {
     next(error);
@@ -1033,6 +1027,7 @@ store.init()
       monetization.schedule();
       market.schedule();
       void scheduleDueHighlightRetries();
+      twitchHighlightDiscovery.start();
       try {
         const drafts = await store.listDrafts();
         const resumable = new Set([
