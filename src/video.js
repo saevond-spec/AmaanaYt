@@ -56,13 +56,19 @@ function runFfmpeg(args, timeout = 15 * 60 * 1000) {
 }
 
 // Normalize every source so concat timestamps, codecs and dimensions match.
-async function assembleHighlights(sources, outputPath, segmentDir) {
+async function assembleHighlights(sources, outputPath, segmentDir, expectedDurations = []) {
   const normalized = [];
   const durations = [];
   for (let i = 0; i < sources.length; i += 1) {
     const target = require('path').join(segmentDir, `segment-${i}.mp4`);
-    await runFfmpeg(['-y', '-i', sources[i], '-vf', 'scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1',
-      '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-r', '30', '-c:a', 'aac', '-ar', '48000', '-ac', '2', target]);
+    const requestedDuration = Array.isArray(expectedDurations) ? Number(expectedDurations[i]) : NaN;
+    const outputDuration = Number.isFinite(requestedDuration) && requestedDuration > 0
+      ? Math.min(requestedDuration, 59.8) : null;
+    const args = ['-y', '-i', sources[i]];
+    if (outputDuration !== null) args.push('-t', String(outputDuration));
+    args.push('-vf', 'scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1',
+      '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-r', '30', '-c:a', 'aac', '-ar', '48000', '-ac', '2', target);
+    await runFfmpeg(args);
     normalized.push(target);
     durations.push(await mediaDuration(target));
   }

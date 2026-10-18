@@ -78,6 +78,13 @@ function shouldRequeueUnexpectedTwitchDownloadHost(draft) {
     !draft.twitchDownloadHostDiagnosticRetryAt;
 }
 
+function shouldRequeueTwitchSegmentDurationFailure(draft) {
+  return draft?.sourceType === 'twitch_highlight_batch' &&
+    ['clip_failed', 'clip_retry_wait'].includes(draft.status) &&
+    String(draft.error || '').startsWith('Every highlight segment needs a measured duration between 5 and 60 seconds') &&
+    !draft.twitchSegmentDurationRetryAt;
+}
+
 function shouldPullForwardAllowedTwitchDownloadHost(draft) {
   const expectedError = 'Twitch returned an unexpected clip download host: d1ndex63qxojbr.cloudfront.net';
   return draft?.sourceType === 'twitch_highlight_batch' &&
@@ -301,7 +308,8 @@ function createHighlightProcessor(dependencies) {
 
       const montage = path.join(directory, 'highlight.mp4');
       await store.updateDraft(id, { status: 'assembling_highlight_video' });
-      const durations = await video.assembleHighlights(sources, montage, directory);
+      const durations = await video.assembleHighlights(sources, montage, directory,
+        batch.highlights.map((moment) => Number(moment.duration)));
       const timeline = buildHighlightTimeline(batch.highlights, durations);
       await video.validateHighlight(montage, timeline.durationSeconds);
       const description = batch.pipelineVersion >= 2
@@ -681,5 +689,6 @@ module.exports = {
   createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
   findHighlightBatchByVodId, isTransientError, shouldPullForwardTwitchMetadataRetry,
   shouldRequeueUnexpectedTwitchDownloadHost, shouldPullForwardAllowedTwitchDownloadHost,
+  shouldRequeueTwitchSegmentDurationFailure,
   waitForVerifiedClipMetadata, requireCompletedYouTubeOutput
 };
