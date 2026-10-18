@@ -79,6 +79,30 @@ function isTransientError(error) {
     'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT'].includes(code);
 }
 
+async function waitForVerifiedClipMetadata({
+  getClip, moment, vodId, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  pollIntervalMs = 5000, maxAttempts = 36
+}) {
+  if (typeof getClip !== 'function') throw new Error('Twitch clip metadata lookup is unavailable');
+  const parsedAttempts = Math.floor(Number(maxAttempts));
+  const attemptLimit = Number.isFinite(parsedAttempts) && parsedAttempts > 0
+    ? Math.min(120, parsedAttempts) : 36;
+  const parsedInterval = Number(pollIntervalMs);
+  const interval = Number.isFinite(parsedInterval) && parsedInterval >= 0
+    ? Math.min(30000, parsedInterval) : 5000;
+  let lastError;
+  for (let attempt = 0; attempt < attemptLimit; attempt += 1) {
+    if (attempt > 0 && interval > 0) await sleep(interval);
+    try {
+      return verifyCreatedClip(moment, await getClip(), vodId);
+    } catch (error) {
+      lastError = error;
+      if (!isTransientError(error) || attempt === attemptLimit - 1) throw error;
+    }
+  }
+  throw lastError || new Error('Twitch clip metadata did not become available');
+}
+
 function requireCompletedYouTubeOutput(video, expectedVideoId, outputType = 'video') {
   if (!video) {
     const error = new Error('YouTube ' + outputType + ' is not available for processing checks yet');
@@ -121,7 +145,9 @@ function createHighlightProcessor(dependencies) {
     buildHighlightTitle = defaultBuildHighlightTitle, buildShortTitle = defaultBuildShortTitle,
     buildShortDescription = defaultBuildShortDescription, cleanText,
     idFactory = () => crypto.randomUUID(), logError = () => {},
-    maxAutoAttempts = 12, autoPublish = true, now = () => Date.now()
+    maxAutoAttempts = 12, autoPublish = true, now = () => Date.now(),
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    clipMetadataPollIntervalMs = 5000, clipMetadataMaxAttempts = 36
   } = dependencies;
 
   async function registerSeo(draftId, videoId, payload, label, failures, noteFailure) {
@@ -182,7 +208,14 @@ function createHighlightProcessor(dependencies) {
           clipId: clip.id, broadcasterId: clip.broadcasterId, editorId: clip.editorId
         });
         if (typeof twitch.getClip !== 'function') throw new Error('Twitch clip timestamp verification is unavailable');
-        const verifiedTimestamp = verifyCreatedClip(moment, await twitch.getClip(clip.id), batch.vodId);
+        const verifiedTimestamp = await waitForVerifiedClipMetadata({
+          getClip: () => twitch.getClip(clip.id),
+          moment,
+          vodId: batch.vodId,
+          sleep,
+          pollIntervalMs: clipMetadataPollIntervalMs,
+          maxAttempts: clipMetadataMaxAttempts
+        });
         twitchClips[index] = { ...twitchClips[index], timestampVerification: verifiedTimestamp };
         await store.updateDraft(id, { twitchClips });
         const url = download.landscape_download_url || download.portrait_download_url;
@@ -569,5 +602,5 @@ function createHighlightProcessor(dependencies) {
 
 module.exports = {
   createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
-  findHighlightBatchByVodId, isTransientError, requireCompletedYouTubeOutput
+  findHighlightBatchByVodId, isTransientError, waitForVerifiedClipMetadata, requireCompletedYouTubeOutput
 };
