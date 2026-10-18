@@ -71,6 +71,13 @@ function findDueHighlightRetries(drafts, now = Date.now()) {
     draft.status === 'clip_retry_wait' && Date.parse(draft.nextClipAttemptAt || 0) <= now);
 }
 
+function shouldRequeueUnexpectedTwitchDownloadHost(draft) {
+  return draft?.sourceType === 'twitch_highlight_batch' &&
+    draft.status === 'clip_failed' &&
+    String(draft.error || '').startsWith('Twitch returned an unexpected clip download host') &&
+    !draft.twitchDownloadHostDiagnosticRetryAt;
+}
+
 function shouldPullForwardTwitchMetadataRetry(draft, now = Date.now(), minimumDelayMs = 2 * 60 * 1000) {
   const nextAttemptAt = Date.parse(draft && draft.nextClipAttemptAt || '');
   const minimumDelay = Math.max(0, Number(minimumDelayMs) || 0);
@@ -665,5 +672,6 @@ function createHighlightProcessor(dependencies) {
 module.exports = {
   createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
   findHighlightBatchByVodId, isTransientError, shouldPullForwardTwitchMetadataRetry,
+  shouldRequeueUnexpectedTwitchDownloadHost,
   waitForVerifiedClipMetadata, requireCompletedYouTubeOutput
 };
