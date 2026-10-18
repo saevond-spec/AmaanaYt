@@ -331,6 +331,19 @@ async function harness(t, options = {}) {
     createProcessor: () => createHighlightProcessor(dependencies) };
 }
 
+
+test('legacy Twitch-discovered batches without a target duration cannot create uploads', async (t) => {
+  const h = await harness(t);
+  h.batch.discoverySource = 'twitch_clips_api';
+  delete h.batch.targetHighlightDurationSeconds;
+  await h.processor(h.batch.id);
+
+  assert.equal(h.drafts.get(h.batch.id).status, 'clip_failed');
+  assert.match(h.drafts.get(h.batch.id).error, /no measured target duration/);
+  assert.equal(h.counters.uploads.length, 0);
+  assert.equal(h.counters.publications.length, 0);
+});
+
 test('15-minute batches enforce the exact target and create Shorts only from the two selected moments', async (t) => {
   const h = await harness(t, { autoPublish: false });
   h.batch.targetHighlightDurationSeconds = 90;
@@ -395,7 +408,7 @@ test('new Twitch clip metadata is polled until the generated clip is linked to i
 
 test('discovered batches verify accepted VOD requests when Twitch link metadata remains blank', async (t) => {
   const h = await harness(t, { metadataPendingAlways: true, autoPublish: false });
-  const batch = { ...h.batch, discoverySource: 'twitch_clips_api' };
+  const batch = { ...h.batch, discoverySource: 'twitch_clips_api', targetHighlightDurationSeconds: 90 };
   h.drafts.set(batch.id, batch);
 
   await h.processor(batch.id);
