@@ -56,7 +56,7 @@ function runFfmpeg(args, timeout = 15 * 60 * 1000) {
 }
 
 // Normalize every source so concat timestamps, codecs and dimensions match.
-async function assembleHighlights(sources, outputPath, segmentDir, expectedDurations = []) {
+async function assembleHighlights(sources, outputPath, segmentDir, expectedDurations = [], targetDurationSeconds = null) {
   const normalized = [];
   const durations = [];
   for (let i = 0; i < sources.length; i += 1) {
@@ -64,6 +64,10 @@ async function assembleHighlights(sources, outputPath, segmentDir, expectedDurat
     const requestedDuration = Array.isArray(expectedDurations) ? Number(expectedDurations[i]) : NaN;
     const outputDuration = Number.isFinite(requestedDuration) && requestedDuration > 0
       ? Math.min(requestedDuration, 59.8) : null;
+    const sourceMedia = await inspectMedia(sources[i]);
+    if (sourceMedia.width / sourceMedia.height < 1.6) {
+      throw new Error('A landscape gameplay source is required; portrait-only Twitch clips are rejected');
+    }
     const args = ['-y', '-i', sources[i]];
     if (outputDuration !== null) args.push('-t', String(outputDuration));
     args.push('-vf', 'scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1',
@@ -74,7 +78,19 @@ async function assembleHighlights(sources, outputPath, segmentDir, expectedDurat
   }
   const list = require('path').join(segmentDir, 'concat.txt');
   await require('fs').promises.writeFile(list, normalized.map((file) => `file '${file.replace(/'/g, "'\\''")}'`).join('\n'));
-  await runFfmpeg(['-y', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', outputPath]);
+  const target = Number(targetDurationSeconds);
+  if (Number.isFinite(target) && target > 0) {
+    const available = durations.reduce((sum, duration) => sum + duration, 0);
+    if (available + 0.25 < target) {
+      throw new Error(`Only ${available.toFixed(1)} seconds of landscape gameplay source are available; ${target} are required`);
+    }
+    await runFfmpeg(['-y', '-f', 'concat', '-safe', '0', '-i', list, '-t', String(target),
+      '-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+      '-r', '30', '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', outputPath],
+    60 * 60 * 1000);
+  } else {
+    await runFfmpeg(['-y', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', outputPath]);
+  }
   return durations;
 }
 
@@ -119,11 +135,13 @@ function durationMatches(actual, expected) {
     Math.abs(actual - Number(expected)) <= tolerance;
 }
 
-async function validateHighlight(filePath, expectedDuration) {
+async function validateHighlight(filePath, expectedDuration, { exactDuration = false } = {}) {
   const media = await inspectMedia(filePath);
   const aspect = media.width / media.height;
-  if (media.width < 640 || media.height < 360 || aspect < 1.7 || aspect > 1.85 ||
-      !durationMatches(media.durationSeconds, expectedDuration)) {
+  const durationIsValid = exactDuration
+    ? Number.isFinite(Number(expectedDuration)) && Math.abs(media.durationSeconds - Number(expectedDuration)) <= 0.5
+    : durationMatches(media.durationSeconds, expectedDuration);
+  if (media.width < 640 || media.height < 360 || aspect < 1.7 || aspect > 1.85 || !durationIsValid) {
     throw new Error('Rendered highlight failed landscape resolution, aspect, or duration checks');
   }
   return media;
@@ -143,6 +161,39 @@ async function validateShort(filePath, expectedDuration) {
 async function mediaDuration(inputPath) {
   return (await inspectMedia(inputPath)).durationSeconds;
 }
+
+async function sampleGameplayFrames(inputPath, directory, count = 5) {
+  const frameCount = Math.max(3, Math.min(8, Math.floor(Number(count) || 5)));
+  const metadata = await inspectMedia(inputPath);
+  const path = require('path');
+  await require('fs').promises.mkdir(directory, { recursive: true });
+  const frames = [];
+  for (let index = 0; index < frameCount; index += 1) {
+    const timestampSeconds = metadata.durationSeconds * (index + 1) / (frameCount + 1);
+    const framePath = path.join(directory, `gameplay-frame-${index}.jpg`);
+    await runFfmpeg(['-y', '-ss', String(timestampSeconds), '-i', inputPath, '-frames:v', '1',
+      '-vf', 'scale=640:-1', '-q:v', '3', framePath]);
+    frames.push({
+      mimeType: 'image/jpeg',
+      data: (await require('fs').promises.readFile(framePath)).toString('base64'),
+      timestampSeconds: Number(timestampSeconds.toFixed(2))
+    });
+  }
+  return frames;
+}
+
+async function verifyGameplay(inputPath, { apiKey = process.env.VIDEO_ANALYSIS_API_KEY,
+  model = process.env.VIDEO_ANALYSIS_MODEL || 'gemini-3.8-flash',
+  timeoutMs = process.env.VIDEO_ANALYSIS_TIMEOUT_MS } = {}) {
+  if (process.env.ENABLE_GAMEPLAY_SCREENING !== 'true') {
+    throw new Error('Visual gameplay verification is disabled; enable ENABLE_GAMEPLAY_SCREENING before creating gameplay edits');
+  }
+  if (!apiKey) throw new Error('Visual gameplay verification is unavailable: configure VIDEO_ANALYSIS_API_KEY');
+  const frames = await sampleGameplayFrames(inputPath, require('path').dirname(inputPath), 5);
+  const { analyzeGameplayFrames } = require('./video-analysis');
+  return analyzeGameplayFrames(frames, { apiKey, model, timeoutMs });
+}
+
 
 async function shortFromHighlight(highlightPath, start, duration, outputPath) {
   await runFfmpeg(['-y', '-ss', String(start), '-i', highlightPath, '-t', String(duration),
@@ -370,6 +421,6 @@ async function createThumbnailFromImage(inputPath, outputPath, { headline, sourc
   }
 }
 
-module.exports = { convertLandscapeToShort, assembleHighlights, shortFromHighlight, inspectMedia,
+module.exports = { convertLandscapeToShort, assembleHighlights, shortFromHighlight, inspectMedia, sampleGameplayFrames, verifyGameplay,
   validateHighlight, validateShort, createThumbnail, createThumbnailFromImage, thumbnailHeadline,
   thumbnailDimensions, thumbnailOverlay };

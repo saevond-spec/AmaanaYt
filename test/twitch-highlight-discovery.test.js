@@ -30,6 +30,7 @@ function makeClip(id, offset, duration = 20, views = 1, overrides = {}) {
     id,
     video_id: '1001',
     broadcaster_id: 'broadcaster-1',
+    game_id: '509658',
     vod_offset: offset,
     duration,
     view_count: views,
@@ -40,7 +41,8 @@ function makeClip(id, offset, duration = 20, views = 1, overrides = {}) {
 }
 
 function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], startAt = Date.parse('2026-10-18T15:00:00.000Z'),
-  now = () => startAt, getVodError, listError, clipErrorByVod = {}, onClipsRead } = {}) {
+  now = () => startAt, getVodError, listError, clipErrorByVod = {}, onClipsRead,
+  targetDurationSeconds = 15, visualGameplayVerificationAvailable = true } = {}) {
   let clock = startAt;
   let persistedState = null;
   const drafts = [...initialDrafts];
@@ -84,7 +86,8 @@ function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], star
   const discovery = createTwitchHighlightDiscovery({
     twitch, store, enqueueBatch: (id) => enqueued.push(id), logger,
     idFactory: (() => { let id = 0; return () => `batch-${++id}`; })(), now,
-    scanIntervalMs: 15 * MINUTE
+    scanIntervalMs: 15 * MINUTE, targetDurationSeconds,
+    visualGameplayVerificationAvailable: () => visualGameplayVerificationAvailable
   });
   return {
     discovery, twitch, store, drafts, enqueued, calls, get state() { return persistedState; },
@@ -93,7 +96,7 @@ function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], star
   };
 }
 
-test('selects only linked, in-range clips and ranks non-overlapping moments by views', () => {
+test('selects linked, in-range, game-category clips with exact target duration and no overlaps', () => {
   const vod = makeVod();
   const clips = [
     makeClip('top', 100, 20, 100),
@@ -110,23 +113,23 @@ test('selects only linked, in-range clips and ranks non-overlapping moments by v
     makeClip('beyond-vod', 7190, 20, 10000)
   ];
 
-  const result = selectCommunityHighlights(clips, vod);
+  const result = selectCommunityHighlights(clips, vod, { targetDurationSeconds: 65 });
   assert.deepEqual(result.evidence.map((item) => item.clipId), ['earlier', 'top', 'backfill']);
   assert.deepEqual(result.highlights.map((item) => item.startSeconds), [5, 100, 200]);
-  assert.equal(result.highlights[1].reason, 'Twitch community clip (100 views): Moment top');
-  assert.equal(result.highlights[0].score, null);
+  assert.match(result.highlights[1].reason, /Twitch game category 509658/);
+  assert.equal(result.highlights[0].score > 0, true);
 });
 
-test('enforces the five-output cap and backfills lower ranked non-overlapping clips', () => {
+test('enforces the requested segment cap and backfills lower ranked non-overlapping clips', () => {
   const vod = makeVod();
   const clips = [
     ...Array.from({ length: 8 }, (_, index) => makeClip(`clip-${index}`, index * 100, 20, 100 - index)),
     makeClip('lower-ranked', 1000, 15, 1)
   ];
-  const result = selectCommunityHighlights(clips, vod, { limit: 5 });
+  const result = selectCommunityHighlights(clips, vod, { limit: 5, targetDurationSeconds: 100 });
   assert.equal(result.highlights.length, 5);
-  assert.deepEqual(result.evidence.map((item) => item.clipId), ['clip-0', 'clip-1', 'clip-2', 'clip-3', 'clip-4']);
-  assert.equal(selectCommunityHighlights(clips, vod, { limit: 100 }).highlights.length, 5);
+  assert.deepEqual(result.evidence.map((item) => item.clipId), ['clip-0', 'clip-1', 'clip-2', 'clip-6', 'clip-7']);
+  assert.equal(selectCommunityHighlights(clips, vod, { limit: 100, targetDurationSeconds: 100 }).highlights.length, 5);
 });
 
 test('returns no candidate when Twitch has not linked community clips to the VOD yet', () => {
@@ -135,17 +138,31 @@ test('returns no candidate when Twitch has not linked community clips to the VOD
   ], makeVod());
   assert.deepEqual(result.highlights, []);
   assert.deepEqual(result.evidence, []);
+  assert.equal(result.rejectionReason, 'no_game_category_clips');
 });
 
 test('rejects invalid archive duration rather than guessing a timestamp boundary', () => {
   assert.throws(() => selectCommunityHighlights([], makeVod('1001', { duration: 'unknown' })), /invalid VOD duration/);
 });
 
+test('holds Twitch VOD work when opt-in visual gameplay screening is disabled', async () => {
+  const vod = makeVod();
+  const h = harness({ vods: [vod], visualGameplayVerificationAvailable: false,
+    clipsByVod: { [vod.id]: [makeClip('candidate', 300, 30, 20)] } });
+  const result = await h.discovery.run();
+
+  assert.equal(result.visualScreeningUnavailable, 1);
+  assert.equal(result.queued, 0);
+  assert.equal(h.calls.clipList, 0);
+  assert.equal(h.drafts.length, 0);
+});
+
 test('creates one private-pipeline batch from Amaana-discovered Twitch clip evidence', async () => {
   const vod = makeVod();
-  const h = harness({ vods: [vod], clipsByVod: { [vod.id]: [
-    makeClip('community-1', 300, 25, 40), makeClip('community-2', 900, 15, 5)
-  ] } });
+  const clips = Array.from({ length: 20 }, (_, index) =>
+    makeClip(`community-${index + 1}`, index * 120, 45, 100 - index));
+  const h = harness({ vods: [vod], targetDurationSeconds: 900,
+    clipsByVod: { [vod.id]: clips } });
   const result = await h.discovery.run();
   assert.equal(result.queued, 1);
   assert.equal(result.scanned, 1);
@@ -153,9 +170,10 @@ test('creates one private-pipeline batch from Amaana-discovered Twitch clip evid
   assert.equal(h.drafts[0].discoverySource, 'twitch_clips_api');
   assert.equal(h.drafts[0].sourceType, 'twitch_highlight_batch');
   assert.equal(h.drafts[0].sourceChannel, 'AmaanaYT');
-  assert.equal(h.drafts[0].sourceClipEvidence.length, 2);
-  assert.equal(h.drafts[0].highlights[0].startSeconds, 300);
-  assert.equal(h.drafts[0].highlights[1].startSeconds, 900);
+  assert.equal(h.drafts[0].sourceClipEvidence.length, 20);
+  assert.equal(h.drafts[0].targetHighlightDurationSeconds, 900);
+  assert.equal(h.drafts[0].highlights.reduce((sum, item) => sum + item.duration, 0), 900);
+  assert.equal(h.drafts[0].shortCandidateIndexes.length, 2);
   assert.deepEqual(h.enqueued, ['batch-1']);
   assert.equal(h.calls.vodListOptions.first, 20);
 });
@@ -202,7 +220,8 @@ test('restores scan throttles from persistent storage after a worker restart', a
     enqueueBatch: (id) => h.enqueued.push(id),
     logger: { info() {}, error() {} },
     now: h.getNow,
-    scanIntervalMs: 15 * MINUTE
+    scanIntervalMs: 15 * MINUTE,
+    targetDurationSeconds: 15
   });
   const result = await restarted.run();
   assert.equal(result.throttled, 1);

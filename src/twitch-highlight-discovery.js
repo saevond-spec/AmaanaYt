@@ -1,11 +1,13 @@
 'use strict';
 
 const crypto = require('crypto');
-const { parseTwitchDuration, validateHighlightMoments } = require('./highlight-validation');
+const { select15MinuteGameplayHighlights, TARGET_HIGHLIGHT_DURATION_SECONDS,
+  MAX_HIGHLIGHT_SEGMENTS } = require('./highlight-selection');
 
 const DEFAULT_SCAN_INTERVAL_MS = 15 * 60 * 1000;
 const RECENT_VOD_LIMIT = 20;
-const MAX_AUTO_HIGHLIGHTS = 5;
+const MAX_AUTO_HIGHLIGHTS = MAX_HIGHLIGHT_SEGMENTS;
+const MAX_AUTO_SHORTS = 2;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function clean(value, limit) {
@@ -13,77 +15,12 @@ function clean(value, limit) {
     .replace(/\s+/g, ' ').trim().slice(0, limit);
 }
 
-function positiveNumber(value) {
-  const number = Number(value);
-  return Number.isFinite(number) && number >= 0 ? number : 0;
-}
-
-function overlaps(left, right) {
-  const shared = Math.max(0, Math.min(left.endSeconds, right.endSeconds) -
-    Math.max(left.startSeconds, right.startSeconds));
-  return shared / Math.min(left.duration, right.duration) >= 0.6 ||
-    Math.abs(left.endSeconds - right.endSeconds) < 3;
-}
-
-function selectCommunityHighlights(clips, vod, { limit = MAX_AUTO_HIGHLIGHTS } = {}) {
-  const vodId = String(vod && vod.id || '');
-  const broadcasterId = String(vod && vod.user_id || '');
-  const vodDurationSeconds = parseTwitchDuration(vod && vod.duration);
-  const maximum = Math.max(1, Math.min(MAX_AUTO_HIGHLIGHTS,
-    Math.floor(Number(limit) || MAX_AUTO_HIGHLIGHTS)));
-  const candidates = (Array.isArray(clips) ? clips : []).flatMap((clip) => {
-    if (!clip || !clip.id || String(clip.video_id || '') !== vodId ||
-        broadcasterId && String(clip.broadcaster_id || '') !== broadcasterId) return [];
-    const startSeconds = clip.vod_offset === null || clip.vod_offset === undefined || clip.vod_offset === ''
-      ? NaN : Number(clip.vod_offset);
-    const duration = clip.duration === null || clip.duration === undefined || clip.duration === ''
-      ? NaN : Number(clip.duration);
-    const endSeconds = startSeconds + duration;
-    if (!Number.isFinite(startSeconds) || !Number.isFinite(duration) || startSeconds < 0 ||
-        duration < 5 || duration > 60 || endSeconds > vodDurationSeconds + 0.25) return [];
-    const clipTitle = clean(clip.title, 100) || 'Twitch community clip';
-    const viewCount = positiveNumber(clip.view_count);
-    const createdAt = Date.parse(clip.created_at || '') || 0;
-    const moment = {
-      startSeconds: Number(startSeconds.toFixed(1)),
-      endSeconds: Number(endSeconds.toFixed(1)),
-      duration: Number(duration.toFixed(1)),
-      title: clipTitle,
-      reason: `Twitch community clip (${viewCount} ${viewCount === 1 ? 'view' : 'views'}): ${clipTitle}`,
-      score: null
-    };
-    return [{
-      clipId: String(clip.id), viewCount, createdAt, moment,
-      evidence: {
-        clipId: String(clip.id), title: clipTitle, viewCount,
-        createdAt: clip.created_at || null,
-        startSeconds: moment.startSeconds, duration: moment.duration
-      }
-    }];
+function selectCommunityHighlights(clips, vod, { limit = MAX_AUTO_HIGHLIGHTS,
+  targetDurationSeconds = TARGET_HIGHLIGHT_DURATION_SECONDS } = {}) {
+  return select15MinuteGameplayHighlights(clips, vod, {
+    targetDurationSeconds,
+    maxSegments: limit
   });
-
-  candidates.sort((left, right) => right.viewCount - left.viewCount ||
-    right.createdAt - left.createdAt || left.clipId.localeCompare(right.clipId));
-
-  const selected = [];
-  for (const candidate of candidates) {
-    if (selected.some((current) => overlaps(current.moment, candidate.moment))) continue;
-    selected.push(candidate);
-    if (selected.length >= maximum) break;
-  }
-
-  if (!selected.length) return { vodDurationSeconds, highlights: [], evidence: [] };
-
-  const highlights = validateHighlightMoments(selected.map((candidate) => candidate.moment), vodDurationSeconds);
-  const evidenceByMoment = new Map(selected.map((candidate) => [
-    `${candidate.moment.startSeconds}:${candidate.moment.duration}`, candidate.evidence
-  ]));
-  return {
-    vodDurationSeconds,
-    highlights,
-    evidence: highlights.map((moment) => evidenceByMoment.get(`${moment.startSeconds}:${moment.duration}`))
-      .filter(Boolean)
-  };
 }
 
 function scanIntervalForVod(vod, now) {
@@ -103,7 +40,9 @@ function createTwitchHighlightDiscovery({
   idFactory = () => crypto.randomUUID(),
   now = () => Date.now(),
   scanIntervalMs = DEFAULT_SCAN_INTERVAL_MS,
-  vodLimit = RECENT_VOD_LIMIT
+  vodLimit = RECENT_VOD_LIMIT,
+  targetDurationSeconds = TARGET_HIGHLIGHT_DURATION_SECONDS,
+  visualGameplayVerificationAvailable = () => false
 }) {
   if (!twitch || !store || typeof enqueueBatch !== 'function') {
     throw new Error('Twitch highlight discovery requires Twitch, storage, and a batch queue');
@@ -154,13 +93,30 @@ function createTwitchHighlightDiscovery({
       const existing = drafts.find((draft) => draft && draft.sourceType === 'twitch_highlight_batch' &&
         String(draft.vodId) === requestedId);
       if (existing) return { status: 'already_exists', vodId: requestedId, batch: existing };
+      if (!visualGameplayVerificationAvailable()) {
+        await markScanned(requestedId);
+        return { status: 'visual_gameplay_screening_disabled', vodId: requestedId,
+          targetDurationSeconds };
+      }
 
       const clips = await twitch.listClipsForVod(vod);
-      const selected = selectCommunityHighlights(clips, vod);
+      const selected = selectCommunityHighlights(clips, vod, { targetDurationSeconds });
       if (!selected.highlights.length) {
         await markScanned(requestedId);
-        return { status: 'no_candidates', vodId: requestedId, clipsChecked: Array.isArray(clips) ? clips.length : 0 };
+        return {
+          status: selected.rejectionReason === 'no_game_category_clips'
+            ? 'no_gameplay_candidates' : 'insufficient_gameplay_duration',
+          vodId: requestedId, clipsChecked: Array.isArray(clips) ? clips.length : 0,
+          availableGameplaySeconds: selected.availableGameplaySeconds || 0,
+          targetDurationSeconds: selected.targetDurationSeconds
+        };
       }
+
+      const shortCandidateIndexes = selected.evidence.map((item, index) => ({
+        index, score: Number(item && item.selectionScore) || 0
+      })).sort((left, right) => right.score - left.score || left.index - right.index)
+        .slice(0, Math.min(MAX_AUTO_SHORTS, selected.highlights.length))
+        .map((item) => item.index);
 
       const streamTitle = clean(vod.title, 100);
       const channel = clean(vod.user_name || vod.user_login, 50) || 'Twitch channel';
@@ -171,9 +127,11 @@ function createTwitchHighlightDiscovery({
         sourceChannel: channel,
         vodId: requestedId,
         vodDurationSeconds: selected.vodDurationSeconds,
+        targetHighlightDurationSeconds: selected.targetDurationSeconds,
         streamTitle,
         title: clean(`${streamTitle || 'Twitch livestream'} | Best moments`, 100),
         highlights: selected.highlights,
+        shortCandidateIndexes,
         sourceClipEvidence: selected.evidence,
         candidateClipCount: Array.isArray(clips) ? clips.length : 0,
         pipelineVersion: 3,
@@ -187,7 +145,7 @@ function createTwitchHighlightDiscovery({
       await markScanned(requestedId);
       enqueueBatch(saved.id);
       if (logger && typeof logger.info === 'function') {
-        logger.info(`Amaana discovered ${selected.highlights.length} Twitch highlight moments for VOD ${requestedId}`);
+        logger.info(`Amaana selected ${selected.highlights.length} game-category moments for a 15-minute highlight from VOD ${requestedId}`);
       }
       return { status: 'queued', vodId: requestedId, batch: saved, clipsChecked: batch.candidateClipCount };
     } finally {
@@ -199,7 +157,8 @@ function createTwitchHighlightDiscovery({
     if (running) return { skipped: 'already_running' };
     running = true;
     const result = {
-      vodsSeen: 0, scanned: 0, queued: 0, noCandidates: 0,
+      vodsSeen: 0, scanned: 0, queued: 0, noCandidates: 0, insufficientGameplayDuration: 0,
+      visualScreeningUnavailable: 0,
       alreadyExists: 0, throttled: 0, errors: 0
     };
     lastRunError = null;
@@ -233,7 +192,9 @@ function createTwitchHighlightDiscovery({
         try {
           const scan = await scanVod(vod, { drafts });
           if (scan.status === 'queued') result.queued += 1;
-          else if (scan.status === 'no_candidates') result.noCandidates += 1;
+          else if (scan.status === 'no_gameplay_candidates') result.noCandidates += 1;
+          else if (scan.status === 'insufficient_gameplay_duration') result.insufficientGameplayDuration += 1;
+          else if (scan.status === 'visual_gameplay_screening_disabled') result.visualScreeningUnavailable += 1;
           else if (scan.status === 'already_exists') result.alreadyExists += 1;
         } catch (error) {
           result.errors += 1;

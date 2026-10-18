@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { analyzeVideo, videoIdFromUrl } = require('../src/video-analysis');
+const { analyzeVideo, videoIdFromUrl, analyzeGameplayFrames, validateGameplayAssessment } = require('../src/video-analysis');
 const { createModelCircuitBreaker, validatePackage, normalizeContext } = require('../src/seo-package');
 const { createSeoWorker } = require('../src/seo-worker');
 
@@ -48,6 +48,56 @@ test('Gemini receives a public YouTube URL and returns bounded reviewable eviden
   assert.equal(result.model, 'gemini-3.8-flash');
   assert.deepEqual(result.moments, [{ time: '02:00', detail: 'Final exchange', approximate: true }]);
   assert.throws(() => videoIdFromUrl('https://not-youtube.example/watch?v=AbCdEfGhI12'), /YouTube watch URL/);
+});
+
+test('gameplay classification requires clear active gameplay in at least four of five sampled frames', () => {
+  const good = validateGameplayAssessment({
+    gameName: 'Example game',
+    frames: Array.from({ length: 5 }, (_, index) => ({
+      activeGameplay: index < 4, confidence: index < 4 ? 0.95 : 0.7,
+      evidence: index < 4 ? 'Game world and active HUD are visible' : 'Facecam only'
+    }))
+  }, 5, 'gemini-3.8-flash');
+  assert.equal(good.verified, true);
+  assert.equal(good.activeGameplayFrames, 4);
+
+  const weak = validateGameplayAssessment({
+    frames: Array.from({ length: 5 }, (_, index) => ({
+      activeGameplay: index < 3, confidence: 0.98, evidence: 'A game screen is visible'
+    }))
+  }, 5, 'gemini-3.8-flash');
+  assert.equal(weak.verified, false);
+});
+
+test('Gemini gameplay screening sends sampled frames as images and returns a strict evidence result', async () => {
+  const frames = Array.from({ length: 5 }, (_, index) => ({
+    mimeType: 'image/jpeg', data: Buffer.from('frame-' + index).toString('base64')
+  }));
+  let requestBody;
+  const result = await analyzeGameplayFrames(frames, {
+    apiKey: 'test-key', model: 'gemini-3.8-flash',
+    circuitBreaker: createModelCircuitBreaker(),
+    fetchImpl: async (_url, options) => {
+      requestBody = JSON.parse(options.body);
+      return {
+        ok: true, status: 200,
+        async json() {
+          return { candidates: [{ content: { parts: [{ text: JSON.stringify({
+            gameName: 'Example game',
+            frames: Array.from({ length: 5 }, () => ({
+              activeGameplay: true, confidence: 0.94, evidence: 'Gameplay fills the frame'
+            }))
+          }) }] } }] };
+        }
+      };
+    }
+  });
+
+  assert.equal(requestBody.contents[0].parts.length, 6);
+  assert.equal(requestBody.contents[0].parts[1].inline_data.mime_type, 'image/jpeg');
+  assert.equal(result.verified, true);
+  assert.equal(result.activeGameplayFrames, 5);
+  assert.equal(result.gameName, 'Example game');
 });
 
 test('analysis retries 503 on a fallback model and honors short 429 Retry-After', async () => {

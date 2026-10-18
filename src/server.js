@@ -197,8 +197,8 @@ async function generateTikTokShort(draft) {
     const download = await twitch.waitForClipDownload({
       clipId: clip.id, broadcasterId: clip.broadcasterId, editorId: clip.editorId
     });
-    const url = download.landscape_download_url || download.portrait_download_url;
-    if (!url) throw new Error('Twitch clip media is no longer available');
+    const url = download.landscape_download_url;
+    if (!url) throw new Error('Twitch clip has no landscape gameplay source; portrait-only Twitch media is rejected');
     const source = path.join(directory, 'source.mp4');
     const highlight = path.join(directory, 'highlight.mp4');
     const short = path.join(directory, 'short.mp4');
@@ -295,9 +295,8 @@ async function processTwitchClipDraft(id) {
       broadcasterId: draft.twitchBroadcasterId,
       editorId: draft.twitchEditorId
     });
-    const portraitUrl = download.portrait_download_url;
     const landscapeUrl = download.landscape_download_url;
-    if (!portraitUrl && !landscapeUrl) throw new Error('Twitch did not provide downloadable clip media');
+    if (!landscapeUrl) throw new Error('Twitch clip has no landscape gameplay source; portrait-only Twitch media is rejected');
 
     sourcePath = path.join(uploadDir, `${id}-source.mp4`);
     shortPath = path.join(uploadDir, `${id}-short.mp4`);
@@ -306,13 +305,9 @@ async function processTwitchClipDraft(id) {
       fs.promises.rm(shortPath, { force: true })
     ]);
     await store.updateDraft(id, { status: 'downloading_twitch_clip' });
-    if (portraitUrl) {
-      await twitch.downloadClip(portraitUrl, shortPath);
-    } else {
-      await twitch.downloadClip(landscapeUrl, sourcePath);
-      await store.updateDraft(id, { status: 'formatting_vertical_short' });
-      await video.convertLandscapeToShort(sourcePath, shortPath);
-    }
+    await twitch.downloadClip(landscapeUrl, sourcePath);
+    await store.updateDraft(id, { status: 'formatting_vertical_short' });
+    await video.convertLandscapeToShort(sourcePath, shortPath);
 
     await store.updateDraft(id, { status: 'uploading_private_to_youtube' });
     const sourceUrl = `https://www.twitch.tv/videos/${draft.vodId}?t=${Math.floor(draft.startSeconds)}s`;
@@ -395,7 +390,9 @@ function enqueueHighlightBatch(id) {
   return highlightBatchQueue.enqueue(id);
 }
 const twitchHighlightDiscovery = createTwitchHighlightDiscovery({
-  twitch, store, enqueueBatch: enqueueHighlightBatch
+  twitch, store, enqueueBatch: enqueueHighlightBatch,
+  visualGameplayVerificationAvailable: () => process.env.ENABLE_GAMEPLAY_SCREENING === 'true' &&
+    Boolean(process.env.VIDEO_ANALYSIS_API_KEY)
 });
 let highlightRetryScanRunning = false;
 async function scheduleDueHighlightRetries() {
@@ -671,7 +668,11 @@ app.get('/api/twitch/status', admin, async (_req, res, next) => {
 });
 
 app.get('/api/twitch/highlight-discovery/status', admin, (_req, res) => {
-  res.json(twitchHighlightDiscovery.status());
+  const gameplayScreeningEnabled = process.env.ENABLE_GAMEPLAY_SCREENING === 'true';
+  const gameplayVisionKeyConfigured = Boolean(process.env.VIDEO_ANALYSIS_API_KEY);
+  res.json({ ...twitchHighlightDiscovery.status(), gameplayScreeningEnabled,
+    gameplayVisionKeyConfigured,
+    visualGameplayVerificationConfigured: gameplayScreeningEnabled && gameplayVisionKeyConfigured });
 });
 
 app.get('/api/tiktok/status', admin, async (_req, res, next) => {
@@ -963,19 +964,25 @@ app.post('/api/twitch/vod-clips', admin, async (req, res, next) => {
       return res.status(409).json({ error: twitchStatus.error || 'Connect Twitch in the Amaana dashboard first' });
     }
     const result = await twitchHighlightDiscovery.scanVod(vodId);
-    if (result.status === 'no_candidates') {
-      return res.json({
-        accepted: false,
-        retryScheduled: true,
-        message: 'No linked Twitch community clips with usable timestamps are available yet. Amaana will check again automatically.'
-      });
+    if (result.status === 'visual_gameplay_screening_disabled') {
+      return res.json({ accepted: false, retryScheduled: true,
+        message: 'Visual gameplay screening is off. Enable ENABLE_GAMEPLAY_SCREENING and configure VIDEO_ANALYSIS_API_KEY to create gaming edits.' });
+    }
+    if (['no_gameplay_candidates', 'insufficient_gameplay_duration'].includes(result.status)) {
+      const available = Math.max(0, Number(result.availableGameplaySeconds) || 0);
+      const message = result.status === 'no_gameplay_candidates'
+        ? 'No Twitch clips with a game category are available for this VOD yet.'
+        : `Only ${Math.floor(available / 60)}m ${Math.floor(available % 60)}s of non-overlapping game-category footage is available; a 15-minute highlight needs 15m.`;
+      return res.json({ accepted: false, retryScheduled: true, message: message + ' Amaana will rescan for more clips.' });
     }
     const batch = result.batch;
     res.status(202).json({
       accepted: true,
       status: result.status,
       highlightVideo: batch ? { id: batch.id, status: batch.status, title: batch.title } : null,
-      shortsPlanned: Array.isArray(batch?.highlights) ? batch.highlights.length : 0,
+      targetHighlightDurationSeconds: Number(batch?.targetHighlightDurationSeconds) || null,
+      shortsPlanned: Array.isArray(batch?.shortCandidateIndexes) ? batch.shortCandidateIndexes.length
+        : (Array.isArray(batch?.highlights) ? batch.highlights.length : 0),
       discoverySource: 'twitch_clips_api'
     });
   } catch (error) {

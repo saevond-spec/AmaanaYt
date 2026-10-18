@@ -101,6 +101,7 @@ async function refreshConnection() {
 
 async function refreshTwitchConnection() {
   const status = await api('/api/twitch/status');
+  const highlightStatus = await api('/api/twitch/highlight-discovery/status').catch(() => null);
   twitchConnectionDot.classList.toggle('connected', status.connected);
   twitchConnectionText.textContent = status.connected
     ? `Connected as ${status.displayName || status.login || 'Twitch user'}`
@@ -110,9 +111,11 @@ async function refreshTwitchConnection() {
     twitchConnectButton.disabled = true;
     twitchConnectButton.textContent = 'Setup required';
   } else {
-    twitchConnectionHelp.textContent = status.connected
-      ? 'Amaana can create and download clips from your Twitch VODs.'
-      : (status.error || 'Connect the Twitch account that owns the Saevond channel.');
+    twitchConnectionHelp.textContent = status.connected && highlightStatus && !highlightStatus.visualGameplayVerificationConfigured
+      ? 'Visual gameplay screening is off. Amaana holds edits until ENABLE_GAMEPLAY_SCREENING and VIDEO_ANALYSIS_API_KEY are configured.'
+      : status.connected
+        ? 'Amaana requires 15 minutes of non-overlapping game footage, landscape clip sources, and visual gameplay checks before it builds a highlight.'
+        : (status.error || 'Connect the Twitch account that owns the Saevond channel.');
     twitchConnectButton.disabled = false;
     twitchConnectButton.textContent = status.connected ? 'Reconnect Twitch' : 'Connect Twitch';
   }
@@ -250,7 +253,7 @@ function renderDraft(draft) {
       card.append(twitchLink);
     }
   }
-  if (isHighlight) card.append(element('p', 'draft-meta', `Twitch VOD ${draft.vodId} · ${(draft.highlights || []).length} selected moments · highlight video`));
+  if (isHighlight) card.append(element('p', 'draft-meta', `Twitch VOD ${draft.vodId} · ${(draft.highlights || []).length} selected moments · 15-minute highlight · ${(draft.shortCandidateIndexes || []).length || 2} Shorts`));
   if (isHighlight && draft.chapterStatus) {
     const moments = draft.chapters?.length ? draft.chapters : (draft.chapterTimestamps || []);
     const label = draft.chapterStatus === 'chapters_added'
@@ -271,7 +274,7 @@ function renderDraft(draft) {
   }
   if (draft.status === 'awaiting_owner_approval' && draft.productionState === 'ready') {
     const message = isHighlight
-      ? 'The highlight and every Short passed media validation and YouTube processing. SEO is registered and thumbnail requirements are met. Review the bundle before publishing.'
+      ? 'The 15-minute landscape highlight passed exact-duration checks. Every source segment passed a five-frame visual gameplay check, and the selected Shorts passed media validation. Review the private bundle before publishing.'
       : 'This Short passed media validation and YouTube processing, and its SEO package is registered. Review before publishing.';
     card.append(element('p', 'draft-meta', message));
   }
@@ -998,7 +1001,7 @@ document.querySelector('#logoutButton').addEventListener('click', async () => {
   }
   if (params.get('twitch') === 'connected') {
     history.replaceState({}, '', '/');
-    showNotice('Twitch connected successfully. AI-detected VOD highlights can now become private Short drafts.');
+    showNotice('Twitch connected. Amaana will build a private 15-minute highlight only when enough game-category footage passes visual gameplay checks.');
   }
   if (params.get('tiktok') === 'connected') {
     history.replaceState({}, '', '/');
