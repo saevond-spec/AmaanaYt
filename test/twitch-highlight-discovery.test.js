@@ -230,12 +230,29 @@ test('restores scan throttles from persistent storage after a worker restart', a
 
 test('does not duplicate a batch already created for the VOD', async () => {
   const vod = makeVod();
-  const existing = { id: 'existing', sourceType: 'twitch_highlight_batch', vodId: vod.id };
+  const existing = { id: 'existing', sourceType: 'twitch_highlight_batch', vodId: vod.id, targetHighlightDurationSeconds: 15 };
   const h = harness({ vods: [vod], initialDrafts: [existing] });
   const result = await h.discovery.run();
   assert.equal(result.alreadyExists, 1);
   assert.equal(h.calls.clipList, 0);
   assert.deepEqual(h.enqueued, []);
+});
+
+
+test('legacy short Twitch drafts do not block a replacement that supersedes them', async () => {
+  const vod = makeVod();
+  const legacy = { id: 'legacy', sourceType: 'twitch_highlight_batch', vodId: vod.id,
+    duration: 119.6, status: 'awaiting_owner_approval' };
+  const clips = [makeClip('replacement-clip', 300, 15, 30)];
+  const h = harness({ vods: [vod], initialDrafts: [legacy], clipsByVod: { [vod.id]: clips } });
+  const result = await h.discovery.run();
+
+  assert.equal(result.queued, 1);
+  assert.equal(h.drafts.length, 2);
+  assert.equal(h.drafts[0], legacy);
+  assert.equal(h.drafts[1].targetHighlightDurationSeconds, 15);
+  assert.equal(h.drafts[1].supersedesDraftId, 'legacy');
+  assert.equal(h.enqueued.length, 1);
 });
 
 test('continues scanning other VODs after one Twitch request fails', async () => {
