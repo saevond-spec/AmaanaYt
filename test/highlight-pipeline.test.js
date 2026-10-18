@@ -6,7 +6,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
-  findHighlightBatchByVodId, isTransientError } = require('../src/highlight-pipeline');
+  findHighlightBatchByVodId, isTransientError, shouldPullForwardTwitchMetadataRetry } = require('../src/highlight-pipeline');
 const { buildHighlightTimeline, buildHighlightDescription } = require('../src/highlight-metadata');
 
 const moments = [
@@ -85,7 +85,8 @@ async function harness(t, options = {}) {
         throw error;
       }
       const end = Number(String(clipId).slice('clip-'.length));
-      return { id: clipId, video_id: '1234567890', vod_offset: end - 30 + (options.timestampDrift || 0), duration: 30 };
+      return { id: clipId, video_id: options.wrongVodId ? '9876543210' : '1234567890',
+        vod_offset: end - 30 + (options.timestampDrift || 0), duration: 30 };
     },
     async downloadClip(_url, destination) { await fs.writeFile(destination, 'fixture media'); }
   };
@@ -256,6 +257,7 @@ test('bounded metadata polling schedules retry and reuses an existing Twitch cli
   assert.equal(h.drafts.get(h.batch.id).status, 'clip_retry_wait');
   assert.equal(h.drafts.get(h.batch.id).twitchClips.length, 1);
   assert.equal(h.counters.clipCreates, 1);
+  assert.ok(Date.parse(h.drafts.get(h.batch.id).nextClipAttemptAt) - Date.now() <= 2 * 60 * 1000 + 1000);
   assert.equal(h.counters.uploads.filter((upload) => upload.succeeded).length, 0);
 
   await h.processor(h.batch.id);
@@ -395,6 +397,25 @@ test('duplicate VOD events resolve to the same batch and queue only one active j
   assert.equal(scheduled.length, 1);
 });
 
+test('only long pending Twitch metadata retries are pulled forward', () => {
+  const now = Date.parse('2026-10-18T12:00:00.000Z');
+  const pending = {
+    sourceType: 'twitch_highlight_batch', status: 'clip_retry_wait',
+    error: 'Twitch clip metadata is not linked to the requested VOD yet after 72 checks',
+    nextClipAttemptAt: new Date(now + 10 * 60 * 1000).toISOString()
+  };
+  assert.equal(shouldPullForwardTwitchMetadataRetry(pending, now), true);
+  assert.equal(shouldPullForwardTwitchMetadataRetry({
+    ...pending, nextClipAttemptAt: new Date(now + 90 * 1000).toISOString()
+  }, now), false);
+  assert.equal(shouldPullForwardTwitchMetadataRetry({
+    ...pending, error: 'YouTube upload quota exceeded'
+  }, now), false);
+  assert.equal(shouldPullForwardTwitchMetadataRetry({
+    ...pending, sourceType: 'youtube_upload'
+  }, now), false);
+});
+
 test('retry scanner selects only due highlight batches', () => {
   const now = Date.parse('2026-10-03T12:00:00.000Z');
   const due = { id: 'due', sourceType: 'twitch_highlight_batch', status: 'clip_retry_wait',
@@ -424,6 +445,15 @@ test('an inaccurate Twitch VOD clip timestamp blocks all YouTube uploads', async
   assert.equal(h.drafts.get(h.batch.id).status, 'clip_failed');
   assert.equal(h.counters.uploads.filter((upload) => upload.succeeded).length, 0);
   assert.equal(h.counters.publications.length, 0);
+});
+
+test('a clip explicitly linked to a different VOD is rejected without polling or upload', async (t) => {
+  const h = await harness(t, { wrongVodId: true });
+  await h.processor(h.batch.id);
+  assert.equal(h.drafts.get(h.batch.id).status, 'clip_failed');
+  assert.match(h.drafts.get(h.batch.id).error, /different VOD/);
+  assert.equal(h.counters.clipMetadataChecks, 1);
+  assert.equal(h.counters.uploads.filter((upload) => upload.succeeded).length, 0);
 });
 
 test('owner review waits until every YouTube upload and processing state is complete', async (t) => {
