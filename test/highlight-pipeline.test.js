@@ -26,7 +26,7 @@ async function harness(t, options = {}) {
   };
   const drafts = new Map([[batch.id, batch]]);
   const counters = {
-    clipCreates: 0, clipMetadataChecks: 0, uploads: [], thumbnailSets: 0, thumbnailCreates: 0,
+    clipCreates: 0, clipMetadataChecks: 0, readyLogs: [], uploads: [], thumbnailSets: 0, thumbnailCreates: 0,
     thumbnailSource: null, thumbnailOptions: null,
     shortRenders: 0, seo: [], playlists: [], visibilityMutations: 0,
     publicationChecks: [], publications: [], errors: []
@@ -209,7 +209,8 @@ async function harness(t, options = {}) {
     clipMetadataPollIntervalMs: options.clipMetadataPollIntervalMs || 5000,
     clipMetadataMaxAttempts: options.clipMetadataMaxAttempts,
     idFactory: () => 'short-draft-' + (++idCounter),
-    logError: (_id, error) => counters.errors.push(error.message)
+    logError: (_id, error) => counters.errors.push(error.message),
+    logSuccess: (batchId, shortCount) => counters.readyLogs.push({ batchId, shortCount })
   };
   const processor = createHighlightProcessor(dependencies);
   return { batch, drafts, store, counters, processor,
@@ -597,11 +598,13 @@ test('old private batches and disabled automatic publication remain private for 
   await old.processor(old.batch.id);
   assert.equal(old.drafts.get(old.batch.id).status, 'awaiting_owner_approval');
   assert.equal(old.counters.publications.length, 0);
+  assert.deepEqual(old.counters.readyLogs, [{ batchId: 'batch-1', shortCount: 3 }]);
 
   const disabled = await harness(t, { autoPublish: false });
   await disabled.processor(disabled.batch.id);
   assert.equal(disabled.drafts.get(disabled.batch.id).status, 'awaiting_owner_approval');
   assert.equal(disabled.counters.publications.length, 0);
+  assert.deepEqual(disabled.counters.readyLogs, [{ batchId: 'batch-1', shortCount: 3 }]);
 });
 
 test('permanent publication permission failure stops with owner review and leaves remaining outputs private', async (t) => {
