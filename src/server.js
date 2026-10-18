@@ -18,7 +18,8 @@ const { createMonetizationWorker } = require('./monetization-worker');
 const { createSeoMarket, detectGame } = require('./seo-market');
 const { normalizeContext } = require('./seo-package');
 const { buildHighlightTimeline, buildHighlightDescription } = require('./highlight-metadata');
-const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries } = require('./highlight-pipeline');
+const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
+  shouldPullForwardTwitchMetadataRetry } = require('./highlight-pipeline');
 const { createTwitchHighlightDiscovery } = require('./twitch-highlight-discovery');
 const { auditVideo, channelSuggestions, problem, assertVideoMatchesCatalog } = require('./seo-publish');
 const { createSessionStore } = require('./session-store');
@@ -383,7 +384,9 @@ const processHighlightBatch = createHighlightProcessor({
   maxAutoAttempts: highlightMaxAutoAttempts,
   // Newly produced Twitch bundles stay private until the owner publishes from review.
   autoPublish: false,
-  logError: (id, error) => console.error('Highlight batch ' + id + ' failed:', error.message)
+  logError: (id, error) => console.error('Highlight batch ' + id + ' failed:', error.message),
+  logSuccess: (id, shorts) => console.info('Amaana Twitch highlight batch ' + id +
+    ' is ready for owner review with ' + shorts + ' Shorts')
 });const highlightBatchQueue = createBatchQueue(processHighlightBatch, {
   onError: (id, error) => console.error('Highlight batch queue failed for ' + id + ':', error.message)
 });
@@ -399,7 +402,14 @@ async function scheduleDueHighlightRetries() {
   highlightRetryScanRunning = true;
   try {
     const drafts = await store.listDrafts();
-    findDueHighlightRetries(drafts).forEach((draft) => enqueueHighlightBatch(draft.id));
+    const timestamp = Date.now();
+    for (const draft of drafts) {
+      if (!shouldPullForwardTwitchMetadataRetry(draft, timestamp)) continue;
+      const nextClipAttemptAt = new Date(timestamp + 60 * 1000).toISOString();
+      await store.updateDraft(draft.id, { nextClipAttemptAt });
+      console.info('Moved Twitch metadata retry for batch ' + draft.id + ' forward to ' + nextClipAttemptAt);
+    }
+    findDueHighlightRetries(drafts, timestamp).forEach((draft) => enqueueHighlightBatch(draft.id));
   } catch (error) {
     console.error('Failed to scan scheduled highlight retries:', error.message);
   } finally {
