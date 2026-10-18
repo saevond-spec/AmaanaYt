@@ -63,11 +63,13 @@ function requireArchivedTwitchVod(vod, expectedVodId, broadcasterId) {
   return vod;
 }
 
+const MAX_HIGHLIGHT_MOMENTS = 20;
+
 function validateHighlightMoments(items, vodDurationSeconds) {
   if (!Array.isArray(items) || !items.length) {
     throw new Error('timestamps must contain at least one AI highlight');
   }
-  if (items.length > 10) throw new Error('timestamps cannot contain more than 10 AI highlights');
+  if (items.length > MAX_HIGHLIGHT_MOMENTS) throw new Error('timestamps cannot contain more than 20 AI highlights');
   const vodDuration = asSeconds(vodDurationSeconds);
   if (!Number.isFinite(vodDuration) || vodDuration <= 0) {
     throw new Error('A measured Twitch VOD duration is required to validate timestamps');
@@ -117,7 +119,7 @@ function validateHighlightMoments(items, vodDurationSeconds) {
         Math.abs(existing.endSeconds - candidate.item.endSeconds) < 3)) continue;
     selected.push(candidate.item);
   }
-  return selected.slice(0, 8).sort((left, right) => left.startSeconds - right.startSeconds);
+  return selected.slice(0, MAX_HIGHLIGHT_MOMENTS).sort((left, right) => left.startSeconds - right.startSeconds);
 }
 
 function verifyCreatedClip(moment, clip, vodId, toleranceSeconds = 2) {
@@ -187,6 +189,6 @@ function verifyClipCreationRequest(moment, clip, vodId, toleranceSeconds = 2) {
 }
 
 module.exports = {
-  parseTwitchDuration, requireArchivedTwitchVod, validateHighlightMoments,
+  parseTwitchDuration, requireArchivedTwitchVod, validateHighlightMoments, MAX_HIGHLIGHT_MOMENTS,
   verifyCreatedClip, verifyClipCreationRequest
 };

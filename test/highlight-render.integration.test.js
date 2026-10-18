@@ -7,7 +7,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const ffmpegPath = require('ffmpeg-static');
-const { assembleHighlights, createThumbnail, shortFromHighlight } = require('../src/video');
+const { assembleHighlights, createThumbnail, shortFromHighlight, validateHighlight } = require('../src/video');
 
 function inspectMedia(file) {
   const result = spawnSync(ffmpegPath, ['-hide_banner', '-i', file], { encoding: 'utf8' });
@@ -42,6 +42,28 @@ test('real FFmpeg produces a measured landscape montage, vertical Short, and 16:
   const montageInfo = inspectMedia(montage);
   assert.deepEqual([montageInfo.width, montageInfo.height], [1280, 720]);
   assert.ok(montageInfo.seconds > 4.8 && montageInfo.seconds < 5.5);
+
+  const exactMontage = path.join(directory, 'exact-montage.mp4');
+  await assembleHighlights(sources, exactMontage, directory, [2.5, 2.7], 5);
+  const exactInfo = await validateHighlight(exactMontage, 5, { exactDuration: true });
+  assert.ok(Math.abs(exactInfo.durationSeconds - 5) <= 0.5);
+
+  await assert.rejects(
+    assembleHighlights(sources, path.join(directory, 'too-long.mp4'), directory, [2.5, 2.7], 10),
+    /Only .* seconds of landscape gameplay source are available; 10 are required/
+  );
+
+  const portrait = path.join(directory, 'portrait.mp4');
+  const portraitFixture = spawnSync(ffmpegPath, [
+    '-y', '-f', 'lavfi', '-i', 'testsrc2=size=180x320:rate=24',
+    '-f', 'lavfi', '-i', 'sine=frequency=660:sample_rate=48000',
+    '-t', '2', '-pix_fmt', 'yuv420p', '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', portrait
+  ], { encoding: 'utf8' });
+  assert.equal(portraitFixture.status, 0, 'portrait fixture should render');
+  await assert.rejects(
+    assembleHighlights([portrait], path.join(directory, 'portrait-rejected.mp4'), directory, [1]),
+    /landscape gameplay source is required/
+  );
 
   const short = path.join(directory, 'short.mp4');
   await shortFromHighlight(montage, 0, Math.min(2.5, durations[0]), short);

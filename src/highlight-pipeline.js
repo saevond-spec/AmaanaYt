@@ -218,6 +218,13 @@ function createHighlightProcessor(dependencies) {
       if (batch.autoPublishEligible) {
         validateHighlightMoments(batch.highlights, batch.vodDurationSeconds);
       }
+      const targetHighlightDurationSeconds = Number(batch.targetHighlightDurationSeconds);
+      if (Number.isFinite(targetHighlightDurationSeconds) && targetHighlightDurationSeconds > 0) {
+        const selectedDuration = batch.highlights.reduce((sum, moment) => sum + Number(moment.duration || 0), 0);
+        if (Math.abs(selectedDuration - targetHighlightDurationSeconds) > 0.1) {
+          throw new Error(`Selected gameplay segments total ${selectedDuration.toFixed(1)} seconds; exactly ${targetHighlightDurationSeconds} seconds are required`);
+        }
+      }
 
       const attemptCount = (Number(batch.clipAttemptCount) || 0) + 1;
       const failures = [];
@@ -299,19 +306,43 @@ function createHighlightProcessor(dependencies) {
         }
         twitchClips[index] = { ...twitchClips[index], timestampVerification: verifiedTimestamp };
         await store.updateDraft(id, { twitchClips });
-        const url = download.landscape_download_url || download.portrait_download_url;
-        if (!url) throw new Error('Twitch clip media was unavailable');
+        const url = download.landscape_download_url;
+        if (!url) throw new Error('Twitch clip has no landscape gameplay source; portrait-only Twitch media is rejected');
         const source = path.join(directory, 'source-' + index + '.mp4');
         await twitch.downloadClip(url, source);
+        if (typeof video.verifyGameplay !== 'function') {
+          throw new Error('Visual gameplay verification is unavailable; no video was uploaded');
+        }
+        const visualGameplay = await video.verifyGameplay(source);
+        if (!visualGameplay?.verified) {
+          const active = Number(visualGameplay?.activeGameplayFrames) || 0;
+          const total = Number(visualGameplay?.totalFrames) || 0;
+          throw new Error(`Gameplay visual gate rejected Twitch clip ${clip.id}: only ${active} of ${total} sampled frames clearly showed active gameplay`);
+        }
+        twitchClips[index] = {
+          ...twitchClips[index],
+          visualGameplayVerification: {
+            verified: true,
+            activeGameplayFrames: Number(visualGameplay.activeGameplayFrames),
+            totalFrames: Number(visualGameplay.totalFrames),
+            confidence: Number(visualGameplay.confidence),
+            gameName: cleanText(visualGameplay.gameName || '', 100),
+            model: cleanText(visualGameplay.model || '', 80)
+          }
+        };
+        await store.updateDraft(id, { twitchClips });
         sources.push(source);
       }
 
       const montage = path.join(directory, 'highlight.mp4');
       await store.updateDraft(id, { status: 'assembling_highlight_video' });
       const durations = await video.assembleHighlights(sources, montage, directory,
-        batch.highlights.map((moment) => Number(moment.duration)));
+        batch.highlights.map((moment) => Number(moment.duration)),
+        Number.isFinite(targetHighlightDurationSeconds) ? targetHighlightDurationSeconds : null);
       const timeline = buildHighlightTimeline(batch.highlights, durations);
-      await video.validateHighlight(montage, timeline.durationSeconds);
+      await video.validateHighlight(montage,
+        Number.isFinite(targetHighlightDurationSeconds) ? targetHighlightDurationSeconds : timeline.durationSeconds,
+        { exactDuration: Number.isFinite(targetHighlightDurationSeconds) });
       const description = batch.pipelineVersion >= 2
         ? buildHighlightDescription(batch.vodId, timeline, batch.streamTitle)
         : 'Highlights from https://www.twitch.tv/videos/' + batch.vodId;
@@ -352,7 +383,8 @@ function createHighlightProcessor(dependencies) {
       });
       const highlightPatch = {
         status: 'creating_shorts', productionState: 'processing', youtubeVideoId: highlight.id,
-        title: highlightTitle, description, tags: highlightTags, duration: timeline.durationSeconds,
+        title: highlightTitle, description, tags: highlightTags,
+        duration: Number.isFinite(targetHighlightDurationSeconds) ? targetHighlightDurationSeconds : timeline.durationSeconds,
         mediaValidation: 'passed'
       };
       if (batch.pipelineVersion >= 2) {
@@ -413,10 +445,18 @@ function createHighlightProcessor(dependencies) {
 
       const existingShorts = (await store.listDrafts()).filter((draft) => draft.parentId === id);
       const shortsByIndex = new Map(existingShorts.map((draft) => [draft.highlightIndex, draft]));
+      const shortIndexes = new Set(Array.isArray(batch.shortCandidateIndexes)
+        ? batch.shortCandidateIndexes.filter((index) => Number.isInteger(index) && index >= 0 && index < batch.highlights.length)
+        : batch.highlights.map((_moment, index) => index));
+      const expectedShortCount = shortIndexes.size;
       const registeredShortIndexes = new Set();
       let offset = 0;
       for (let index = 0; index < batch.highlights.length; index += 1) {
         const moment = batch.highlights[index];
+        if (!shortIndexes.has(index)) {
+          offset += durations[index];
+          continue;
+        }
         const length = Math.min(60, durations[index]);
         const shortTags = ['@saevond', 'gaming', 'Shorts'];
         const existingShort = shortsByIndex.get(index);
@@ -497,14 +537,14 @@ function createHighlightProcessor(dependencies) {
         offset += durations[index];
       }
 
-      if (registeredShortIndexes.size !== batch.highlights.length) {
-        failures.push('shorts: ' + registeredShortIndexes.size + ' of ' + batch.highlights.length + ' have SEO registration');
+      if (registeredShortIndexes.size !== expectedShortCount) {
+        failures.push('shorts: ' + registeredShortIndexes.size + ' of ' + expectedShortCount + ' have SEO registration');
       }
       const finalBatch = await store.getDraft(id);
       const finalShorts = (await store.listDrafts()).filter((draft) => draft.parentId === id)
         .sort((left, right) => left.highlightIndex - right.highlightIndex);
       const allOutputIdsPresent = Boolean(finalBatch?.youtubeVideoId) &&
-        finalShorts.length === batch.highlights.length &&
+        finalShorts.length === expectedShortCount &&
         finalShorts.every((draft) => Boolean(draft.youtubeVideoId));
       const seoReady = finalBatch?.seoRegistrationStatus === 'registered' &&
         finalShorts.every((draft) => draft.seoRegistrationStatus === 'registered');
@@ -515,7 +555,7 @@ function createHighlightProcessor(dependencies) {
         finalBatch.twitchClips.every((clip) => clip.timestampVerification?.verified === true);
       const shouldAutoPublish = autoPublish && batch.autoPublishEligible === true;
       const localProductionReady = failures.length === 0 &&
-        registeredShortIndexes.size === batch.highlights.length && allOutputIdsPresent &&
+        registeredShortIndexes.size === expectedShortCount && allOutputIdsPresent &&
         seoReady && mediaReady && (batch.pipelineVersion < 2 || thumbnailStatus === 'applied');
       let youtubeProcessingReady = false;
       const outputs = [finalBatch, ...finalShorts];
@@ -631,7 +671,7 @@ function createHighlightProcessor(dependencies) {
         const publishedBatch = await store.getDraft(id);
         const publishedShorts = (await store.listDrafts()).filter((draft) => draft.parentId === id);
         const publishedEverything = publishedBatch.publicationStatus === 'published' &&
-          publishedShorts.length === batch.highlights.length &&
+          publishedShorts.length === expectedShortCount &&
           publishedShorts.every((draft) => draft.publicationStatus === 'published');
         if (publishedEverything) {
           await store.updateDraft(id, {

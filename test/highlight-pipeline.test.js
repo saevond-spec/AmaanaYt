@@ -130,7 +130,8 @@ async function harness(t, options = {}) {
   const counters = {
     clipCreates: 0, clipMetadataChecks: 0, readyLogs: [], uploads: [], thumbnailSets: 0, thumbnailCreates: 0,
     thumbnailSource: null, thumbnailOptions: null,
-    shortRenders: 0, seo: [], playlists: [], visibilityMutations: 0,
+    shortRenders: 0, gameplayVerifications: 0, assemblyTarget: null, validationTarget: null,
+    seo: [], playlists: [], visibilityMutations: 0,
     publicationChecks: [], publications: [], errors: []
   };
   const processingChecks = new Map();
@@ -205,11 +206,22 @@ async function harness(t, options = {}) {
       }
       await fs.writeFile(destination, 'fixture thumbnail');
     },
-    async assembleHighlights(sources, destination) {
+    async assembleHighlights(sources, destination, _segmentDir, _expectedDurations, targetDurationSeconds) {
+      counters.assemblyTarget = targetDurationSeconds;
       await fs.writeFile(destination, 'fixture montage');
       return options.invalidDuration ? sources.map(() => 0) : sources.map(() => 30);
     },
-    async validateHighlight() {
+    async verifyGameplay() {
+      counters.gameplayVerifications += 1;
+      if (options.failGameplayVerification) {
+        return { verified: false, activeGameplayFrames: 1, totalFrames: 5, confidence: 0.35, model: 'test' };
+      }
+      return { verified: true, activeGameplayFrames: 5, totalFrames: 5, confidence: 0.98,
+        gameName: 'Fixture game', model: 'test' };
+    },
+    async validateHighlight(_filePath, expectedDuration, options = {}) {
+      counters.validationTarget = { expectedDuration, exactDuration: options.exactDuration };
+
       if (options.failHighlightValidation) throw new Error('Landscape validation failed');
     },
     async validateShort() {
@@ -318,6 +330,33 @@ async function harness(t, options = {}) {
   return { batch, drafts, store, counters, processor,
     createProcessor: () => createHighlightProcessor(dependencies) };
 }
+
+test('15-minute batches enforce the exact target and create Shorts only from the two selected moments', async (t) => {
+  const h = await harness(t, { autoPublish: false });
+  h.batch.targetHighlightDurationSeconds = 90;
+  h.batch.shortCandidateIndexes = [0, 2];
+  h.drafts.set(h.batch.id, h.batch);
+  await h.processor(h.batch.id);
+
+  const shorts = [...h.drafts.values()].filter((draft) => draft.sourceType === 'twitch_highlight_short');
+  assert.equal(h.counters.assemblyTarget, 90);
+  assert.deepEqual(h.counters.validationTarget, { expectedDuration: 90, exactDuration: true });
+  assert.equal(h.drafts.get(h.batch.id).duration, 90);
+  assert.deepEqual(shorts.map((draft) => draft.highlightIndex), [0, 2]);
+  assert.equal(h.counters.gameplayVerifications, 3);
+  assert.equal(h.drafts.get(h.batch.id).status, 'awaiting_owner_approval');
+  assert.equal(h.counters.publications.length, 0);
+});
+
+test('visual gameplay verification rejects facecam or non-gameplay clips before any YouTube upload', async (t) => {
+  const h = await harness(t, { failGameplayVerification: true });
+  await h.processor(h.batch.id);
+
+  assert.equal(h.counters.gameplayVerifications, 1);
+  assert.equal(h.counters.uploads.length, 0);
+  assert.equal(h.drafts.get(h.batch.id).status, 'clip_failed');
+  assert.match(h.drafts.get(h.batch.id).error, /only 1 of 5 sampled frames clearly showed active gameplay/);
+});
 
 test('complete production validates media and timestamps, then publishes all outputs after SEO and thumbnail checks', async (t) => {
   const h = await harness(t);

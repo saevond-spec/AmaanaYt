@@ -34,12 +34,12 @@ test('accepts precise moments and rejects out-of-range or incomplete timestamps'
     /confidence score/);
 });
 
-test('deduplicates overlapping detections by confidence and caps the list at eight', () => {
+test('deduplicates overlaps while allowing up to twenty selected moments', () => {
   const items = [
     { startSeconds: 0, endSeconds: 30, title: 'lower overlap', score: 70 },
     { startSeconds: 5, endSeconds: 35, title: 'higher overlap', score: 90 },
     { startSeconds: 60, endSeconds: 90, title: 'third moment', score: 80 },
-    ...Array.from({ length: 7 }, (_, index) => ({
+    ...Array.from({ length: 17 }, (_, index) => ({
       startSeconds: 120 + index * 40,
       endSeconds: 150 + index * 40,
       title: 'Moment ' + index,
@@ -47,9 +47,12 @@ test('deduplicates overlapping detections by confidence and caps the list at eig
     }))
   ];
   const result = validateHighlightMoments(items, 1000);
-  assert.equal(result.length, 8);
-  assert.deepEqual(result.map((item) => item.startSeconds), [5, 60, 160, 200, 240, 280, 320, 360]);
+  assert.equal(result.length, 19);
+  assert.deepEqual(result.map((item) => item.startSeconds), [5, 60, ...Array.from({ length: 17 }, (_, index) => 120 + index * 40)]);
   assert.equal(result[0].title, 'higher overlap');
+  assert.throws(() => validateHighlightMoments([...items, {
+    startSeconds: 900, endSeconds: 930, title: 'Too many', score: 50
+  }], 1000), /more than 20/);
 });
 
 test('verifies the VOD source and moment in Amaana accepted clip requests', () => {
