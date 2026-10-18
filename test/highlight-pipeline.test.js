@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
   findHighlightBatchByVodId, isTransientError, shouldPullForwardTwitchMetadataRetry,
-  shouldRequeueUnexpectedTwitchDownloadHost } = require('../src/highlight-pipeline');
+  shouldRequeueUnexpectedTwitchDownloadHost, shouldPullForwardAllowedTwitchDownloadHost } = require('../src/highlight-pipeline');
 const { buildHighlightTimeline, buildHighlightDescription } = require('../src/highlight-metadata');
 const { downloadClip } = require('../src/twitch');
 
@@ -66,6 +66,27 @@ test('unknown Twitch download hosts remain blocked before network access', async
   } finally {
     global.fetch = originalFetch;
   }
+});
+
+test('pulls the corrected Twitch host forward for one Amaana batch only once', () => {
+  const failed = {
+    sourceType: 'twitch_highlight_batch',
+    status: 'clip_failed',
+    error: 'Twitch returned an unexpected clip download host: d1ndex63qxojbr.cloudfront.net'
+  };
+  assert.equal(shouldPullForwardAllowedTwitchDownloadHost(failed), true);
+  assert.equal(shouldPullForwardAllowedTwitchDownloadHost({
+    ...failed, status: 'clip_retry_wait', nextClipAttemptAt: new Date(Date.now() + 60_000).toISOString()
+  }), true);
+  assert.equal(shouldPullForwardAllowedTwitchDownloadHost({
+    ...failed, twitchDownloadHostAllowlistRetryAt: new Date().toISOString()
+  }), false);
+  assert.equal(shouldPullForwardAllowedTwitchDownloadHost({
+    ...failed, error: 'Twitch returned an unexpected clip download host: other.example'
+  }), false);
+  assert.equal(shouldPullForwardAllowedTwitchDownloadHost({
+    ...failed, sourceType: 'twitch_vod'
+  }), false);
 });
 
 const moments = [
