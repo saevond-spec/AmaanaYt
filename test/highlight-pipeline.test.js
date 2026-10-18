@@ -30,14 +30,36 @@ test('one-time diagnostic retry is limited to failed Twitch download-host batche
   }), false);
 });
 
-test('rejected Twitch download host reports only its hostname and remains retryable', async () => {
+test('accepts only Amaana\'s observed Twitch CloudFront download host', async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'amaana-twitch-download-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const destination = path.join(directory, 'clip.mp4');
+  const originalFetch = global.fetch;
+  const requestedHosts = [];
+  global.fetch = async (input) => {
+    requestedHosts.push(new URL(input).hostname);
+    return new Response(Buffer.from('fixture media'));
+  };
+  try {
+    await downloadClip(
+      'https://d1ndex63qxojbr.cloudfront.net/clip.mp4?token=private',
+      destination
+    );
+    assert.deepEqual(requestedHosts, ['d1ndex63qxojbr.cloudfront.net']);
+    assert.equal(await fs.readFile(destination, 'utf8'), 'fixture media');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('unknown Twitch download hosts remain blocked before network access', async () => {
   const originalFetch = global.fetch;
   let requested = false;
   global.fetch = async () => { requested = true; throw new Error('Unexpected fetch'); };
   try {
     await assert.rejects(
-      downloadClip('https://unknown.example/clip.mp4?token=private', '/tmp/unused-amaana-clip.mp4'),
-      (error) => error.message === 'Twitch returned an unexpected clip download host: unknown.example' &&
+      downloadClip('https://other-distribution.cloudfront.net/clip.mp4?token=private', '/tmp/unused-amaana-clip.mp4'),
+      (error) => error.message === 'Twitch returned an unexpected clip download host: other-distribution.cloudfront.net' &&
         error.status === 502 && !error.message.includes('private')
     );
     assert.equal(requested, false);
