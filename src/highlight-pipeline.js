@@ -165,7 +165,7 @@ function createHighlightProcessor(dependencies) {
     buildHighlightTimeline, buildHighlightDescription,
     buildHighlightTitle = defaultBuildHighlightTitle, buildShortTitle = defaultBuildShortTitle,
     buildShortDescription = defaultBuildShortDescription, cleanText,
-    idFactory = () => crypto.randomUUID(), logError = () => {},
+    idFactory = () => crypto.randomUUID(), logError = () => {}, logSuccess = () => {},
     maxAutoAttempts = 12, autoPublish = true, now = () => Date.now(),
     sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     clipMetadataPollIntervalMs = 5000, clipMetadataMaxAttempts = 72
@@ -521,6 +521,7 @@ function createHighlightProcessor(dependencies) {
           publicationStatus: 'pending', productionFailures: [], error: null,
           nextClipAttemptAt: null, processedAt: new Date(now()).toISOString()
         });
+        logSuccess(id, finalShorts.length);
       } else {
         await store.updateDraft(id, {
           status: 'clip_retry_wait', productionState: 'publishing',
