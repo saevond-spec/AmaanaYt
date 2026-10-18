@@ -223,8 +223,38 @@ function playlistAssignmentText(result) {
   return String(result.state || 'pending').replaceAll('_', ' ');
 }
 
-function renderDraft(draft) {
+
+function hasVerifiedGameplayHighlight(draft) {
+  const duration = Number(draft && draft.duration);
+  if (!draft || draft.sourceType !== 'twitch_highlight_batch' ||
+      Number(draft.targetHighlightDurationSeconds) !== 900 ||
+      !Number.isFinite(duration) || Math.abs(duration - 900) > 0.5 ||
+      draft.mediaValidation !== 'passed' ||
+      !Array.isArray(draft.highlights) || !draft.highlights.length ||
+      !Array.isArray(draft.twitchClips) || draft.twitchClips.length !== draft.highlights.length) return false;
+  return draft.twitchClips.every((clip) => {
+    const result = clip && clip.visualGameplayVerification;
+    const total = Number(result && result.totalFrames);
+    const active = Number(result && result.activeGameplayFrames);
+    return result?.verified === true && total >= 5 && active >= Math.ceil(total * 0.8) &&
+      Number(result.confidence) >= 0.8;
+  });
+}
+
+function formatHighlightDuration(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value < 0) return 'duration unavailable';
+  const wholeSeconds = Math.round(value);
+  return Math.floor(wholeSeconds / 60) + ':' + String(wholeSeconds % 60).padStart(2, '0');
+}
+
+function renderDraft(draft, draftsById = new Map()) {
   const isHighlight = draft.sourceType === 'twitch_highlight_batch';
+  const isHighlightShort = draft.sourceType === 'twitch_highlight_short';
+  const verifiedHighlight = isHighlight && hasVerifiedGameplayHighlight(draft);
+  const parentDraft = isHighlightShort ? draftsById.get(String(draft.parentId)) : null;
+  const verifiedShort = isHighlightShort && hasVerifiedGameplayHighlight(parentDraft);
+  const publishBlocked = isHighlight && !verifiedHighlight || isHighlightShort && !verifiedShort;
   const card = element('article', 'draft');
   const top = element('div', 'draft-top');
   top.append(element('h3', '', draft.title || (isHighlight ? 'Untitled highlight video' : 'Untitled Short')));
@@ -253,7 +283,13 @@ function renderDraft(draft) {
       card.append(twitchLink);
     }
   }
-  if (isHighlight) card.append(element('p', 'draft-meta', `Twitch VOD ${draft.vodId} · ${(draft.highlights || []).length} selected moments · 15-minute highlight · ${(draft.shortCandidateIndexes || []).length || 2} Shorts`));
+  if (isHighlight) {
+    const measuredDuration = Number(draft.duration) ||
+      (draft.highlights || []).reduce((sum, item) => sum + Number(item.duration || 0), 0);
+    const editLabel = verifiedHighlight ? '15-minute gameplay-verified highlight'
+      : formatHighlightDuration(measuredDuration) + ' legacy edit · not verified against the 15-minute gameplay target';
+    card.append(element('p', 'draft-meta', `Twitch VOD ${draft.vodId} · ${(draft.highlights || []).length} selected moments · ${editLabel} · ${(draft.shortCandidateIndexes || []).length || 2} Shorts`));
+  }
   if (isHighlight && draft.chapterStatus) {
     const moments = draft.chapters?.length ? draft.chapters : (draft.chapterTimestamps || []);
     const label = draft.chapterStatus === 'chapters_added'
@@ -272,7 +308,7 @@ function renderDraft(draft) {
         : 'Gameplay thumbnail: ' + String(draft.thumbnailStatus).replaceAll('_', ' ');
     card.append(element('p', draft.thumbnailStatus === 'failed' ? 'draft-error' : 'draft-meta', thumbnailMessage));
   }
-  if (draft.status === 'awaiting_owner_approval' && draft.productionState === 'ready') {
+  if (draft.status === 'awaiting_owner_approval' && draft.productionState === 'ready' && !publishBlocked) {
     const message = isHighlight
       ? 'The 15-minute landscape highlight passed exact-duration checks. Every source segment passed a five-frame visual gameplay check, and the selected Shorts passed media validation. Review the private bundle before publishing.'
       : 'This Short passed media validation and YouTube processing, and its SEO package is registered. Review before publishing.';
@@ -281,7 +317,12 @@ function renderDraft(draft) {
   if (draft.seoRegistrationError && !draft.error) {
     card.append(element('p', 'draft-error', 'SEO job needs retry: ' + draft.seoRegistrationError));
   }
-  if (draft.sourceType === 'twitch_highlight_short') card.append(element('p', 'draft-meta', 'Short made from a highlight video'));
+  if (isHighlightShort) {
+    card.append(element('p', publishBlocked ? 'draft-error' : 'draft-meta',
+      publishBlocked
+        ? 'This Short is linked to a legacy or unverified highlight and cannot be published. Keep it private.'
+        : 'Short made from a verified highlight video'));
+  }
 
   if (draft.error) card.append(element('p', 'draft-error', draft.error));
 
@@ -412,7 +453,7 @@ function renderDraft(draft) {
     }
   }
 
-  if (draft.status === 'awaiting_owner_approval') {
+  if (draft.status === 'awaiting_owner_approval' && !publishBlocked) {
     const actions = element('div', 'draft-actions');
     const publish = element('button', 'publish', 'Publish now');
     publish.type = 'button';
@@ -436,6 +477,10 @@ function renderDraft(draft) {
     scheduleRow.append(scheduleTime, schedule);
     actions.append(publish, scheduleRow);
     card.append(actions);
+  }
+
+  if (draft.status === 'awaiting_owner_approval' && publishBlocked && !isHighlightShort) {
+    card.append(element('p', 'draft-error', 'This legacy highlight does not meet the 15-minute gameplay-verification requirement. Publishing is disabled; keep this draft private.'));
   }
 
   if (draft.status === 'clip_failed' || (isHighlight && draft.error)) {
@@ -842,7 +887,8 @@ async function loadDrafts() {
       draftList.append(element('div', 'empty-state', 'No drafts yet. Upload a Short above or let your agent create one.'));
       return;
     }
-    drafts.forEach((draft) => draftList.append(renderDraft(draft)));
+    const draftsById = new Map(drafts.map((draft) => [String(draft.id), draft]));
+    drafts.forEach((draft) => draftList.append(renderDraft(draft, draftsById)));
   } catch (error) {
     if (error.status === 401) return showLogin();
     draftList.replaceChildren(element('div', 'empty-state', error.message));

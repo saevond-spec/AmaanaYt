@@ -17,6 +17,7 @@ const { createChannelTagWorker } = require('./channel-tag-worker');
 const { createMonetizationWorker } = require('./monetization-worker');
 const { createSeoMarket, detectGame } = require('./seo-market');
 const { normalizeContext } = require('./seo-package');
+const { hasVerifiedGameplayHighlight } = require('./highlight-validation');
 const { buildHighlightTimeline, buildHighlightDescription } = require('./highlight-metadata');
 const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
   shouldPullForwardTwitchMetadataRetry, shouldRequeueUnexpectedTwitchDownloadHost,
@@ -1016,6 +1017,15 @@ app.post('/api/drafts/:id/approve', admin, async (req, res, next) => {
     const draft = await store.getDraft(req.params.id);
     if (!draft) return res.status(404).json({ error: 'Draft not found' });
     if (draft.status !== 'awaiting_owner_approval') return res.status(409).json({ error: 'Draft was already handled' });
+    if (draft.sourceType === 'twitch_highlight_batch' && !hasVerifiedGameplayHighlight(draft)) {
+      return res.status(409).json({ error: 'This legacy highlight is not a verified 15-minute gameplay edit and cannot be published. Keep it private and create a new verified edit.' });
+    }
+    if (draft.sourceType === 'twitch_highlight_short') {
+      const parent = await store.getDraft(draft.parentId);
+      if (!parent || !hasVerifiedGameplayHighlight(parent)) {
+        return res.status(409).json({ error: 'This Short does not belong to a verified 15-minute gameplay edit and cannot be published. Keep it private.' });
+      }
+    }
     const published = await youtube.publish(draft.youtubeVideoId, req.body.publishAt || null);
     const playlistAssignment = req.body.publishAt
       ? draft.playlistAssignment

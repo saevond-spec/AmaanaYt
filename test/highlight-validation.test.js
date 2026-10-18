@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { parseTwitchDuration, validateHighlightMoments, verifyCreatedClip,
-  verifyClipCreationRequest } = require('../src/highlight-validation');
+  verifyClipCreationRequest, hasVerifiedGameplayHighlight, VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS } = require('../src/highlight-validation');
 
 test('parses Twitch archive duration strings', () => {
   assert.equal(parseTwitchDuration('6h26m14s'), 23174);
@@ -86,4 +86,30 @@ test('checks that each created Twitch clip points back to the requested VOD mome
   });
   assert.throws(() => verifyCreatedClip({ startSeconds: 30, duration: 30 },
     { video_id: '123', vod_offset: 36, duration: 30 }, '123'), { status: 422 });
+});
+
+
+test('only an exact 15-minute render with complete visual gameplay checks qualifies for publishing', () => {
+  const valid = {
+    sourceType: 'twitch_highlight_batch',
+    targetHighlightDurationSeconds: VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS,
+    duration: 900,
+    mediaValidation: 'passed',
+    highlights: [{ duration: 60 }],
+    twitchClips: [{ visualGameplayVerification: {
+      verified: true, totalFrames: 5, activeGameplayFrames: 4, confidence: 0.8
+    } }]
+  };
+  assert.equal(hasVerifiedGameplayHighlight(valid), true);
+  assert.equal(hasVerifiedGameplayHighlight({ ...valid, duration: 119.6 }), false);
+  assert.equal(hasVerifiedGameplayHighlight({ ...valid, duration: undefined }), false);
+  assert.equal(hasVerifiedGameplayHighlight({ ...valid, targetHighlightDurationSeconds: 899 }), false);
+  assert.equal(hasVerifiedGameplayHighlight({ ...valid, mediaValidation: 'failed' }), false);
+  assert.equal(hasVerifiedGameplayHighlight({ ...valid, twitchClips: [] }), false);
+  assert.equal(hasVerifiedGameplayHighlight({ ...valid, twitchClips: [{ visualGameplayVerification: {
+    verified: true, totalFrames: 5, activeGameplayFrames: 3, confidence: 0.95
+  } }] }), false);
+  assert.equal(hasVerifiedGameplayHighlight({ ...valid, twitchClips: [{ visualGameplayVerification: {
+    verified: true, totalFrames: 5, activeGameplayFrames: 4, confidence: 0.79
+  } }] }), false);
 });

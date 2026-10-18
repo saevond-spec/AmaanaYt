@@ -64,6 +64,7 @@ function requireArchivedTwitchVod(vod, expectedVodId, broadcasterId) {
 }
 
 const MAX_HIGHLIGHT_MOMENTS = 20;
+const VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS = 900;
 
 function validateHighlightMoments(items, vodDurationSeconds) {
   if (!Array.isArray(items) || !items.length) {
@@ -120,6 +121,28 @@ function validateHighlightMoments(items, vodDurationSeconds) {
     selected.push(candidate.item);
   }
   return selected.slice(0, MAX_HIGHLIGHT_MOMENTS).sort((left, right) => left.startSeconds - right.startSeconds);
+}
+
+
+function hasVerifiedGameplayHighlight(draft) {
+  const duration = Number(draft && draft.duration);
+  if (!draft || draft.sourceType !== 'twitch_highlight_batch' ||
+      Number(draft.targetHighlightDurationSeconds) !== VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS ||
+      !Number.isFinite(duration) || Math.abs(duration - VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS) > 0.5 ||
+      draft.mediaValidation !== 'passed') return false;
+  const moments = draft.highlights;
+  const clips = draft.twitchClips;
+  if (!Array.isArray(moments) || !moments.length || !Array.isArray(clips) ||
+      clips.length !== moments.length) return false;
+  return clips.every((clip) => {
+    const result = clip && clip.visualGameplayVerification;
+    const total = Number(result && result.totalFrames);
+    const active = Number(result && result.activeGameplayFrames);
+    const confidence = Number(result && result.confidence);
+    return result?.verified === true && Number.isFinite(total) && total >= 5 &&
+      Number.isFinite(active) && active >= Math.ceil(total * 0.8) &&
+      Number.isFinite(confidence) && confidence >= 0.8;
+  });
 }
 
 function verifyCreatedClip(moment, clip, vodId, toleranceSeconds = 2) {
@@ -190,5 +213,6 @@ function verifyClipCreationRequest(moment, clip, vodId, toleranceSeconds = 2) {
 
 module.exports = {
   parseTwitchDuration, requireArchivedTwitchVod, validateHighlightMoments, MAX_HIGHLIGHT_MOMENTS,
-  verifyCreatedClip, verifyClipCreationRequest
+  verifyCreatedClip, verifyClipCreationRequest, hasVerifiedGameplayHighlight,
+  VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS
 };
