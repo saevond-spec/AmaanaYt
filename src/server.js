@@ -384,7 +384,9 @@ const processHighlightBatch = createHighlightProcessor({
   maxAutoAttempts: highlightMaxAutoAttempts,
   // Newly produced Twitch bundles stay private until the owner publishes from review.
   autoPublish: false,
-  logError: (id, error) => console.error('Highlight batch ' + id + ' failed:', error.message)
+  logError: (id, error) => console.error('Highlight batch ' + id + ' failed:', error.message),
+  logSuccess: (id, shorts) => console.info('Amaana Twitch highlight batch ' + id +
+    ' is ready for owner review with ' + shorts + ' Shorts')
 });const highlightBatchQueue = createBatchQueue(processHighlightBatch, {
   onError: (id, error) => console.error('Highlight batch queue failed for ' + id + ':', error.message)
 });
