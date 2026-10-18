@@ -91,8 +91,12 @@ function createTwitchHighlightDiscovery({
       }
       const drafts = knownDrafts || await store.listDrafts();
       const existing = drafts.find((draft) => draft && draft.sourceType === 'twitch_highlight_batch' &&
-        String(draft.vodId) === requestedId);
+        String(draft.vodId) === requestedId &&
+        Number(draft.targetHighlightDurationSeconds) === Number(targetDurationSeconds));
       if (existing) return { status: 'already_exists', vodId: requestedId, batch: existing };
+      const supersededBatch = drafts.find((draft) => draft && draft.sourceType === 'twitch_highlight_batch' &&
+        String(draft.vodId) === requestedId &&
+        Number(draft.targetHighlightDurationSeconds) !== Number(targetDurationSeconds));
       if (!visualGameplayVerificationAvailable()) {
         await markScanned(requestedId);
         return { status: 'visual_gameplay_screening_disabled', vodId: requestedId,
@@ -128,6 +132,7 @@ function createTwitchHighlightDiscovery({
         vodId: requestedId,
         vodDurationSeconds: selected.vodDurationSeconds,
         targetHighlightDurationSeconds: selected.targetDurationSeconds,
+        supersedesDraftId: supersededBatch?.id || null,
         streamTitle,
         title: clean(`${streamTitle || 'Twitch livestream'} | Best moments`, 100),
         highlights: selected.highlights,
@@ -178,7 +183,8 @@ function createTwitchHighlightDiscovery({
         const vodId = String(vod && vod.id || '');
         if (!/^\d+$/.test(vodId) || vod.type !== 'archive') continue;
         const existing = drafts.find((draft) => draft && draft.sourceType === 'twitch_highlight_batch' &&
-          String(draft.vodId) === vodId);
+          String(draft.vodId) === vodId &&
+          Number(draft.targetHighlightDurationSeconds) === Number(targetDurationSeconds));
         if (existing) {
           result.alreadyExists += 1;
           continue;
