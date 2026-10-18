@@ -2,9 +2,9 @@
 
 YouTube Shorts, TikTok inbox, and video SEO service for **@saevond**.
 
-AmaanaYt connects to YouTube and Twitch with OAuth. After SweatyClanker detects moments in an ended Twitch stream, Amaana checks candidate timestamps against the archive duration, creates the Twitch clips, then rechecks Twitch's returned VOD offsets and clip lengths. Twitch's VOD API supplies archive duration; its clip metadata exposes the created clip's VOD position for the recheck ([Get Videos](https://dev.twitch.tv/docs/api/videos), [API reference](https://dev.twitch.tv/docs/api/reference)). It assembles a landscape highlight and vertical Shorts, probes the rendered dimensions and durations, applies a thumbnail, and registers each output for SEO processing.
+AmaanaYt connects directly to YouTube and Twitch with OAuth. It scans its own recent archived Twitch VODs and Twitch community clips, so the highlight workflow has no SweatyClanker dependency. Amaana matches each clip to its VOD using Twitch's `video_id` and `vod_offset`, ranks usable non-overlapping moments by clip views, then creates channel-owned clips through Amaana's Twitch connection and verifies their returned offsets and durations. It assembles a landscape highlight and vertical Shorts, checks the rendered media, applies a thumbnail, and registers each output for SEO processing ([Get Videos](https://dev.twitch.tv/docs/api/videos), [Get Clips](https://dev.twitch.tv/docs/api/clips/)).
 
-New highlight batches upload as private first. With `HIGHLIGHT_AUTO_PUBLISH` enabled (the default), Amaana publishes the parent video and every Short only after all media checks, the thumbnail, SEO registration, and YouTube processing checks pass. A transient failure retries from saved IDs; a permanent error returns the batch to owner review. Existing private and unlisted videos are never promoted by this flow. Batches created before the automatic-publish patch remain private for owner review. SweatyClanker still supplies candidate timestamps; Amaana validates timestamp accuracy against Twitch metadata but does not itself watch or interpret VOD footage.
+New highlight batches upload privately and remain private for owner review until explicitly approved. A transient failure retries from saved IDs; a permanent error returns the batch to owner review. Existing private and unlisted videos are never promoted by this flow. Twitch may take minutes to attach a clip to a VOD; Amaana retries recent archives automatically. If a stream has no linked community clips with usable timestamps, Amaana waits and checks again instead of inventing moments.
 
 Generated Shorts can also be sent to the creator's TikTok inbox **one at a time after the creator previews and consents to each transfer**. The creator edits and completes each post in the TikTok app. TikTok delivery does not happen automatically at stream end.
 
@@ -186,15 +186,12 @@ Send an authenticated request to:
 
 using the `x-admin-key` header. Open the returned Google authorization URL, choose the Google account that owns **@saevond**, and approve the upload permission.
 
-## 7. Connect SweatyClanker
+## 7. Connect Twitch
 
-On the SweatyClanker Render service, add:
+Use `GET /auth/twitch` with the `x-admin-key` header, open the returned authorization URL, and approve Amaana's Twitch clip permissions. Amaana scans recent archived VODs every 15 minutes at first, then every two hours through the first week and daily after that, retrying while Twitch links clip metadata. No webhook secret or separate clipping service is needed.
 
-- `CLIP_WEBHOOK_URL=https://YOUR-RENDER-DOMAIN/api/twitch/vod-clips`
-- `CLIP_WEBHOOK_KEY`: the same secret stored as Amaana's `VOD_WEBHOOK_KEY`. The existing `AGENT_KEY` also works for older bot setups.
-- `HIGHLIGHT_DETECTION_ENABLED=true`
+To request an immediate scan, send an owner-authorized `POST /api/twitch/vod-clips` with JSON `{"vodId":"YOUR_TWITCH_VOD_ID"}`. Amaana uses its own Twitch connection to fetch the VOD and clip metadata; the endpoint no longer accepts external highlight timestamps. Check `GET /api/twitch/highlight-discovery/status` for the last scan result.
 
-Never paste the webhook key into chat or commit it to GitHub.
 
 ## 8. OpenClaw installation
 
