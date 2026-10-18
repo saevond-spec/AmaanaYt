@@ -252,6 +252,33 @@ test('new Twitch clip metadata is polled until the generated clip is linked to i
   assert.equal(h.counters.uploads.filter((upload) => upload.succeeded).length, 4);
 });
 
+test('discovered batches verify accepted VOD requests when Twitch link metadata remains blank', async (t) => {
+  const h = await harness(t, { metadataPendingAlways: true, autoPublish: false });
+  const batch = { ...h.batch, discoverySource: 'twitch_clips_api' };
+  h.drafts.set(batch.id, batch);
+
+  await h.processor(batch.id);
+
+  const ready = h.drafts.get(batch.id);
+  const shorts = [...h.drafts.values()].filter((draft) => draft.sourceType === 'twitch_highlight_short');
+  assert.equal(ready.status, 'awaiting_owner_approval');
+  assert.equal(ready.productionState, 'ready');
+  assert.equal(ready.twitchClips.length, 3);
+  assert.ok(ready.twitchClips.every((clip) =>
+    clip.requestedVodId === batch.vodId &&
+    clip.timestampVerification.verified === true &&
+    clip.timestampVerification.verificationMethod === 'twitch_vod_clip_request'));
+  assert.equal(shorts.length, 3);
+  assert.ok(shorts.every((draft) => draft.status === 'awaiting_owner_approval'));
+  assert.equal(h.counters.clipMetadataChecks, 3);
+  assert.equal(h.counters.clipCreates, 3);
+  assert.equal(h.counters.uploads.filter((upload) => upload.succeeded).length, 4);
+  assert.ok(h.counters.uploads.every((upload) => upload.privacyStatus === 'private'));
+  assert.equal(h.counters.publications.length, 0);
+  assert.equal(h.counters.visibilityMutations, 0);
+  assert.deepEqual(h.counters.readyLogs, [{ batchId: batch.id, shortCount: 3 }]);
+});
+
 test('bounded metadata polling schedules retry and reuses an existing Twitch clip', async (t) => {
   const h = await harness(t, { metadataPendingAlways: true, clipMetadataMaxAttempts: 2 });
   await h.processor(h.batch.id);
