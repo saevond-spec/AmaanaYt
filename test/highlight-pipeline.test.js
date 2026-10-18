@@ -6,8 +6,45 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
-  findHighlightBatchByVodId, isTransientError, shouldPullForwardTwitchMetadataRetry } = require('../src/highlight-pipeline');
+  findHighlightBatchByVodId, isTransientError, shouldPullForwardTwitchMetadataRetry,
+  shouldRequeueUnexpectedTwitchDownloadHost } = require('../src/highlight-pipeline');
 const { buildHighlightTimeline, buildHighlightDescription } = require('../src/highlight-metadata');
+const { downloadClip } = require('../src/twitch');
+
+test('one-time diagnostic retry is limited to failed Twitch download-host batches', () => {
+  const failed = {
+    sourceType: 'twitch_highlight_batch',
+    status: 'clip_failed',
+    error: 'Twitch returned an unexpected clip download host: media.example'
+  };
+  assert.equal(shouldRequeueUnexpectedTwitchDownloadHost(failed), true);
+  assert.equal(shouldRequeueUnexpectedTwitchDownloadHost({
+    ...failed, twitchDownloadHostDiagnosticRetryAt: new Date().toISOString()
+  }), false);
+  assert.equal(shouldRequeueUnexpectedTwitchDownloadHost({ ...failed, status: 'clip_partial' }), false);
+  assert.equal(shouldRequeueUnexpectedTwitchDownloadHost({
+    ...failed, sourceType: 'twitch_vod'
+  }), false);
+  assert.equal(shouldRequeueUnexpectedTwitchDownloadHost({
+    ...failed, error: 'Twitch clip media was unavailable'
+  }), false);
+});
+
+test('rejected Twitch download host reports only its hostname and remains retryable', async () => {
+  const originalFetch = global.fetch;
+  let requested = false;
+  global.fetch = async () => { requested = true; throw new Error('Unexpected fetch'); };
+  try {
+    await assert.rejects(
+      downloadClip('https://unknown.example/clip.mp4?token=private', '/tmp/unused-amaana-clip.mp4'),
+      (error) => error.message === 'Twitch returned an unexpected clip download host: unknown.example' &&
+        error.status === 502 && !error.message.includes('private')
+    );
+    assert.equal(requested, false);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
 
 const moments = [
   { startSeconds: 30, endSeconds: 60, duration: 30, title: 'Moment one', reason: 'A clutch play', score: 95 },

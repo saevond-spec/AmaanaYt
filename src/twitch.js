@@ -285,7 +285,11 @@ function validateDownloadUrl(value) {
     url.hostname === 'ttvnw.net' ||
     url.hostname.endsWith('.ttvnw.net')
   );
-  if (!allowed) throw new Error('Twitch returned an unexpected clip download host');
+  if (!allowed) {
+    const error = new Error('Twitch returned an unexpected clip download host: ' + url.hostname);
+    error.status = 502;
+    throw error;
+  }
   return url;
 }
 
