@@ -212,6 +212,11 @@ function createHighlightProcessor(dependencies) {
       batch = await store.getDraft(id);
       if (!batch || batch.sourceType !== 'twitch_highlight_batch' || batch.status === 'completed' ||
           batch.status === 'awaiting_owner_approval' && batch.productionState === 'ready') return;
+      if (batch?.sourceType === 'twitch_highlight_batch' && batch.discoverySource === 'twitch_clips_api' &&
+          !(Number.isFinite(Number(batch.targetHighlightDurationSeconds)) &&
+            Number(batch.targetHighlightDurationSeconds) > 0)) {
+        throw new Error('Legacy Twitch highlight has no measured target duration; keeping it private');
+      }
       if (!Array.isArray(batch.highlights) || !batch.highlights.length) {
         throw new Error('Highlight batch has no valid moments to produce');
       }
