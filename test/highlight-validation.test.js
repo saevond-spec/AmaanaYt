@@ -57,7 +57,13 @@ test('checks that each created Twitch clip points back to the requested VOD mome
   { startSeconds: 31, endSeconds: 61, duration: 30, verified: true });
 
   assert.throws(() => verifyCreatedClip({ startSeconds: 30, duration: 30 },
-    { video_id: '999', vod_offset: 30, duration: 30 }, '123'), { status: 425 });
+    { video_id: '999', vod_offset: 30, duration: 30 }, '123'), {
+    status: 409, code: 'TWITCH_CLIP_WRONG_VOD'
+  });
+  assert.throws(() => verifyCreatedClip({ startSeconds: 30, duration: 30 },
+    { video_id: '', vod_offset: null, duration: 30 }, '123'), {
+    status: 425, code: 'TWITCH_CLIP_METADATA_PENDING'
+  });
   assert.throws(() => verifyCreatedClip({ startSeconds: 30, duration: 30 },
     { video_id: '123', vod_offset: 36, duration: 30 }, '123'), { status: 422 });
 });
