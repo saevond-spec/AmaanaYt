@@ -26,7 +26,7 @@ async function harness(t, options = {}) {
   };
   const drafts = new Map([[batch.id, batch]]);
   const counters = {
-    clipCreates: 0, uploads: [], thumbnailSets: 0, thumbnailCreates: 0,
+    clipCreates: 0, clipMetadataChecks: 0, uploads: [], thumbnailSets: 0, thumbnailCreates: 0,
     thumbnailSource: null, thumbnailOptions: null,
     shortRenders: 0, seo: [], playlists: [], visibilityMutations: 0,
     publicationChecks: [], publications: [], errors: []
@@ -77,6 +77,13 @@ async function harness(t, options = {}) {
       return { landscape_download_url: 'fixture://' + clipId };
     },
     async getClip(clipId) {
+      counters.clipMetadataChecks += 1;
+      if (options.metadataPendingAlways ||
+          counters.clipMetadataChecks <= (Number(options.metadataPendingAttempts) || 0)) {
+        const error = new Error('Twitch clip metadata is not linked to the requested VOD yet');
+        error.status = 425;
+        throw error;
+      }
       const end = Number(String(clipId).slice('clip-'.length));
       return { id: clipId, video_id: '1234567890', vod_offset: end - 30 + (options.timestampDrift || 0), duration: 30 };
     },
@@ -197,6 +204,9 @@ async function harness(t, options = {}) {
     buildHighlightTimeline, buildHighlightDescription, cleanText,
     autoPublish: options.autoPublish !== false,
     maxAutoAttempts: options.maxAutoAttempts,
+    sleep: options.sleep || (async () => {}),
+    clipMetadataPollIntervalMs: options.clipMetadataPollIntervalMs || 5000,
+    clipMetadataMaxAttempts: options.clipMetadataMaxAttempts,
     idFactory: () => 'short-draft-' + (++idCounter),
     logError: (_id, error) => counters.errors.push(error.message)
   };
@@ -229,6 +239,30 @@ test('complete production validates media and timestamps, then publishes all out
   assert.equal(h.counters.publications.length, 4);
   assert.equal(h.counters.visibilityMutations, 4);
   assert.equal(h.counters.publicationChecks.length, 8);
+});
+
+test('new Twitch clip metadata is polled until the generated clip is linked to its VOD', async (t) => {
+  const h = await harness(t, { metadataPendingAttempts: 4, clipMetadataMaxAttempts: 5 });
+  await h.processor(h.batch.id);
+  assert.equal(h.drafts.get(h.batch.id).status, 'completed');
+  assert.equal(h.counters.clipMetadataChecks, 7);
+  assert.equal(h.counters.clipCreates, 3);
+  assert.equal(h.counters.uploads.filter((upload) => upload.succeeded).length, 4);
+});
+
+test('bounded metadata polling schedules retry and reuses an existing Twitch clip', async (t) => {
+  const h = await harness(t, { metadataPendingAlways: true, clipMetadataMaxAttempts: 2 });
+  await h.processor(h.batch.id);
+  assert.equal(h.drafts.get(h.batch.id).status, 'clip_retry_wait');
+  assert.equal(h.drafts.get(h.batch.id).twitchClips.length, 1);
+  assert.equal(h.counters.clipCreates, 1);
+  assert.equal(h.counters.uploads.filter((upload) => upload.succeeded).length, 0);
+
+  await h.processor(h.batch.id);
+  assert.equal(h.drafts.get(h.batch.id).status, 'clip_retry_wait');
+  assert.equal(h.drafts.get(h.batch.id).twitchClips.length, 1);
+  assert.equal(h.counters.clipCreates, 1);
+  assert.equal(h.counters.clipMetadataChecks, 4);
 });
 
 test('repeated moment labels produce unique titles and clip-specific descriptions within a batch', async (t) => {
