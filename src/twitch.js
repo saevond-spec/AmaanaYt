@@ -6,6 +6,8 @@ const { requireArchivedTwitchVod } = require('./highlight-validation');
 
 const OAUTH_BASE = 'https://id.twitch.tv/oauth2';
 const HELIX_BASE = 'https://api.twitch.tv/helix';
+// Observed in Twitch's authenticated Get Clips Download response. Keep this host exact.
+const TRUSTED_CLIP_DOWNLOAD_HOSTS = new Set(['d1ndex63qxojbr.cloudfront.net']);
 const SCOPES = ['channel:manage:clips'];
 let lastValidatedAt = 0;
 
@@ -283,7 +285,8 @@ function validateDownloadUrl(value) {
     url.hostname === 'twitchcdn.net' ||
     url.hostname.endsWith('.twitchcdn.net') ||
     url.hostname === 'ttvnw.net' ||
-    url.hostname.endsWith('.ttvnw.net')
+    url.hostname.endsWith('.ttvnw.net') ||
+    TRUSTED_CLIP_DOWNLOAD_HOSTS.has(url.hostname)
   );
   if (!allowed) {
     const error = new Error('Twitch returned an unexpected clip download host: ' + url.hostname);
