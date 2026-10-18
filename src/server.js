@@ -70,7 +70,15 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false }));
 let sessionMiddleware;
 app.use((req, res, next) => sessionMiddleware(req, res, next));
-app.use(express.static(publicDir, { index: false, maxAge: '1h' }));
+app.use(express.static(publicDir, {
+  index: false,
+  maxAge: '1h',
+  setHeaders(res, filePath) {
+    if (['.js', '.css'].includes(path.extname(filePath))) {
+      res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+    }
+  }
+}));
 
 function keysMatch(supplied, expected) {
   const a = Buffer.from(String(supplied || ''));
