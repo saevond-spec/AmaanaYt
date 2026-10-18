@@ -7,7 +7,8 @@ const os = require('node:os');
 const path = require('node:path');
 const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
   findHighlightBatchByVodId, isTransientError, shouldPullForwardTwitchMetadataRetry,
-  shouldRequeueUnexpectedTwitchDownloadHost, shouldPullForwardAllowedTwitchDownloadHost } = require('../src/highlight-pipeline');
+  shouldRequeueUnexpectedTwitchDownloadHost, shouldPullForwardAllowedTwitchDownloadHost,
+  shouldRequeueTwitchSegmentDurationFailure } = require('../src/highlight-pipeline');
 const { buildHighlightTimeline, buildHighlightDescription } = require('../src/highlight-metadata');
 const { downloadClip } = require('../src/twitch');
 
@@ -85,6 +86,27 @@ test('pulls the corrected Twitch host forward for one Amaana batch only once', (
     ...failed, error: 'Twitch returned an unexpected clip download host: other.example'
   }), false);
   assert.equal(shouldPullForwardAllowedTwitchDownloadHost({
+    ...failed, sourceType: 'twitch_vod'
+  }), false);
+});
+
+test('duration recovery is limited to one failed Amaana highlight batch', () => {
+  const failed = {
+    sourceType: 'twitch_highlight_batch',
+    status: 'clip_failed',
+    error: 'Every highlight segment needs a measured duration between 5 and 60 seconds: segment 1 measured 60.020 seconds'
+  };
+  assert.equal(shouldRequeueTwitchSegmentDurationFailure(failed), true);
+  assert.equal(shouldRequeueTwitchSegmentDurationFailure({
+    ...failed, status: 'clip_retry_wait'
+  }), true);
+  assert.equal(shouldRequeueTwitchSegmentDurationFailure({
+    ...failed, twitchSegmentDurationRetryAt: new Date().toISOString()
+  }), false);
+  assert.equal(shouldRequeueTwitchSegmentDurationFailure({
+    ...failed, error: 'FFmpeg failed'
+  }), false);
+  assert.equal(shouldRequeueTwitchSegmentDurationFailure({
     ...failed, sourceType: 'twitch_vod'
   }), false);
 });
