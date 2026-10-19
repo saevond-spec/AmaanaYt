@@ -157,6 +157,15 @@ const saveTwitchHighlightDiscoveryState = (state) =>
 const getTwitchHighlightDiscoveryState = () =>
   getEncryptedState('twitch_highlight_discovery');
 
+async function getJapaneseLocalizationAutopilotState() {
+  return await getEncryptedState('japanese_localization_autopilot') || {
+    enabled: true, status: 'queued', videoPageToken: null, quotaDate: null,
+    updatesToday: 0, totalUpdated: 0
+  };
+}
+const saveJapaneseLocalizationAutopilotState = (state) =>
+  saveEncryptedState('japanese_localization_autopilot', state);
+
 async function listDrafts() {
   await init();
   const result = await pool.query('SELECT payload FROM amaana_drafts ORDER BY created_at DESC');
@@ -802,6 +811,8 @@ module.exports = {
   getTikTokTokens,
   saveTwitchHighlightDiscoveryState,
   getTwitchHighlightDiscoveryState,
+  getJapaneseLocalizationAutopilotState,
+  saveJapaneseLocalizationAutopilotState,
   listDrafts,
   getDraft,
   addDraft,
