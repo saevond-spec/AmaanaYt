@@ -272,6 +272,14 @@ function isPlaceholderTestStreamTitle(value) {
   return /^(?:test|testing|stream test|test stream|live test|test live|vod test|test vod|clip test|test clip)$/.test(normalized);
 }
 
+function isNonGameplayTestDraft(draft) {
+  if (!draft) return false;
+  if (isPlaceholderTestStreamTitle(draft.streamTitle)) return true;
+  const normalizedClip = String(draft.twitchClipTitle || draft.title || '').normalize('NFKC')
+    .toLowerCase().replace(/[\p{P}\p{S}]+/gu, ' ').replace(/\s+/g, ' ').trim();
+  return /^(?:wzbot|wizebot) clip test\b/.test(normalizedClip);
+}
+
 function renderDraft(draft, draftsById = new Map()) {
   const isHighlight = draft.sourceType === 'twitch_highlight_batch';
   const isHighlightShort = draft.sourceType === 'twitch_highlight_short';
@@ -574,9 +582,9 @@ function renderDraft(draft, draftsById = new Map()) {
     });
     card.append(retry);
   }
-  if (isHighlight && !verifiedHighlight && isPlaceholderTestStreamTitle(draft.streamTitle)) {
+  if ((isHighlight || draft.sourceType === 'twitch_vod') && isNonGameplayTestDraft(draft)) {
     card.append(element('p', 'draft-error',
-      'This source is a placeholder test stream, so Amaana will not treat its clips as gameplay highlights.'));
+      'This Twitch source is marked as a test, so Amaana will exclude it and related clips from review.'));
     const exclude = element('button', 'ghost', 'Remove test VOD and related clips from review');
     exclude.type = 'button';
     exclude.addEventListener('click', async () => {
