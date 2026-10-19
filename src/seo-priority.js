@@ -10,6 +10,13 @@ function generatedTime(candidate) {
   return Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
 }
 
+function isFreshUpload(candidate, now) {
+  const publishedAt = Date.parse(candidate?.publishedAt || '');
+  const windowMs = 14 * 24 * 60 * 60 * 1000;
+  return Number.isFinite(publishedAt) && publishedAt <= now + 24 * 60 * 60 * 1000 &&
+    publishedAt >= now - windowMs;
+}
+
 function viewCount(candidate) {
   const value = String(candidate?.viewCount ?? '');
   if (!/^\d+$/.test(value)) return null;
@@ -26,13 +33,19 @@ function compareViewCounts(left, right) {
 }
 
 /**
- * Keep publish-ready packages first, then put known low-view public videos ahead.
- * Unknown counts follow known counts; evidence gaps and age break ties.
+ * Fresh uploads go first. Older candidates retain the ready/low-view order,
+ * with unknown counts last and evidence gaps, age, and ID breaking ties.
  */
-function prioritizeSeoAutoCandidates(candidates, limit = 20) {
+function prioritizeSeoAutoCandidates(candidates, limit = 20, now = Date.now()) {
   const safeLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(50, limit)) : 20;
   return [...(Array.isArray(candidates) ? candidates : [])]
     .sort((left, right) => {
+      const freshOrder = Number(isFreshUpload(right, now)) - Number(isFreshUpload(left, now));
+      if (freshOrder) return freshOrder;
+      if (isFreshUpload(left, now) && isFreshUpload(right, now)) {
+        const publishedOrder = Date.parse(right.publishedAt) - Date.parse(left.publishedAt);
+        if (publishedOrder) return publishedOrder;
+      }
       const statusOrder = (left.status === 'ready' ? 0 : 1) - (right.status === 'ready' ? 0 : 1);
       if (statusOrder) return statusOrder;
       const viewOrder = compareViewCounts(left, right);
@@ -47,4 +60,4 @@ function prioritizeSeoAutoCandidates(candidates, limit = 20) {
     .map(({ videoId }) => ({ videoId }));
 }
 
-module.exports = { prioritizeSeoAutoCandidates };
+module.exports = { prioritizeSeoAutoCandidates, isFreshUpload };

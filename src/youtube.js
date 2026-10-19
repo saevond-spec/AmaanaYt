@@ -441,7 +441,7 @@ async function recentGameVideos(game, { now = Date.now() } = {}) {
   const response = await youtube.search.list({
     part: ['snippet'], type: 'video', q: `${game} gameplay`, order: 'viewCount',
     publishedAfter: new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString(),
-    maxResults: 10
+    maxResults: 50
   });
   const ids = (response.data.items || []).map((item) => item.id?.videoId).filter(Boolean);
   if (!ids.length) return [];

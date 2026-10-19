@@ -34,7 +34,21 @@ test('view counts sort numerically and the result limit applies after priority s
   assert.deepEqual(prioritizeSeoAutoCandidates([], 20), []);
 });
 
-test('database queues use numeric low-view order and keep SEO work public-only', async (t) => {
+test('fresh uploads outrank the archive so new packages do not wait behind old low-view items', () => {
+  const now = Date.parse('2026-10-19T12:00:00Z');
+  const candidates = [
+    { videoId: 'archive-ready-zero', status: 'ready', viewCount: '0',
+      publishedAt: '2022-01-01T00:00:00Z' },
+    { videoId: 'fresh-private-review', status: 'needs_review', viewCount: null,
+      publishedAt: '2026-10-19T09:00:00Z' },
+    { videoId: 'fresh-public-ready', status: 'ready', viewCount: '12',
+      publishedAt: '2026-10-18T09:00:00Z' }
+  ];
+  assert.deepEqual(prioritizeSeoAutoCandidates(candidates, 2, now)
+    .map(({ videoId }) => videoId), ['fresh-private-review', 'fresh-public-ready']);
+});
+
+test('database queues put fresh uploads first and keep automatic publishing public-only', async (t) => {
   const originalQuery = store.pool.query;
   const calls = [];
   store.pool.query = async (sql, params) => {
@@ -57,9 +71,13 @@ test('database queues use numeric low-view order and keep SEO work public-only',
     query.includes('SELECT p.video_id AS "videoId", p.context'));
 
   assert.ok(dashboard?.includes("p.source->>'privacyStatus' = 'public' THEN 0 ELSE 1 END"));
+  assert.ok(dashboard?.includes("INTERVAL '14 days'"));
   assert.ok(dashboard?.includes("THEN (p.source->>'viewCount')::numeric"));
-  assert.ok(generation?.includes("source->>'privacyStatus' = 'public'"));
+  assert.ok(generation?.includes("source->>'privacyStatus' IN ('public', 'private', 'unlisted')"));
+  assert.ok(generation?.includes("source->>'privacyStatus' = 'public' OR"));
+  assert.ok(generation?.includes("INTERVAL '14 days'"));
   assert.ok(generation?.includes("THEN (source->>'viewCount')::numeric"));
   assert.ok(autoPublish?.includes('AS "viewCount"'));
+  assert.ok(autoPublish?.includes('AS "publishedAt"'));
   assert.ok(analysis?.includes("THEN (p.source->>'viewCount')::numeric"));
 });

@@ -143,6 +143,8 @@ test('live market evidence reaches the prompt as observations without replacing 
     apiKey: 'unit-test-key', model: 'test-model',
     marketEvidence: { game: 'NARAKA: BLADEPOINT', query: 'NARAKA: BLADEPOINT gameplay',
       observedAt: '2026-10-02T12:00:00Z', windowDays: 7,
+      metrics: { sampleCount: 10, medianViewsPerDay: 200, p90ViewsPerDay: 450, confidence: 0.42 },
+      terms: [{ phrase: 'solo parry', score: 0.8, sampleCount: 3 }],
       samples: [{ id: 'sample-1', title: 'NARAKA parry', publishedAt: '2026-10-01T00:00:00Z',
         viewCount: 400, estimatedViewsPerDay: 400 }] },
     fetchImpl: async (_url, options) => {
@@ -150,7 +152,9 @@ test('live market evidence reaches the prompt as observations without replacing 
       return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) };
     }
   });
-  assert.match(prompt, /Market examples are recent public videos, not search demand estimates/);
+  assert.match(prompt, /Market evidence is a sample of recent public YouTube search results/);
+  assert.match(prompt, /medianViewsPerDay/);
+  assert.match(prompt, /solo parry/);
   assert.match(prompt, /NARAKA parry/);
   assert.match(prompt, /estimatedViewsPerDay/);
   assert.match(prompt, /Opening, first round, final fight/);

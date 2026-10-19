@@ -702,6 +702,20 @@ function renderSeoVideo(item) {
   if (item.package) {
     const pkg = item.package;
     details.append(seoHeading('Primary keyword', pkg.primaryKeyword));
+    if (pkg.evidence?.marketObservedAt) {
+      const metrics = pkg.evidence.marketMetrics || {};
+      const phrases = (pkg.evidence.marketTerms || [])
+        .map((entry) => `${entry.phrase} (score ${entry.score}, ${entry.sampleCount} examples)`)
+        .join('\n');
+      details.append(seoHeading('Current market research', [
+        `Observed ${new Date(pkg.evidence.marketObservedAt).toLocaleString()}`,
+        `Search-result sample: ${pkg.evidence.marketSampleSize || 0}`,
+        `Smoothed median / 90th percentile views per day: ${metrics.medianViewsPerDay ?? 'n/a'} / ${metrics.p90ViewsPerDay ?? 'n/a'}`,
+        `Median absolute deviation: ${metrics.medianAbsoluteDeviation ?? 'n/a'} · confidence heuristic: ${metrics.confidence ?? 'n/a'}`,
+        phrases ? `Recurring market phrases (evidence only):\n${phrases}` : '',
+        'Search-result sample only; this is not search volume or a view forecast.'
+      ].filter(Boolean).join('\n')));
+    }
     for (const group of ['search', 'curiosity', 'hybrid']) {
       details.append(seoHeading(`${group[0].toUpperCase() + group.slice(1)} titles`,
         (pkg.titles?.[group] || []).map((title, index) => `${index + 1}. ${title}`).join('\n')));
@@ -838,6 +852,8 @@ async function loadSeo() {
         : 'Configure SEO_AI_API_KEY and SEO_AI_MODEL to create packages',
       status.videoAnalysisEnabled ? 'Video analysis on for public videos' : 'Video analysis off',
       status.providerError ? `${status.providerError}; next retry after ${new Date(status.providerBlockedUntil).toLocaleString()}` : null,
+      status.youtubeDataApiBlockedUntil
+        ? `YouTube Data API work paused until ${new Date(status.youtubeDataApiBlockedUntil).toLocaleString()}` : null,
       status.autoPublishEnabled ? 'Automatic public video SEO on' : 'Automatic publishing disabled',
       seoEnabled ? 'SEO jobs active' : 'SEO jobs paused'
     ].filter(Boolean).join(' · ');

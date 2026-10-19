@@ -3,6 +3,7 @@ const { analyzeVideo } = require('./video-analysis');
 const { createSeoPublisher } = require('./seo-publish');
 const { isYouTubeAuthorizationError } = require('./channel-tags');
 const { runYoutubeSearchAutopilot } = require('./youtube-search-autopilot');
+const { isYouTubeQuotaError, youtubeQuotaRetryAt } = require('./youtube-quota');
 
 function createSeoWorker({ store, youtube, env = process.env, logger = console, sleep,
   generate = generatePackage, analyze = analyzeVideo, market = null, playlistAuto = null }) {
@@ -22,6 +23,9 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   const configuredCatalogPages = Number(env.SEO_CATALOG_PAGES_PER_RUN);
   const catalogPagesPerRun = Number.isSafeInteger(configuredCatalogPages) && configuredCatalogPages >= 1
     ? Math.min(20, configuredCatalogPages) : 20;
+  const configuredScanMinutes = Number(env.SEO_SCAN_INTERVAL_MINUTES);
+  const recentScanIntervalMs = (Number.isSafeInteger(configuredScanMinutes) && configuredScanMinutes >= 5
+    ? Math.min(60, configuredScanMinutes) : 15) * 60 * 1000;
   const circuitBreaker = createModelCircuitBreaker();
   const analysisCircuitBreaker = createModelCircuitBreaker();
   const analysisEnabled = env.ENABLE_VIDEO_ANALYSIS === 'true';
@@ -93,7 +97,21 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     return page;
   }
 
-  async function assignCatalogPlaylists() {
+  async function markYouTubeQuotaBlocked(state, errorOrRetryAt) {
+    const retryAt = typeof errorOrRetryAt === 'number'
+      ? errorOrRetryAt : youtubeQuotaRetryAt(errorOrRetryAt);
+    if (!Number.isFinite(retryAt) || retryAt <= Date.now()) return false;
+    state.youtubeDataApiBlockedUntil = new Date(retryAt).toISOString();
+    state.youtubeDataApiBlockReason = typeof errorOrRetryAt === 'number' ||
+      isYouTubeQuotaError(errorOrRetryAt)
+      ? 'YouTube Data API quota or rate limit reached' : 'YouTube Data API temporarily unavailable';
+    await store.saveSeoSyncState(state);
+    logger.warn?.('YouTube Data API work paused until ' + state.youtubeDataApiBlockedUntil +
+      ': ' + state.youtubeDataApiBlockReason);
+    return true;
+  }
+
+  async function assignCatalogPlaylists(state) {
     const assignBacklog = playlistAuto?.assignCatalogBacklog || playlistAuto?.assignPublicBacklog;
     if (!playlistAuto?.enabled || typeof assignBacklog !== 'function') return;
     try {
@@ -101,6 +119,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       if (result.attempted) logger.info?.('Automatic playlists: attempted ' + result.attempted +
         ' channel videos; assigned ' + result.assigned);
     } catch (error) {
+      await markYouTubeQuotaBlocked(state, error);
       logger.warn?.('Automatic playlist scan failed:', error.message);
     }
   }
@@ -140,6 +159,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
         (audit.complete && audit.catalogScanComplete));
       return audit;
     } catch (error) {
+      await markYouTubeQuotaBlocked(state, error);
       logger.warn?.('Automatic playlist coverage audit failed:', error.message);
       return null;
     }
@@ -149,6 +169,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     if (running || Date.now() < youtubeAuthBlockedUntil) return;
     running = true;
     lastRun = Date.now();
+    let stateForQuota = null;
     try {
       if (!await youtube.isConnected()) {
         if (lastDiagnostic !== 'youtube_disconnected') {
@@ -157,8 +178,17 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
         }
         return;
       }
+      stateForQuota = await store.getSeoSyncState();
+      if (Date.parse(stateForQuota.youtubeDataApiBlockedUntil) > Date.now()) {
+        if (lastDiagnostic !== 'youtube_data_quota_blocked') {
+          logger.info?.('SEO worker paused until the YouTube Data API quota window resets at ' +
+            stateForQuota.youtubeDataApiBlockedUntil);
+          lastDiagnostic = 'youtube_data_quota_blocked';
+        }
+        return;
+      }
       const channel = await youtube.ownedChannel();
-      let state = await store.getSeoSyncState();
+      let state = stateForQuota;
       if (state.channelId && state.channelId !== channel.id) {
         throw new Error('YouTube channel changed; SEO backfill is paused to avoid mixing channels');
       }
@@ -186,7 +216,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
         logger.info?.(`SEO worker configuration: ${diagnostic}`);
         lastDiagnostic = diagnostic;
       }
-      if (!state.recentAt || Date.now() - Date.parse(state.recentAt) >= 60 * 60 * 1000) {
+      if (!state.recentAt || Date.now() - Date.parse(state.recentAt) >= recentScanIntervalMs) {
         const recent = await catalogPage(channel, null);
         state.recentAt = new Date().toISOString();
         if (!state.completed && !state.cursor) {
@@ -245,16 +275,27 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           logger.warn?.('YouTube search analytics autopilot failed:', error.message);
         }
       }
-      await assignCatalogPlaylists();
+      await assignCatalogPlaylists(state);
+      if (Date.parse(state.youtubeDataApiBlockedUntil) > Date.now()) return;
       const coverageAudit = await auditPlaylistCoverage(state);
-      if (coverageAudit?.requeuedCount) await assignCatalogPlaylists();
+      if (Date.parse(state.youtubeDataApiBlockedUntil) > Date.now()) return;
+      if (coverageAudit?.requeuedCount) await assignCatalogPlaylists(state);
       if (publisher && state.enabled !== false) {
         if (metadataPeerCatalogComplete) {
-          await publisher.publishPending(20, metadataPeers).catch((error) => logger.warn?.('SEO auto publish scan failed:', error.message));
+          const publication = await publisher.publishPending(20, metadataPeers)
+            .catch((error) => { logger.warn?.('SEO auto publish scan failed:', error.message); return null; });
+          if (publication?.quotaBlocked) {
+            await markYouTubeQuotaBlocked(state, publication.quotaRetryAt);
+            return;
+          }
         } else {
           logger.info?.('SEO automatic video edits remain paused until the public metadata catalog is complete');
         }
-        await publisher.updateChannel().catch((error) => logger.warn?.('SEO channel update failed:', error.message));
+        await publisher.updateChannel().catch(async (error) => {
+          await markYouTubeQuotaBlocked(state, error);
+          logger.warn?.('SEO channel update failed:', error.message);
+        });
+        if (Date.parse(state.youtubeDataApiBlockedUntil) > Date.now()) return;
       }
       const gemini = (env.SEO_AI_BASE_URL || '').startsWith('https://generativelanguage.googleapis.com/');
       if (state.enabled !== false && analysisEnabled && env.SEO_AI_API_KEY && env.SEO_AI_MODEL &&
@@ -306,8 +347,12 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           const finalNativeModel = fallbackModel
             ? env.SEO_AI_FINAL_MODEL || 'gemini-3.8-flash' : null;
           const analysis = await videoAnalysis(job, state);
-          const marketEvidence = await market?.research(job.source)
+          const marketEvidence = Date.parse(state.youtubeDataApiBlockedUntil) > Date.now()
+            ? null : await market?.research(job.source)
             .catch((error) => { logger.warn?.(`SEO market lookup ${job.videoId} failed: ${error.message}`); }) || null;
+          if (Number(market?.getQuotaBlockedUntil?.() || 0) > Date.now()) {
+            await markYouTubeQuotaBlocked(state, market.getQuotaBlockedUntil());
+          }
           const comparisonPeers = metadataPeers.filter((peer) => String(peer.videoId) !== String(job.videoId));
           let generated = await generate(job.source, context, {
             apiKey: env.SEO_AI_API_KEY, model: env.SEO_AI_MODEL,
@@ -337,12 +382,18 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           }
           await store.finishSeoVideo(job.videoId, job.claimToken, generated, null);
           logger.info?.(`SEO package ${job.videoId} generated: ${generated.missingEvidence.length ? 'needs_review' : 'ready'}`);
-          if (publisher) {
+          if (publisher && !(Date.parse(state.youtubeDataApiBlockedUntil) > Date.now())) {
             const outcome = await publisher.publishVideo(job.videoId, metadataPeers)
               .catch((error) => { logger.warn?.(`SEO auto publish ${job.videoId} failed:`, error.message); });
+            if (outcome?.quotaBlocked) {
+              await markYouTubeQuotaBlocked(state, outcome.quotaRetryAt);
+            }
             if (outcome?.state === 'applied' && !channelUpdatedAfterPublish) {
               await publisher.updateChannel()
-                .catch((error) => logger.warn?.('SEO channel update failed:', error.message));
+                .catch(async (error) => {
+                  await markYouTubeQuotaBlocked(state, error);
+                  logger.warn?.('SEO channel update failed:', error.message);
+                });
               channelUpdatedAfterPublish = true;
             }
           }
@@ -379,8 +430,19 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           }
         }
       }
-      if (publisher) await publisher.updateChannel()
-        .catch((error) => logger.warn?.('SEO channel update failed:', error.message));
+      if (publisher && !(Date.parse(state.youtubeDataApiBlockedUntil) > Date.now()) &&
+          !channelUpdatedAfterPublish) {
+        await publisher.updateChannel().catch(async (error) => {
+          await markYouTubeQuotaBlocked(state, error);
+          logger.warn?.('SEO channel update failed:', error.message);
+        });
+      }
+    } catch (error) {
+      if (stateForQuota && isYouTubeQuotaError(error)) {
+        await markYouTubeQuotaBlocked(stateForQuota, error);
+      } else {
+        throw error;
+      }
     } finally {
       running = false;
       if (rerunRequested) {
@@ -392,7 +454,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
 
   function schedule(force = false) {
     if (running) { if (force) rerunRequested = true; return; }
-    const minimumInterval = catalogScanIncomplete ? 5 * 60 * 1000 : 60 * 60 * 1000;
+    const minimumInterval = catalogScanIncomplete ? 5 * 60 * 1000 : recentScanIntervalMs;
     if (scheduled || !force && Date.now() - lastRun < minimumInterval) return;
     scheduled = true;
     setImmediate(async () => {
@@ -441,7 +503,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     ]);
     return { ...state, ...counts, dailyLimit, analysisBatchSize, videoAnalysisEnabled: analysisEnabled,
       providerConfigured: Boolean(env.SEO_AI_API_KEY && env.SEO_AI_MODEL), autoPublishEnabled,
-      youtubeAnalyticsAuthorized, catalogPagesPerRun, running };
+      youtubeAnalyticsAuthorized, catalogPagesPerRun, recentScanIntervalMs, running };
   }
 
   async function setBackfill(enabled, restart = false) {
