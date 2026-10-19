@@ -212,7 +212,7 @@ function createHighlightProcessor(dependencies) {
       batch = await store.getDraft(id);
       if (!batch || batch.sourceType !== 'twitch_highlight_batch' || batch.status === 'completed' ||
           batch.status === 'awaiting_owner_approval' && batch.productionState === 'ready') return;
-      if (batch?.sourceType === 'twitch_highlight_batch' && batch.discoverySource === 'twitch_clips_api' &&
+      if (['twitch_clips_api', 'twitch_live_capture'].includes(batch.discoverySource) &&
           !(Number.isFinite(Number(batch.targetHighlightDurationSeconds)) &&
             Number(batch.targetHighlightDurationSeconds) > 0)) {
         throw new Error('Legacy Twitch highlight has no measured target duration; keeping it private');
@@ -270,7 +270,8 @@ function createHighlightProcessor(dependencies) {
           };
           twitchClips[index] = clip;
           await store.updateDraft(id, { twitchClips });
-        } else if (batch.discoverySource === 'twitch_clips_api' && clip.requestProofVersion !== 1) {
+        } else if (['twitch_clips_api', 'twitch_live_capture'].includes(batch.discoverySource) &&
+            clip.requestProofVersion !== 1) {
           // Older Amaana batches stored the clip ID but not the request fields. This pipeline
           // created those IDs from this VOD and moment, so persist the original request shape.
           clip = {
@@ -289,7 +290,7 @@ function createHighlightProcessor(dependencies) {
         });
         if (typeof twitch.getClip !== 'function') throw new Error('Twitch clip timestamp verification is unavailable');
         let verifiedTimestamp;
-        if (batch.discoverySource === 'twitch_clips_api') {
+        if (['twitch_clips_api', 'twitch_live_capture'].includes(batch.discoverySource)) {
           try {
             verifiedTimestamp = verifyCreatedClip(moment, await twitch.getClip(clip.id), batch.vodId);
           } catch (error) {
@@ -737,3 +738,4 @@ module.exports = {
   shouldRequeueTwitchSegmentDurationFailure,
   waitForVerifiedClipMetadata, requireCompletedYouTubeOutput
 };
+
