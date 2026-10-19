@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#090b11">
   <title>Amaana | Saevond Video Manager</title>
   <link rel="stylesheet" href="/styles.css">
-  <script src="/app.js?v=gameplay-guard-20261018" defer></script>
+  <script src="/app.js?v=japanese-channel-20261019" defer></script>
 </head>
 <body>
   <main class="shell">
@@ -188,6 +188,16 @@
         <div class="seo-field">
           <h3>Channel SEO</h3>
           <div id="seoChannel" class="seo-copy">Checking the connected channel…</div>
+          <form id="channelJaForm" class="channel-localization-form" lang="ja" hidden>
+            <h4>Japanese channel localization</h4>
+            <p class="muted">Review the Japanese title and description before saving. This adds a Japanese version while keeping the original English profile and other translations.</p>
+            <label for="channelJaTitle">Japanese channel title</label>
+            <input id="channelJaTitle" name="title" maxlength="100" required>
+            <label for="channelJaDescription">Japanese channel description</label>
+            <textarea id="channelJaDescription" name="description" rows="6" maxlength="1000" required></textarea>
+            <p id="channelJaStatus" class="draft-meta" role="status"></p>
+            <button class="primary" type="submit">Save Japanese localization</button>
+          </form>
         </div>
         <div class="draft-actions">
           <button id="seoToggle" class="ghost" type="button">Pause SEO jobs</button>
