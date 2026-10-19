@@ -8,6 +8,7 @@ const {
   isRetryableCommunityClipError,
   reuseOrVerifyGameplay
 } = require('../src/twitch-community-clips');
+const { isNonGameplayTestClip } = require('../src/gameplay-intake-guard');
 
 const STREAM_START = Date.parse('2026-10-19T10:00:00.000Z');
 const NOW = STREAM_START + 60 * 60 * 1000;
@@ -22,7 +23,7 @@ function clip(id, overrides = {}) {
     vod_offset: null,
     duration: 30,
     view_count: 0,
-    title: 'Test',
+    title: 'Ranked gameplay moment',
     created_at: new Date(NOW - 2 * 60 * 1000).toISOString(),
     ...overrides
   };
@@ -38,9 +39,9 @@ const context = (overrides = {}) => ({
   ...overrides
 });
 
-test('imports WizeBot-style live clips before Twitch links them to the archive VOD', () => {
+test('imports a real WizeBot-style live clip before Twitch links it to the archive VOD', () => {
   const [draft] = buildCommunityClipDrafts([
-    clip('LuckyTallPhoneRitzMitz-FmiVE7c8LdMuQo6o', { title: 'Test' })
+    clip('LuckyTallPhoneRitzMitz-FmiVE7c8LdMuQo6o', { title: 'Ranked clutch' })
   ], context());
 
   assert.ok(draft);
@@ -52,10 +53,33 @@ test('imports WizeBot-style live clips before Twitch links them to the archive V
   assert.equal(draft.vodId, null);
   assert.equal(draft.twitchUrl,
     'https://clips.twitch.tv/LuckyTallPhoneRitzMitz-FmiVE7c8LdMuQo6o');
-  assert.match(draft.title, /NARAKA: BLADEPOINT gameplay highlight/);
+  assert.match(draft.title, /Ranked clutch/);
   assert.match(draft.title, /#Shorts$/);
   assert.equal(draft.status, 'clip_queued');
   assert.equal(draft.duration, 30);
+});
+
+test('rejects explicit test stream titles, placeholder clip titles, and WzBot test commands', () => {
+  assert.equal(isNonGameplayTestClip({ streamTitle: 'Test', clipTitle: 'Ranked clutch' }), true);
+  assert.equal(isNonGameplayTestClip({ streamTitle: 'Ranked session', clipTitle: 'Test' }), true);
+  assert.equal(isNonGameplayTestClip({
+    streamTitle: 'Ranked session',
+    clipTitle: 'WzBot CLIP | Test (by saevond) | Test | at 18:39'
+  }), true);
+  assert.equal(isNonGameplayTestClip({
+    streamTitle: 'Testing a new loadout in ranked',
+    clipTitle: 'Ranked clutch'
+  }), false);
+
+  assert.deepEqual(buildCommunityClipDrafts([
+    clip('test-vod-clip', { title: 'Ranked clutch' })
+  ], context({ streamTitle: 'Test' })), []);
+  assert.deepEqual(buildCommunityClipDrafts([
+    clip('placeholder-title', { title: 'Test' })
+  ], context()), []);
+  assert.deepEqual(buildCommunityClipDrafts([
+    clip('wzbot-test-title', { title: 'WzBot CLIP | Test (by saevond)' })
+  ], context()), []);
 });
 
 test('rejects clips from other channels, non-game categories, malformed ids and invalid durations', () => {
