@@ -82,8 +82,8 @@ function hasVerifiedGameplayHighlight(draft) {
     const active = Number(result && result.activeGameplayFrames);
     const confidence = Number(result && result.confidence);
     return result?.verified === true && Number.isFinite(total) && total >= 5 &&
-      Number.isFinite(active) && active >= Math.ceil(total * 0.8) &&
-      Number.isFinite(confidence) && confidence >= 0.8;
+      Number.isFinite(active) && active >= Math.ceil(total * 0.8) && active <= total &&
+      Number.isFinite(confidence) && confidence >= 0.8 && confidence <= 1;
   });
 }
 
@@ -151,8 +151,8 @@ function hasVerifiedLiveGameplayClip(draft) {
   const confidence = Number(result && result.confidence);
   return draft?.discoverySource === 'twitch_live_capture' && draft.liveCapture === true &&
     result?.verified === true && Number.isFinite(total) && total >= 5 &&
-    Number.isFinite(active) && active >= Math.ceil(total * 0.8) &&
-    Number.isFinite(confidence) && confidence >= 0.8;
+    Number.isFinite(active) && active >= Math.ceil(total * 0.8) && active <= total &&
+    Number.isFinite(confidence) && confidence >= 0.8 && confidence <= 1;
 }
 
 function verifyCreatedClip(moment, clip, vodId, toleranceSeconds = 2) {

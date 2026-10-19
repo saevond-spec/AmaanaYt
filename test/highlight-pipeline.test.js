@@ -213,6 +213,7 @@ async function harness(t, options = {}) {
     },
     async verifyGameplay() {
       counters.gameplayVerifications += 1;
+      if (options.gameplayVerificationResult) return options.gameplayVerificationResult;
       if (options.failGameplayVerification) {
         return { verified: false, activeGameplayFrames: 1, totalFrames: 5, confidence: 0.35, model: 'test' };
       }
@@ -650,6 +651,18 @@ test('invalid measured render durations fail closed before YouTube upload', asyn
   await h.processor(h.batch.id);
   assert.equal(h.drafts.get(h.batch.id).status, 'clip_failed');
   assert.equal(h.counters.uploads.length, 0);
+  assert.equal(h.counters.visibilityMutations, 0);
+});
+
+test('impossible gameplay confidence or frame counts fail closed before YouTube upload', async (t) => {
+  const h = await harness(t, { gameplayVerificationResult: {
+    verified: true, activeGameplayFrames: 6, totalFrames: 5, confidence: 1.01, model: 'fixture'
+  } });
+  await h.processor(h.batch.id);
+  assert.equal(h.drafts.get(h.batch.id).status, 'clip_failed');
+  assert.match(h.drafts.get(h.batch.id).error, /Gameplay visual gate rejected/);
+  assert.equal(h.counters.uploads.filter((upload) => upload.succeeded).length, 0);
+  assert.equal(h.counters.publications.length, 0);
   assert.equal(h.counters.visibilityMutations, 0);
 });
 

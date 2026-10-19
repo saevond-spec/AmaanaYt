@@ -112,6 +112,12 @@ test('only an exact 15-minute render with complete visual gameplay checks qualif
   assert.equal(hasVerifiedGameplayHighlight({ ...valid, twitchClips: [{ visualGameplayVerification: {
     verified: true, totalFrames: 5, activeGameplayFrames: 4, confidence: 0.79
   } }] }), false);
+  assert.equal(hasVerifiedGameplayHighlight({ ...valid, twitchClips: [{ visualGameplayVerification: {
+    verified: true, totalFrames: 5, activeGameplayFrames: 6, confidence: 0.95
+  } }] }), false);
+  assert.equal(hasVerifiedGameplayHighlight({ ...valid, twitchClips: [{ visualGameplayVerification: {
+    verified: true, totalFrames: 5, activeGameplayFrames: 5, confidence: 1.01
+  } }] }), false);
 });
 
 test('live-captured Shorts require strong gameplay verification evidence', () => {
@@ -130,6 +136,12 @@ test('live-captured Shorts require strong gameplay verification evidence', () =>
   } }), false);
   assert.equal(hasVerifiedLiveGameplayClip({ ...valid, visualGameplayVerification: {
     ...valid.visualGameplayVerification, confidence: 0.79
+  } }), false);
+  assert.equal(hasVerifiedLiveGameplayClip({ ...valid, visualGameplayVerification: {
+    ...valid.visualGameplayVerification, activeGameplayFrames: 6
+  } }), false);
+  assert.equal(hasVerifiedLiveGameplayClip({ ...valid, visualGameplayVerification: {
+    ...valid.visualGameplayVerification, confidence: 1.01
   } }), false);
 });
 

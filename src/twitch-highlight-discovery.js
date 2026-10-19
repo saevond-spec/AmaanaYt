@@ -141,9 +141,13 @@ function createTwitchHighlightDiscovery({
         await markScanned(requestedId);
         return {
           status: selected.rejectionReason === 'no_game_category_clips'
-            ? 'no_gameplay_candidates' : 'insufficient_gameplay_duration',
+            ? 'no_gameplay_candidates'
+            : selected.rejectionReason === 'insufficient_quality_gameplay_duration'
+              ? 'insufficient_quality_gameplay' : 'insufficient_gameplay_duration',
           vodId: requestedId, clipsChecked: Array.isArray(clips) ? clips.length : 0,
           availableGameplaySeconds: selected.availableGameplaySeconds || 0,
+          unfilteredGameplaySeconds: selected.unfilteredGameplaySeconds || 0,
+          qualityCalibration: selected.qualityCalibration || null,
           targetDurationSeconds: selected.targetDurationSeconds
         };
       }
@@ -170,6 +174,7 @@ function createTwitchHighlightDiscovery({
         highlights: selected.highlights,
         shortCandidateIndexes,
         sourceClipEvidence: selected.evidence,
+        qualityCalibration: selected.qualityCalibration,
         candidateClipCount: Array.isArray(clips) ? clips.length : 0,
         pipelineVersion: 3,
         thumbnailStatus: 'pending',
@@ -492,8 +497,8 @@ function createTwitchHighlightDiscovery({
         const activeFrames = Number(gameplay && gameplay.activeGameplayFrames);
         const confidence = Number(gameplay && gameplay.confidence);
         if (gameplay?.verified !== true || !Number.isFinite(totalFrames) || totalFrames < 5 ||
-            !Number.isFinite(activeFrames) || activeFrames < Math.ceil(totalFrames * 0.8) ||
-            !Number.isFinite(confidence) || confidence < 0.8) {
+            !Number.isFinite(activeFrames) || activeFrames < Math.ceil(totalFrames * 0.8) || activeFrames > totalFrames ||
+            !Number.isFinite(confidence) || confidence < 0.8 || confidence > 1) {
           result.gameplayRejected += 1;
           session.lastCaptureError = 'Gameplay screening did not meet the verified-frame threshold';
           result.status = 'gameplay_rejected';
@@ -617,7 +622,7 @@ function createTwitchHighlightDiscovery({
     running = true;
     const result = {
       vodsSeen: 0, scanned: 0, queued: 0, noCandidates: 0, insufficientGameplayDuration: 0,
-      visualScreeningUnavailable: 0,
+      qualityFloorRejected: 0, visualScreeningUnavailable: 0,
       alreadyExists: 0, throttled: 0, errors: 0
     };
     lastRunError = null;
@@ -654,6 +659,7 @@ function createTwitchHighlightDiscovery({
           if (scan.status === 'queued') result.queued += 1;
           else if (scan.status === 'no_gameplay_candidates') result.noCandidates += 1;
           else if (scan.status === 'insufficient_gameplay_duration') result.insufficientGameplayDuration += 1;
+          else if (scan.status === 'insufficient_quality_gameplay') result.qualityFloorRejected += 1;
           else if (scan.status === 'visual_gameplay_screening_disabled') result.visualScreeningUnavailable += 1;
           else if (scan.status === 'already_exists') result.alreadyExists += 1;
         } catch (error) {

@@ -5,6 +5,7 @@ const { createYouTubePlaylistClient } = require('./youtube-playlists');
 const { ensureCreatorTag, buildCreatorTagUpdate } = require('./channel-tags');
 const { mergeYouTubeOAuthTokens } = require('./youtube-oauth');
 const { summarizeYoutubeSearchPerformance, hasYoutubeAnalyticsReadScopes, youtubeSearchReportQueries } = require('./youtube-search-performance');
+const { youtubeVideoQualityQueries } = require('./youtube-video-quality');
 const { normalizeJapaneseChannelLocalization } = require('./channel-localization');
 const { normalizeJapaneseVideoLocalization } = require('./japanese-translation');
 
@@ -418,6 +419,22 @@ async function googleSearchTraffic(videoId, startDate, endDate) {
   return summarizeYoutubeSearchPerformance(traffic.data?.rows || [], details.data?.rows || []);
 }
 
+async function videoQualityReports(videoId, startDate, endDate) {
+  const queries = youtubeVideoQualityQueries(videoId, startDate, endDate);
+  if (!await hasAnalyticsReadAccess()) {
+    const error = new Error('Reconnect YouTube to grant read-only Analytics access');
+    error.status = 403;
+    throw error;
+  }
+  const auth = await oauthClient();
+  const analytics = google.youtubeAnalytics({ version: 'v2', auth });
+  const [summary, retention] = await Promise.all(queries.map((query) => analytics.reports.query(query)));
+  return {
+    summaryRows: summary.data?.rows || [],
+    retentionRows: retention.data?.rows || []
+  };
+}
+
 async function listOwnedBroadcasts() {
   const youtube = await service();
   const broadcasts = [];
@@ -522,7 +539,7 @@ async function enablePublicBroadcastAds(broadcast) {
 
 module.exports = { isConnected, canApprove, hasAnalyticsReadAccess, authorizationUrl, exchangeCode, uploadPrivate, setThumbnail, publish,
   getVideo, updateVideoSeo, updateJapaneseVideoLocalization, updateVideoTags, channelSeo, updateChannelSeo, updateJapaneseChannelLocalization, assertTargetChannel,
-  getVideoViews, googleSearchTraffic, ownedChannel, uploadsPage, videoMetadata, ownedVideosPage, ownedVideosCursorPage,
+  getVideoViews, googleSearchTraffic, videoQualityReports, ownedChannel, uploadsPage, videoMetadata, ownedVideosPage, ownedVideosCursorPage,
   listOwnedBroadcasts, enablePublicBroadcastAds, recentGameVideos,
   listOwnedPlaylists: playlistClient.listOwnedPlaylists,
   listPlaylistVideoIds: playlistClient.listPlaylistVideoIds,

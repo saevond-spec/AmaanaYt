@@ -320,9 +320,12 @@ function createHighlightProcessor(dependencies) {
           throw new Error('Visual gameplay verification is unavailable; no video was uploaded');
         }
         const visualGameplay = await video.verifyGameplay(source);
-        if (!visualGameplay?.verified) {
-          const active = Number(visualGameplay?.activeGameplayFrames) || 0;
-          const total = Number(visualGameplay?.totalFrames) || 0;
+        const active = Number(visualGameplay?.activeGameplayFrames);
+        const total = Number(visualGameplay?.totalFrames);
+        const confidence = Number(visualGameplay?.confidence);
+        if (visualGameplay?.verified !== true || !Number.isFinite(total) || total < 5 ||
+            !Number.isFinite(active) || active < Math.ceil(total * 0.8) || active > total ||
+            !Number.isFinite(confidence) || confidence < 0.8 || confidence > 1) {
           throw new Error(`Gameplay visual gate rejected Twitch clip ${clip.id}: only ${active} of ${total} sampled frames clearly showed active gameplay`);
         }
         twitchClips[index] = {
