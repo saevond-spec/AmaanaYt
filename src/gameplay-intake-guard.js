@@ -23,8 +23,12 @@ function isNonGameplayTestClip({ clipTitle, streamTitle } = {}) {
 
 function collectTestVodDrafts(drafts, rootDraftId) {
   if (!Array.isArray(drafts)) return [];
-  const root = drafts.find((draft) => String(draft && draft.id || '') === String(rootDraftId || ''));
-  if (!root || root.sourceType !== 'twitch_highlight_batch' ||
+  const selected = drafts.find((draft) => String(draft && draft.id || '') === String(rootDraftId || ''));
+  if (!selected) return [];
+  const root = selected.sourceType === 'twitch_highlight_short'
+    ? drafts.find((draft) => String(draft && draft.id || '') === String(selected.parentId || ''))
+    : selected;
+  if (!root || !['twitch_highlight_batch', 'twitch_vod'].includes(root.sourceType) ||
       !String(root.vodId || '').trim() || !isPlaceholderTestTitle(root.streamTitle)) return [];
 
   const vodId = String(root.vodId);

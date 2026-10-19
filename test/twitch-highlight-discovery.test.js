@@ -201,6 +201,16 @@ test('enforces the requested segment cap and backfills lower ranked non-overlapp
   assert.equal(selectCommunityHighlights(clips, vod, { limit: 100, targetDurationSeconds: 100 }).highlights.length, 5);
 });
 
+test('keeps WzBot test titles out of 15-minute gameplay selection', () => {
+  const clips = [
+    makeClip('ranked-gameplay', 100, 20, 1, { title: 'Ranked clutch' }),
+    makeClip('wzbot-test', 200, 20, 100000, { title: 'WzBot CLIP | Test (by saevond)' })
+  ];
+  const result = selectCommunityHighlights(clips, makeVod(), { targetDurationSeconds: 20 });
+  assert.deepEqual(result.evidence.map((item) => item.clipId), ['ranked-gameplay']);
+  assert.deepEqual(result.highlights.map((item) => item.startSeconds), [100]);
+});
+
 test('returns no candidate when Twitch has not linked community clips to the VOD yet', () => {
   const result = selectCommunityHighlights([
     makeClip('live-clip', 200, 20, 500, { video_id: '', vod_offset: null })
