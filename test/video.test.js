@@ -5,7 +5,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const ffmpegPath = require('ffmpeg-static');
-const { createThumbnail, createThumbnailFromImage, thumbnailDimensions, thumbnailHeadline, thumbnailOverlay } = require('../src/video');
+const { convertLandscapeToShort, createThumbnail, createThumbnailFromImage, inspectMedia, thumbnailDimensions, thumbnailHeadline, thumbnailOverlay } = require('../src/video');
 
 function jpegDimensions(buffer) {
   let offset = 2;
@@ -76,4 +76,22 @@ test('thumbnail frame extraction uses the original video source resolution', asy
   await createThumbnail(source, output, { timestampSeconds: 0, headline: 'ORIGINAL SOURCE' });
   const image = await fs.readFile(output);
   assert.deepEqual(jpegDimensions(image), { width: 1920, height: 1080 });
+});
+
+
+test('landscape Twitch clips convert to a valid 9:16 Short', async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'amaana-short-conversion-test-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const source = path.join(directory, 'source.mp4');
+  const output = path.join(directory, 'short.mp4');
+  const fixture = spawnSync(ffmpegPath, ['-y', '-f', 'lavfi', '-i',
+    'testsrc2=size=640x360:rate=24', '-t', '1', '-an', '-c:v', 'libx264',
+    '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', source], { encoding: 'utf8' });
+  assert.equal(fixture.status, 0, fixture.stderr || fixture.error?.message);
+  await convertLandscapeToShort(source, output);
+  const media = await inspectMedia(output);
+  assert.equal(media.width, 720);
+  assert.equal(media.height, 1280);
+  assert.ok(Math.abs(media.durationSeconds - 1) <= 0.3);
+  assert.ok((await fs.stat(output)).size > 0);
 });
