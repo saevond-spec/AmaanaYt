@@ -33,6 +33,22 @@ const channelJaForm = document.querySelector('#channelJaForm');
 const channelJaTitle = document.querySelector('#channelJaTitle');
 const channelJaDescription = document.querySelector('#channelJaDescription');
 const channelJaStatus = document.querySelector('#channelJaStatus');
+const jaVideoLocalizationPanel = document.querySelector('#jaVideoLocalizationPanel');
+const jaVideoList = document.querySelector('#jaVideoList');
+const jaVideoStatus = document.querySelector('#jaVideoStatus');
+const jaVideoPage = document.querySelector('#jaVideoPage');
+const jaVideoDraftButton = document.querySelector('#jaVideoDraft');
+const jaVideoSaveButton = document.querySelector('#jaVideoSave');
+const jaVideoPrevious = document.querySelector('#jaVideoPrevious');
+const jaVideoNext = document.querySelector('#jaVideoNext');
+const jaPlaylistLocalizationPanel = document.querySelector('#jaPlaylistLocalizationPanel');
+const jaPlaylistList = document.querySelector('#jaPlaylistList');
+const jaPlaylistStatus = document.querySelector('#jaPlaylistStatus');
+const jaPlaylistPage = document.querySelector('#jaPlaylistPage');
+const jaPlaylistDraftButton = document.querySelector('#jaPlaylistDraft');
+const jaPlaylistSaveButton = document.querySelector('#jaPlaylistSave');
+const jaPlaylistPrevious = document.querySelector('#jaPlaylistPrevious');
+const jaPlaylistNext = document.querySelector('#jaPlaylistNext');
 const googleSearchImportForm = document.querySelector('#googleSearchImportForm');
 const googleSearchImportStatus = document.querySelector('#googleSearchImportStatus');
 let seoOffset = 0;
@@ -41,6 +57,18 @@ let draftPoll = null;
 let tiktokConnected = false;
 let youtubePlaylists = [];
 let channelLocalizationSnapshot = null;
+const japaneseLocalizationPageSize = 10;
+let japaneseVideoOffset = 0;
+let japaneseVideoPageData = null;
+let japaneseVideoItems = [];
+let japaneseVideoDrafts = new Map();
+let japaneseVideoEditors = new Map();
+let japaneseVideoLoaded = false;
+let japanesePlaylistOffset = 0;
+let japanesePlaylistItems = [];
+let japanesePlaylistDrafts = new Map();
+let japanesePlaylistEditors = new Map();
+let japanesePlaylistLoaded = false;
 
 function showNotice(message, isError = false) {
   notice.textContent = message;
@@ -873,6 +901,282 @@ async function loadChannelSeo() {
   }
 }
 
+function localizationHasChanges(editors) {
+  return [...editors.values()].some((editor) => editor.title.value.trim() &&
+    (editor.title.value.trim() !== editor.initialTitle ||
+      editor.description.value !== editor.initialDescription));
+}
+
+function updateLocalizationSaveState(kind) {
+  const editors = kind === 'video' ? japaneseVideoEditors : japanesePlaylistEditors;
+  const button = kind === 'video' ? jaVideoSaveButton : jaPlaylistSaveButton;
+  button.disabled = !localizationHasChanges(editors);
+}
+
+function renderJapaneseLocalizationEntry(kind, item) {
+  const isVideo = kind === 'video';
+  const editors = isVideo ? japaneseVideoEditors : japanesePlaylistEditors;
+  const drafts = isVideo ? japaneseVideoDrafts : japanesePlaylistDrafts;
+  const existing = isVideo ? item.localization : item.localizations?.ja;
+  const draft = drafts.get(item.id);
+  const displayed = existing || draft || { title: '', description: '' };
+  const entry = element('details', 'japanese-localization-entry');
+  const summary = element('summary', '', (item.title || '(Untitled)') +
+    (isVideo ? ' · ' + (item.privacyStatus || 'unknown') : ' · playlist'));
+  const status = element('p', 'draft-meta', existing ? 'Japanese localization saved' :
+    draft ? 'Japanese draft ready; review before saving' : 'Japanese translation not drafted');
+  const sourceLabel = element('p', 'fine-print', 'Original: ' + (item.title || '(empty title)'));
+  const sourceDescription = element('p', 'japanese-localization-source',
+    item.description || '(No original description)');
+  const titleLabel = element('label', '', 'Japanese title');
+  const title = document.createElement('input');
+  title.type = 'text';
+  title.maxLength = isVideo ? 100 : 150;
+  title.required = true;
+  title.lang = 'ja';
+  title.value = displayed.title || '';
+  titleLabel.append(title);
+  const descriptionLabel = element('label', '', 'Japanese description');
+  const description = document.createElement('textarea');
+  description.rows = 5;
+  description.maxLength = 5000;
+  description.lang = 'ja';
+  description.value = displayed.description || '';
+  descriptionLabel.append(description);
+  entry.append(summary, status, sourceLabel, sourceDescription, titleLabel, descriptionLabel);
+  const editor = {
+    item, existing: existing || null, title, description, status,
+    initialTitle: existing?.title || '', initialDescription: existing?.description || ''
+  };
+  editors.set(item.id, editor);
+  title.addEventListener('input', () => updateLocalizationSaveState(kind));
+  description.addEventListener('input', () => updateLocalizationSaveState(kind));
+  return entry;
+}
+
+function renderJapaneseVideoPage() {
+  japaneseVideoEditors.clear();
+  jaVideoList.replaceChildren(...japaneseVideoItems.map((item) =>
+    renderJapaneseLocalizationEntry('video', item)));
+  const total = japaneseVideoPageData?.total || 0;
+  const start = total ? japaneseVideoOffset + 1 : 0;
+  jaVideoPage.textContent = start + '–' + Math.min(total, japaneseVideoOffset + japaneseVideoItems.length) +
+    ' of ' + total + ' videos';
+  jaVideoPrevious.disabled = japaneseVideoOffset <= 0;
+  jaVideoNext.disabled = japaneseVideoOffset + japaneseLocalizationPageSize >= total;
+  jaVideoDraftButton.disabled = !japaneseVideoItems.some((item) => !item.localization?.title);
+  updateLocalizationSaveState('video');
+}
+
+async function loadJapaneseVideoLocalizations() {
+  jaVideoStatus.textContent = 'Loading the channel video catalog…';
+  try {
+    japaneseVideoPageData = await api('/api/seo/localization/ja/videos?offset=' + japaneseVideoOffset);
+    japaneseVideoItems = japaneseVideoPageData.items || [];
+    japaneseVideoDrafts.clear();
+    japaneseVideoLoaded = true;
+    renderJapaneseVideoPage();
+    jaVideoStatus.textContent = japaneseVideoPageData.catalogComplete
+      ? 'Catalog complete. Drafts stay on this page until you save reviewed translations.'
+      : 'The channel catalog is still scanning.';
+  } catch (error) {
+    japaneseVideoLoaded = false;
+    japaneseVideoItems = [];
+    japaneseVideoEditors.clear();
+    jaVideoList.replaceChildren(element('div', 'empty-state', error.message));
+    jaVideoStatus.textContent = error.message;
+    if (error.status === 401) showLogin();
+  }
+}
+
+function hasUnsavedVideoLocalizations() {
+  return localizationHasChanges(japaneseVideoEditors);
+}
+
+async function changeJapaneseVideoPage(offset) {
+  if (hasUnsavedVideoLocalizations() &&
+      !window.confirm('Discard unsaved Japanese video translations and move to another page?')) return;
+  japaneseVideoOffset = Math.max(0, offset);
+  await loadJapaneseVideoLocalizations();
+}
+
+async function draftJapaneseVideoPage() {
+  const missing = japaneseVideoItems.filter((item) => !item.localization?.title).map((item) => item.id);
+  if (!missing.length) {
+    jaVideoStatus.textContent = 'Every video on this page already has a Japanese localization.';
+    return;
+  }
+  jaVideoDraftButton.disabled = true;
+  jaVideoSaveButton.disabled = true;
+  try {
+    for (let index = 0; index < missing.length; index += 5) {
+      const batch = missing.slice(index, index + 5);
+      jaVideoStatus.textContent = 'Drafting Japanese translations for ' +
+        Math.min(index + batch.length, missing.length) + ' of ' + missing.length + ' videos…';
+      const result = await api('/api/seo/localization/ja/videos/draft', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ videoIds: batch })
+      });
+      for (const draft of result.drafts || []) {
+        japaneseVideoDrafts.set(draft.id, draft);
+        const editor = japaneseVideoEditors.get(draft.id);
+        if (editor) {
+          if (!editor.title.value.trim()) editor.title.value = draft.title;
+          if (!editor.description.value) editor.description.value = draft.description;
+          editor.status.textContent = 'Japanese draft ready; review before saving';
+        }
+      }
+      updateLocalizationSaveState('video');
+    }
+    jaVideoStatus.textContent = 'Japanese drafts are ready. Review the page and save when satisfied.';
+  } catch (error) {
+    jaVideoStatus.textContent = error.message;
+    if (error.status === 401) showLogin();
+  } finally {
+    jaVideoDraftButton.disabled = !japaneseVideoItems.some((item) => !item.localization?.title);
+  }
+}
+
+async function saveJapaneseLocalizationPage(kind) {
+  const isVideo = kind === 'video';
+  const editors = isVideo ? japaneseVideoEditors : japanesePlaylistEditors;
+  const button = isVideo ? jaVideoSaveButton : jaPlaylistSaveButton;
+  const status = isVideo ? jaVideoStatus : jaPlaylistStatus;
+  const pending = [...editors.values()].filter((editor) => editor.title.value.trim() &&
+    (editor.title.value.trim() !== editor.initialTitle ||
+      editor.description.value !== editor.initialDescription));
+  if (!pending.length) {
+    status.textContent = 'There are no changed Japanese translations to save.';
+    return;
+  }
+  button.disabled = true;
+  let saved = 0;
+  try {
+    for (let index = 0; index < pending.length; index += 1) {
+      const editor = pending[index];
+      const item = editor.item;
+      if (!item.etag) throw new Error('Refresh the page to get a current YouTube version before saving.');
+      status.textContent = 'Saving Japanese localization ' + (index + 1) + ' of ' + pending.length + '…';
+      const url = isVideo
+        ? '/api/seo/videos/' + encodeURIComponent(item.id) + '/localization/ja'
+        : '/api/youtube/playlists/' + encodeURIComponent(item.id) + '/localization/ja';
+      await api(url, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ etag: item.etag, title: editor.title.value.trim(),
+          description: editor.description.value })
+      });
+      saved += 1;
+    }
+    if (isVideo) {
+      japaneseVideoDrafts.clear();
+      await loadJapaneseVideoLocalizations();
+    } else {
+      japanesePlaylistDrafts.clear();
+      await loadJapanesePlaylists();
+    }
+    showNotice('Saved Japanese localizations for ' + saved + (isVideo ? ' videos.' : ' playlists.'));
+  } catch (error) {
+    status.textContent = saved
+      ? 'Saved ' + saved + ' item(s) before stopping: ' + error.message
+      : error.message;
+    if (error.status === 401) showLogin();
+    if (isVideo) await loadJapaneseVideoLocalizations();
+    else await loadJapanesePlaylists();
+  } finally {
+    updateLocalizationSaveState(kind);
+  }
+}
+
+function renderJapanesePlaylistPage() {
+  japanesePlaylistEditors.clear();
+  const page = japanesePlaylistItems.slice(japanesePlaylistOffset,
+    japanesePlaylistOffset + japaneseLocalizationPageSize);
+  jaPlaylistList.replaceChildren(...page.map((item) =>
+    renderJapaneseLocalizationEntry('playlist', item)));
+  const total = japanesePlaylistItems.length;
+  const start = total ? japanesePlaylistOffset + 1 : 0;
+  jaPlaylistPage.textContent = start + '–' + Math.min(total, japanesePlaylistOffset + page.length) +
+    ' of ' + total + ' playlists';
+  jaPlaylistPrevious.disabled = japanesePlaylistOffset <= 0;
+  jaPlaylistNext.disabled = japanesePlaylistOffset + japaneseLocalizationPageSize >= total;
+  jaPlaylistDraftButton.disabled = !page.some((item) => !item.localizations?.ja?.title);
+  updateLocalizationSaveState('playlist');
+}
+
+async function loadJapanesePlaylists() {
+  jaPlaylistStatus.textContent = 'Loading owned playlists…';
+  try {
+    japanesePlaylistItems = await api('/api/youtube/playlists');
+    japanesePlaylistDrafts.clear();
+    japanesePlaylistOffset = Math.min(japanesePlaylistOffset,
+      Math.max(0, japanesePlaylistItems.length - japaneseLocalizationPageSize));
+    japanesePlaylistLoaded = true;
+    renderJapanesePlaylistPage();
+    jaPlaylistStatus.textContent = japanesePlaylistItems.length
+      ? 'Review the Japanese titles and descriptions, then save this page.'
+      : 'No owned playlists were found.';
+  } catch (error) {
+    japanesePlaylistLoaded = false;
+    japanesePlaylistItems = [];
+    japanesePlaylistEditors.clear();
+    jaPlaylistList.replaceChildren(element('div', 'empty-state', error.message));
+    jaPlaylistStatus.textContent = error.message;
+    if (error.status === 401) showLogin();
+  }
+}
+
+function hasUnsavedPlaylistLocalizations() {
+  return localizationHasChanges(japanesePlaylistEditors);
+}
+
+async function changeJapanesePlaylistPage(offset) {
+  if (hasUnsavedPlaylistLocalizations() &&
+      !window.confirm('Discard unsaved Japanese playlist translations and move to another page?')) return;
+  japanesePlaylistOffset = Math.max(0, offset);
+  renderJapanesePlaylistPage();
+}
+
+async function draftJapanesePlaylistPage() {
+  const page = japanesePlaylistItems.slice(japanesePlaylistOffset,
+    japanesePlaylistOffset + japaneseLocalizationPageSize);
+  const missing = page.filter((item) => !item.localizations?.ja?.title).map((item) => item.id);
+  if (!missing.length) {
+    jaPlaylistStatus.textContent = 'Every playlist on this page already has a Japanese localization.';
+    return;
+  }
+  jaPlaylistDraftButton.disabled = true;
+  jaPlaylistSaveButton.disabled = true;
+  try {
+    for (let index = 0; index < missing.length; index += 5) {
+      const batch = missing.slice(index, index + 5);
+      jaPlaylistStatus.textContent = 'Drafting Japanese translations for ' +
+        Math.min(index + batch.length, missing.length) + ' of ' + missing.length + ' playlists…';
+      const result = await api('/api/seo/localization/ja/playlists/draft', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ playlistIds: batch })
+      });
+      for (const draft of result.drafts || []) {
+        japanesePlaylistDrafts.set(draft.id, draft);
+        const editor = japanesePlaylistEditors.get(draft.id);
+        if (editor) {
+          if (!editor.title.value.trim()) editor.title.value = draft.title;
+          if (!editor.description.value) editor.description.value = draft.description;
+          editor.status.textContent = 'Japanese draft ready; review before saving';
+        }
+      }
+      updateLocalizationSaveState('playlist');
+    }
+    jaPlaylistStatus.textContent = 'Japanese playlist drafts are ready. Review and save when satisfied.';
+  } catch (error) {
+    jaPlaylistStatus.textContent = error.message;
+    if (error.status === 401) showLogin();
+  } finally {
+    const pageNow = japanesePlaylistItems.slice(japanesePlaylistOffset,
+      japanesePlaylistOffset + japaneseLocalizationPageSize);
+    jaPlaylistDraftButton.disabled = !pageNow.some((item) => !item.localizations?.ja?.title);
+  }
+}
+
 async function loadPlaylists() {
   try {
     const result = await api('/api/youtube/playlists');
@@ -1038,6 +1342,32 @@ channelJaForm.addEventListener('submit', async (event) => {
     submitButton.disabled = false;
   }
 });
+document.querySelector('#jaVideoRefresh').addEventListener('click', async () => {
+  if (hasUnsavedVideoLocalizations() &&
+      !window.confirm('Discard unsaved Japanese video translations and reload this page?')) return;
+  await loadJapaneseVideoLocalizations();
+});
+jaVideoDraftButton.addEventListener('click', draftJapaneseVideoPage);
+jaVideoSaveButton.addEventListener('click', () => saveJapaneseLocalizationPage('video'));
+jaVideoPrevious.addEventListener('click', () => changeJapaneseVideoPage(japaneseVideoOffset - japaneseLocalizationPageSize));
+jaVideoNext.addEventListener('click', () => changeJapaneseVideoPage(japaneseVideoOffset + japaneseLocalizationPageSize));
+jaVideoLocalizationPanel.addEventListener('toggle', () => {
+  if (jaVideoLocalizationPanel.open && !japaneseVideoLoaded) loadJapaneseVideoLocalizations();
+});
+
+document.querySelector('#jaPlaylistRefresh').addEventListener('click', async () => {
+  if (hasUnsavedPlaylistLocalizations() &&
+      !window.confirm('Discard unsaved Japanese playlist translations and reload the list?')) return;
+  await loadJapanesePlaylists();
+});
+jaPlaylistDraftButton.addEventListener('click', draftJapanesePlaylistPage);
+jaPlaylistSaveButton.addEventListener('click', () => saveJapaneseLocalizationPage('playlist'));
+jaPlaylistPrevious.addEventListener('click', () => changeJapanesePlaylistPage(japanesePlaylistOffset - japaneseLocalizationPageSize));
+jaPlaylistNext.addEventListener('click', () => changeJapanesePlaylistPage(japanesePlaylistOffset + japaneseLocalizationPageSize));
+jaPlaylistLocalizationPanel.addEventListener('toggle', () => {
+  if (jaPlaylistLocalizationPanel.open && !japanesePlaylistLoaded) loadJapanesePlaylists();
+});
+
 seoToggle.addEventListener('click', async () => {
   seoToggle.disabled = true;
   try {
