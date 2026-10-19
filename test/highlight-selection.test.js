@@ -34,6 +34,22 @@ test('selects a non-overlapping set that fills the target duration exactly', () 
   assert.equal(result.highlights.at(-1).duration >= 15, true);
 });
 
+test('rejects placeholder test streams and test-marked clips before quality ranking', () => {
+  const testStream = select15MinuteGameplayHighlights([
+    clip('real-looking-clip', 0, 60, 1000)
+  ], { ...vod, title: 'Test' }, { targetDurationSeconds: 30 });
+
+  assert.equal(testStream.rejectionReason, 'test_stream');
+  assert.deepEqual(testStream.highlights, []);
+
+  const testClip = select15MinuteGameplayHighlights([
+    clip('bot-test-clip', 0, 60, 1000, { title: 'WzBot CLIP | Test (by saevond)' })
+  ], vod, { targetDurationSeconds: 30 });
+
+  assert.equal(testClip.rejectionReason, 'no_game_category_clips');
+  assert.deepEqual(testClip.highlights, []);
+});
+
 test('fifteen 60-second live clips can fill the exact 15-minute highlight target', () => {
   const result = select15MinuteGameplayHighlights(Array.from({ length: 15 }, (_, index) =>
     clip('live-' + index, index * 180, 60, 0)), vod);

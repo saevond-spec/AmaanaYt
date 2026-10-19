@@ -266,6 +266,12 @@ function formatHighlightDuration(seconds) {
   return Math.floor(wholeSeconds / 60) + ':' + String(wholeSeconds % 60).padStart(2, '0');
 }
 
+function isPlaceholderTestStreamTitle(value) {
+  const normalized = String(value || '').normalize('NFKC').toLowerCase()
+    .replace(/[\p{P}\p{S}]+/gu, ' ').replace(/\s+/g, ' ').trim();
+  return /^(?:test|testing|stream test|test stream|live test|test live|vod test|test vod|clip test|test clip)$/.test(normalized);
+}
+
 function renderDraft(draft, draftsById = new Map()) {
   const isHighlight = draft.sourceType === 'twitch_highlight_batch';
   const isHighlightShort = draft.sourceType === 'twitch_highlight_short';
@@ -568,6 +574,27 @@ function renderDraft(draft, draftsById = new Map()) {
     });
     card.append(retry);
   }
+  if (isHighlight && !verifiedHighlight && isPlaceholderTestStreamTitle(draft.streamTitle)) {
+    card.append(element('p', 'draft-error',
+      'This source is a placeholder test stream, so Amaana will not treat its clips as gameplay highlights.'));
+    const exclude = element('button', 'ghost', 'Remove test VOD and related clips from review');
+    exclude.type = 'button';
+    exclude.addEventListener('click', async () => {
+      exclude.disabled = true;
+      exclude.textContent = 'Removing…';
+      try {
+        const result = await api('/api/drafts/' + encodeURIComponent(draft.id) + '/exclude-test-vod', { method: 'POST' });
+        showNotice(result.excludedCount + ' test VOD items removed from the active review queue. YouTube visibility was not changed.');
+        await loadDrafts();
+      } catch (error) {
+        showNotice(error.message, true);
+        exclude.disabled = false;
+        exclude.textContent = 'Remove test VOD and related clips from review';
+      }
+    });
+    card.append(exclude);
+  }
+
   return card;
 }
 
@@ -1011,7 +1038,7 @@ async function loadPlaylists() {
 }
 async function loadDrafts() {
   try {
-    const drafts = await api('/api/drafts');
+    const drafts = (await api('/api/drafts')).filter((draft) => draft?.status !== 'excluded_by_owner');
     draftList.replaceChildren();
     if (!drafts.length) {
       draftList.append(element('div', 'empty-state', 'No drafts yet. Upload a Short above or let your agent create one.'));

@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { isNonGameplayTestClip } = require('./gameplay-intake-guard');
 
 const MIN_CLIP_SECONDS = 5;
 const MAX_CLIP_SECONDS = 60;
@@ -85,6 +86,7 @@ function buildCommunityClipDrafts(clips, {
   const unique = new Map();
   for (const clip of clips) {
     const id = String(clip?.id || '');
+    if (isNonGameplayTestClip({ clipTitle: clip?.title, streamTitle })) continue;
     if (existingClipIds.has(id) || unique.has(id)) continue;
     if (gameId && String(clip?.game_id || '') !== String(gameId)) continue;
     if (!isValidCommunityClip(clip, { broadcasterId, streamStartedAt, now, vodId })) continue;

@@ -26,6 +26,7 @@ const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
   shouldPullForwardAllowedTwitchDownloadHost, shouldRequeueTwitchSegmentDurationFailure } = require('./highlight-pipeline');
 const { createTwitchHighlightDiscovery } = require('./twitch-highlight-discovery');
 const { clipRetryDelayMs, isRetryableCommunityClipError, isVerifiedGameplayResult, reuseOrVerifyGameplay } = require('./twitch-community-clips');
+const { collectTestVodDrafts } = require('./gameplay-intake-guard');
 const { auditVideo, channelSuggestions, problem, assertVideoMatchesCatalog } = require('./seo-publish');
 const { createSessionStore } = require('./session-store');
 const { canAddVideoToPlaylist } = require('./youtube-playlists');
@@ -286,7 +287,8 @@ async function processTwitchClipDraft(id) {
   let shortPath;
   try {
     let draft = await store.getDraft(id);
-    if (!draft || draft.sourceType !== 'twitch_vod' || draft.status === 'awaiting_owner_approval') return;
+    if (!draft || draft.sourceType !== 'twitch_vod' || draft.status === 'awaiting_owner_approval' ||
+        draft.status === 'excluded_by_owner') return;
     if (draft.discoverySource === 'twitch_community_clip' && draft.youtubeVideoId) {
       await store.updateDraft(id, { status: 'awaiting_owner_approval', error: null });
       return;
@@ -1218,6 +1220,23 @@ app.post('/api/twitch/vod-clips', admin, async (req, res, next) => {
         ? 'The VOD highlight is queued for processing. Any passing clip uploads will remain private for your review.'
         : `VOD scan status: ${result.status}. Any passing clip uploads remain private for your review.`
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/drafts/:id/exclude-test-vod', admin, async (req, res, next) => {
+  try {
+    const draft = await store.getDraft(req.params.id);
+    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    const relatedDrafts = collectTestVodDrafts(await store.listDrafts(), draft.id);
+    if (!relatedDrafts.length) {
+      return res.status(409).json({ error: 'Only a test-titled Twitch highlight VOD can be excluded this way.' });
+    }
+    const updated = await store.excludeDrafts(
+      relatedDrafts.map((item) => item.id), 'non_gameplay_test_stream'
+    );
+    res.json({ excludedCount: updated.length, youtubeVisibilityChanged: false });
   } catch (error) {
     next(error);
   }

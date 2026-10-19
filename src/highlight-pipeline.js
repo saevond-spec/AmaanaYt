@@ -211,6 +211,7 @@ function createHighlightProcessor(dependencies) {
     try {
       batch = await store.getDraft(id);
       if (!batch || batch.sourceType !== 'twitch_highlight_batch' || batch.status === 'completed' ||
+          batch.status === 'excluded_by_owner' ||
           batch.status === 'awaiting_owner_approval' && batch.productionState === 'ready') return;
       if (['twitch_clips_api', 'twitch_live_capture'].includes(batch.discoverySource) &&
           !(Number.isFinite(Number(batch.targetHighlightDurationSeconds)) &&

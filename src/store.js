@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { hasProtectedPublication } = require('./gameplay-intake-guard');
 const { Pool } = require('pg');
 const { prioritizeSeoAutoCandidates } = require('./seo-priority');
 const SEO_AUTOPILOT_VERSION = require('./seo-autopilot-version');
@@ -202,6 +203,58 @@ async function updateDraft(id, patch) {
       'UPDATE amaana_drafts SET payload = $2::jsonb, updated_at = NOW() WHERE id = $1',
       [id, JSON.stringify(updated)]
     );
+    await client.query('COMMIT');
+    return updated;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function excludeDrafts(ids, reason = 'owner_excluded_non_gameplay_test') {
+  if (!Array.isArray(ids) || ids.some((id) =>
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(id)))) {
+    throw Object.assign(new Error('Valid draft IDs are required for exclusion'), { status: 400 });
+  }
+  const uniqueIds = [...new Set(ids.map(String))];
+  if (!uniqueIds.length) return [];
+  await init();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      'SELECT id, payload FROM amaana_drafts WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE',
+      [uniqueIds]
+    );
+    if (result.rows.length !== uniqueIds.length) {
+      throw Object.assign(new Error('One or more related drafts no longer exist; refresh and retry.'), { status: 409 });
+    }
+    const lockedDrafts = result.rows.map((row) => row.payload);
+    if (hasProtectedPublication(lockedDrafts)) {
+      throw Object.assign(new Error('A related video is published or scheduled; exclusion left the group unchanged.'), { status: 409 });
+    }
+    const excludedAt = new Date().toISOString();
+    const updated = [];
+    for (const row of result.rows) {
+      const payload = {
+        ...row.payload,
+        status: 'excluded_by_owner',
+        productionState: 'excluded',
+        publicationStatus: 'excluded',
+        autoPublishEligible: false,
+        nextClipAttemptAt: null,
+        excludedAt,
+        exclusionReason: String(reason || 'owner_excluded_non_gameplay_test').slice(0, 80),
+        updatedAt: excludedAt
+      };
+      await client.query(
+        'UPDATE amaana_drafts SET payload = $2::jsonb, updated_at = NOW() WHERE id = $1',
+        [row.id, JSON.stringify(payload)]
+      );
+      updated.push(payload);
+    }
     await client.query('COMMIT');
     return updated;
   } catch (error) {
@@ -862,6 +915,7 @@ module.exports = {
   getDraft,
   addDraft,
   updateDraft,
+  excludeDrafts,
   claimTikTokDelivery,
   saveSeoSyncState,
   getSeoSyncState,
