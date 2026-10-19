@@ -379,13 +379,27 @@ function renderDraft(draft, draftsById = new Map()) {
 
   if (draft.error) card.append(element('p', 'draft-error', draft.error));
 
+  const privateReviewUpload = Boolean(draft.youtubeVideoId) &&
+    (draft.youtubePrivacyStatus === 'private' ||
+      (!draft.youtubePrivacyStatus && draft.status === 'awaiting_owner_approval'));
   if (draft.youtubeUrl || draft.youtubeVideoId) {
     const link = element('a', 'ghost video-link');
-    link.href = draft.youtubeUrl || `https://youtu.be/${encodeURIComponent(draft.youtubeVideoId)}`;
+    link.href = privateReviewUpload
+      ? `https://studio.youtube.com/video/${encodeURIComponent(draft.youtubeVideoId)}/edit`
+      : (draft.youtubeUrl || `https://youtu.be/${encodeURIComponent(draft.youtubeVideoId)}`);
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
-    link.textContent = 'Open on YouTube';
+    link.textContent = privateReviewUpload ? 'Review in YouTube Studio' : 'Open on YouTube';
     card.append(link);
+    if (privateReviewUpload) {
+      const previewLink = element('a', 'ghost video-link', 'Open private video preview');
+      previewLink.href = `https://youtu.be/${encodeURIComponent(draft.youtubeVideoId)}`;
+      previewLink.target = '_blank';
+      previewLink.rel = 'noopener noreferrer';
+      card.append(previewLink);
+      card.append(element('p', 'draft-meta',
+        'Private review upload: YouTube requires a signed-in Google account with access to this video. Amaana’s connection does not sign in your browser. The upload stays private until you choose Publish now.'));
+    }
   }
 
   if (draft.sourceType === 'twitch_highlight_short' && draft.youtubeVideoId) {
