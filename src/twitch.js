@@ -182,6 +182,22 @@ async function listRecentArchivedVods({ first = 20 } = {}) {
     .filter(Boolean);
 }
 
+async function getLiveBroadcast() {
+  const user = await currentUser();
+  const [streamsPayload, videosPayload] = await Promise.all([
+    helix('/streams', { query: { user_id: user.id, first: 1 } }),
+    helix('/videos', { query: { user_id: user.id, type: 'archive', first: 20 } })
+  ]);
+  const stream = (streamsPayload.data || []).find((item) =>
+    item && String(item.user_id || '') === String(user.id));
+  if (!stream) return null;
+  const vod = (videosPayload.data || []).find((item) =>
+    item && item.type === 'archive' &&
+    String(item.user_id || '') === String(user.id) &&
+    String(item.stream_id || '') === String(stream.id || ''));
+  return { user, stream, vod: vod || null };
+}
+
 async function listClipsForVod(vod, { maxPages = 10 } = {}) {
   const user = await currentUser();
   const archive = requireArchivedTwitchVod(vod, vod && vod.id, user.id);
@@ -262,10 +278,15 @@ async function createClipFromVod({ vodId, vodOffset, duration, title }) {
   return { ...clip, broadcasterId: user.id, editorId: user.id };
 }
 
-async function waitForClipDownload({ clipId, broadcasterId, editorId }) {
+async function waitForClipDownload({ clipId, broadcasterId, editorId, maxAttempts = 31,
+  pollIntervalMs = 2000 }) {
   let lastError;
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    if (attempt) await new Promise((resolve) => setTimeout(resolve, 2000));
+  const attemptsValue = Math.floor(Number(maxAttempts));
+  const attempts = Number.isFinite(attemptsValue) ? Math.max(1, Math.min(40, attemptsValue)) : 31;
+  const intervalValue = Math.floor(Number(pollIntervalMs));
+  const interval = Number.isFinite(intervalValue) ? Math.max(250, Math.min(5000, intervalValue)) : 2000;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt) await new Promise((resolve) => setTimeout(resolve, interval));
     try {
       const payload = await helix('/clips/downloads', {
         query: { broadcaster_id: broadcasterId, editor_id: editorId, clip_id: clipId }
@@ -321,8 +342,10 @@ module.exports = {
   createClipFromVod,
   getVod,
   listRecentArchivedVods,
+  getLiveBroadcast,
   listClipsForVod,
   getClip,
   waitForClipDownload,
   downloadClip
 };
+
