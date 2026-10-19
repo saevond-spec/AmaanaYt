@@ -6,6 +6,8 @@ const playlistList = document.querySelector('#playlistList');
 const playlistForm = document.querySelector('#playlistForm');
 const playlistCreateButton = document.querySelector('#playlistCreateButton');
 const notice = document.querySelector('#notice');
+const vodScanForm = document.querySelector('#vodScanForm');
+const vodScanStatus = document.querySelector('#vodScanStatus');
 const connectionDot = document.querySelector('#connectionDot');
 const connectionText = document.querySelector('#connectionText');
 const connectionHelp = document.querySelector('#connectionHelp');
@@ -1102,6 +1104,34 @@ googleSearchImportForm.addEventListener('submit', async (event) => {
     googleSearchImportStatus.textContent = error.message;
   } finally {
     button.disabled = false;
+  }
+});
+
+vodScanForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const submitButton = vodScanForm.querySelector('button[type="submit"]');
+  const vodId = String(new FormData(vodScanForm).get('vodId') || '').trim();
+  if (!/^\d+$/.test(vodId)) {
+    vodScanStatus.textContent = 'Enter a numeric Twitch VOD ID.';
+    return;
+  }
+  submitButton.disabled = true;
+  vodScanStatus.textContent = 'Checking the VOD and queuing eligible clips for screening…';
+  try {
+    const result = await api('/api/twitch/vod-clips', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ vodId })
+    });
+    const queued = Number(result.communityClipsQueued) || 0;
+    vodScanStatus.textContent = result.message || (result.accepted
+      ? `VOD scan ${result.status || 'accepted'}; ${queued} Twitch clip(s) queued for visual gameplay screening. Passing edits remain private for your review.`
+      : 'No clips were queued. Amaana will retry when Twitch has more eligible footage.');
+    if (result.accepted || queued > 0) await loadDrafts();
+  } catch (error) {
+    vodScanStatus.textContent = error.message || 'VOD scan failed.';
+  } finally {
+    submitButton.disabled = false;
   }
 });
 

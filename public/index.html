@@ -104,7 +104,14 @@
       <section class="card workflow-card">
         <p class="eyebrow">AUTOMATIC CLIP WORKFLOW</p>
         <h2>Twitch VOD → 15-minute gameplay highlight → two Shorts</h2>
-        <p class="muted">Amaana requires 15 minutes of non-overlapping Twitch gameplay clips with game-category metadata. When gameplay screening is enabled, it sends five sampled frames from each source to the configured Gemini model for active-gameplay checks. It assembles a landscape highlight that is exactly 15 minutes and up to two Shorts from the strongest passing moments. If footage is insufficient or screening is disabled or unconfigured, Amaana holds the job without padding or uploading a weak edit. YouTube uploads stay private until you approve them.</p>
+        <p class="muted">Amaana needs 15 minutes of non-overlapping, visually verified gameplay for a full highlight. It screens Twitch clips with Gemini and uploads only passing edits as private YouTube drafts for your review.</p>
+        <form id="vodScanForm">
+          <label for="twitchVodId">Rescan an archived Twitch VOD</label>
+          <input id="twitchVodId" name="vodId" type="text" inputmode="numeric" pattern="[0-9]+" autocomplete="off" placeholder="Twitch VOD ID" required>
+          <button id="vodScanButton" class="twitch" type="submit">Scan VOD for clips</button>
+          <p class="muted">Use this for a stream or clip Amaana missed. Amaana checks that the VOD belongs to the connected Twitch account. Passing clips become private drafts; nothing is published automatically.</p>
+          <p id="vodScanStatus" class="muted" role="status" aria-live="polite"></p>
+        </form>
       </section>
 
       <section class="card">

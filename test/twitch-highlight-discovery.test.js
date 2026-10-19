@@ -552,13 +552,33 @@ test('continues scanning other VODs after one Twitch request fails', async () =>
 });
 
 test('manual VOD scans resolve the ID through Amaana’s own broadcaster authorization', async () => {
-  const vod = makeVod();
-  const h = harness({ vods: [vod], clipsByVod: { [vod.id]: [makeClip('manual-clip', 360, 30, 8)] } });
+  const vod = makeVod('1001', { user_id: '1001' });
+  const h = harness({ vods: [vod], clipsByVod: { [vod.id]: [makeClip('manual-clip', 360, 30, 8,
+    { broadcaster_id: '1001' })] } });
   const result = await h.discovery.scanVod(vod.id);
   assert.equal(result.status, 'queued');
+  assert.equal(result.communityClipsQueued, 1);
   assert.equal(h.calls.vodGet, 1);
   assert.equal(h.calls.clipList, 1);
-  assert.equal(h.drafts[0].sourceClipEvidence[0].clipId, 'manual-clip');
+  const batch = h.drafts.find((draft) => draft.sourceType === 'twitch_highlight_batch');
+  assert.equal(batch.sourceClipEvidence[0].clipId, 'manual-clip');
+});
+
+test('manual VOD scan queues clip screening even when footage is too short for the full highlight', async () => {
+  const vod = makeVod('1001', { user_id: '1001' });
+  const h = harness({
+    vods: [vod],
+    clipsByVod: { [vod.id]: [makeClip('short-manual-clip', 360, 30, 8,
+      { broadcaster_id: '1001' })] },
+    targetDurationSeconds: 15 * 60
+  });
+  const result = await h.discovery.scanVod(vod.id);
+  assert.equal(result.status, 'insufficient_gameplay_duration');
+  assert.equal(result.communityClipsQueued, 1);
+  assert.equal(result.batch, undefined);
+  assert.equal(h.drafts.length, 1);
+  assert.equal(h.drafts[0].discoverySource, 'twitch_community_clip');
+  assert.deepEqual(h.enqueuedClips, [h.drafts[0].id]);
 });
 
 test('manual scan fails closed when the authorized VOD lookup fails', async () => {

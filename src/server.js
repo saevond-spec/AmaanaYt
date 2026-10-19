@@ -1187,22 +1187,39 @@ app.post('/api/twitch/vod-clips', admin, async (req, res, next) => {
       return res.json({ accepted: false, retryScheduled: true,
         message: 'Visual gameplay screening is off. Enable ENABLE_GAMEPLAY_SCREENING and configure VIDEO_ANALYSIS_API_KEY to create gaming edits.' });
     }
-    if (['no_gameplay_candidates', 'insufficient_gameplay_duration'].includes(result.status)) {
+    const communityClipsQueued = Number(result.communityClipsQueued) || 0;
+    if (['no_gameplay_candidates', 'insufficient_gameplay_duration',
+      'insufficient_quality_gameplay'].includes(result.status)) {
       const available = Math.max(0, Number(result.availableGameplaySeconds) || 0);
-      const message = result.status === 'no_gameplay_candidates'
+      const reason = result.status === 'no_gameplay_candidates'
         ? 'No Twitch clips with a game category are available for this VOD yet.'
-        : `Only ${Math.floor(available / 60)}m ${Math.floor(available % 60)}s of non-overlapping game-category footage is available; a 15-minute highlight needs 15m.`;
-      return res.json({ accepted: false, retryScheduled: true, message: message + ' Amaana will rescan for more clips.' });
+        : result.status === 'insufficient_quality_gameplay'
+          ? 'The available clips did not meet the gameplay-quality threshold for a 15-minute highlight.'
+          : `Only ${Math.floor(available / 60)}m ${Math.floor(available % 60)}s of non-overlapping game-category footage is available; a 15-minute highlight needs 15m.`;
+      const queuedNotice = communityClipsQueued
+        ? ` Queued ${communityClipsQueued} Twitch clip${communityClipsQueued === 1 ? '' : 's'} for Gemini gameplay screening; passing clips become private YouTube drafts for your review.`
+        : '';
+      return res.status(communityClipsQueued ? 202 : 200).json({
+        accepted: communityClipsQueued > 0,
+        status: result.status,
+        retryScheduled: true,
+        communityClipsQueued,
+        message: reason + queuedNotice + ' Amaana will rescan for more clips.'
+      });
     }
     const batch = result.batch;
     res.status(202).json({
       accepted: true,
       status: result.status,
+      communityClipsQueued,
       highlightVideo: batch ? { id: batch.id, status: batch.status, title: batch.title } : null,
       targetHighlightDurationSeconds: Number(batch?.targetHighlightDurationSeconds) || null,
       shortsPlanned: Array.isArray(batch?.shortCandidateIndexes) ? batch.shortCandidateIndexes.length
         : (Array.isArray(batch?.highlights) ? batch.highlights.length : 0),
-      discoverySource: 'twitch_clips_api'
+      discoverySource: 'twitch_clips_api',
+      message: batch
+        ? 'The VOD highlight is queued for processing. Any passing clip uploads will remain private for your review.'
+        : `VOD scan status: ${result.status}. Any passing clip uploads remain private for your review.`
     });
   } catch (error) {
     next(error);

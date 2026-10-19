@@ -164,7 +164,7 @@ function createTwitchHighlightDiscovery({
 
       const clips = await twitch.listClipsForVod(vod);
       const broadcasterId = String(vod.user_id || '');
-      await queueCommunityClips(clips, {
+      const communityClipsQueued = await queueCommunityClips(clips, {
         broadcasterId,
         editorId: broadcasterId,
         streamId: String(vod.stream_id || vod.id),
@@ -187,6 +187,7 @@ function createTwitchHighlightDiscovery({
           availableGameplaySeconds: selected.availableGameplaySeconds || 0,
           unfilteredGameplaySeconds: selected.unfilteredGameplaySeconds || 0,
           qualityCalibration: selected.qualityCalibration || null,
+          communityClipsQueued,
           targetDurationSeconds: selected.targetDurationSeconds
         };
       }
@@ -228,7 +229,8 @@ function createTwitchHighlightDiscovery({
       if (logger && typeof logger.info === 'function') {
         logger.info(`Amaana selected ${selected.highlights.length} game-category moments for a 15-minute highlight from VOD ${requestedId}`);
       }
-      return { status: 'queued', vodId: requestedId, batch: saved, clipsChecked: batch.candidateClipCount };
+      return { status: 'queued', vodId: requestedId, batch: saved,
+        clipsChecked: batch.candidateClipCount, communityClipsQueued };
     } finally {
       inFlightVodIds.delete(requestedId);
     }
