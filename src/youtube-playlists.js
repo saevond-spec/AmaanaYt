@@ -1,5 +1,7 @@
 'use strict';
 
+const { normalizeJapaneseVideoLocalization } = require('./japanese-translation');
+
 function inputError(message) {
   const error = new Error(message);
   error.status = 400;
@@ -116,15 +118,18 @@ function createYouTubePlaylistClient(getService) {
     let pageToken = null;
     for (let page = 0; page < 20; page += 1) {
       const response = await youtube.playlists.list({
-        part: ['snippet', 'status'], mine: true, maxResults: 50,
+        part: ['snippet', 'status', 'localizations'], mine: true, maxResults: 50,
         ...(pageToken ? { pageToken } : {}),
-        fields: 'nextPageToken,items(id,snippet(title,description),status(privacyStatus))'
+        fields: 'nextPageToken,items(id,etag,snippet(title,description,channelId,defaultLanguage),status(privacyStatus),localizations)'
       });
       for (const item of response.data.items || []) {
         if (!item.id) continue;
         playlists.push({
-          id: item.id, title: String(item.snippet?.title || ''),
+          id: item.id, etag: item.etag || null, title: String(item.snippet?.title || ''),
           description: String(item.snippet?.description || ''),
+          channelId: item.snippet?.channelId || null,
+          defaultLanguage: item.snippet?.defaultLanguage || null,
+          localizations: item.localizations || {},
           privacyStatus: item.status?.privacyStatus || 'private'
         });
       }
@@ -178,6 +183,61 @@ function createYouTubePlaylistClient(getService) {
       privacyStatus: item.status?.privacyStatus || playlist.privacyStatus };
   }
 
+  async function updateJapanesePlaylistLocalization(expected, edit) {
+    const playlistId = String(expected?.id || '').trim();
+    if (!playlistId || playlistId.length > 255) throw inputError('A valid playlist ID is required');
+    const youtube = await getService();
+    const [playlistResponse, channelResponse] = await Promise.all([
+      youtube.playlists.list({
+        part: ['snippet', 'localizations'], id: [playlistId],
+        fields: 'items(id,etag,snippet(title,description,channelId,defaultLanguage),localizations)'
+      }),
+      youtube.channels.list({
+        part: ['snippet', 'brandingSettings'], mine: true,
+        fields: 'items(id,snippet(defaultLanguage),brandingSettings(channel(defaultLanguage)))'
+      })
+    ]);
+    const current = playlistResponse.data.items?.[0];
+    if (!current?.id) {
+      const error = new Error('YouTube playlist was not found');
+      error.status = 404;
+      throw error;
+    }
+    const channel = channelResponse.data.items?.[0];
+    if (!channel?.id || current.snippet?.channelId !== channel.id) {
+      const error = new Error('Only playlists owned by the connected YouTube channel can be localized');
+      error.status = 403;
+      throw error;
+    }
+    if (!expected?.etag || !current.etag || expected.etag !== current.etag) {
+      const error = new Error('Playlist settings changed; refresh before saving the Japanese localization');
+      error.status = 409;
+      throw error;
+    }
+    const source = { title: current.snippet?.title || '', description: current.snippet?.description || '' };
+    const localization = normalizeJapaneseVideoLocalization(edit, source);
+    const localizations = { ...(current.localizations || {}), ja: localization };
+    const snippet = {
+      title: source.title,
+      description: source.description,
+      defaultLanguage: current.snippet?.defaultLanguage ||
+        channel.brandingSettings?.channel?.defaultLanguage || channel.snippet?.defaultLanguage || 'en'
+    };
+    try {
+      await youtube.playlists.update({
+        part: ['snippet', 'localizations'],
+        requestBody: { id: playlistId, snippet, localizations }
+      }, { headers: { 'If-Match': current.etag } });
+    } catch (error) {
+      if (Number(error.status || error.code) === 412) {
+        error.status = 409;
+        error.message = 'Playlist settings changed while saving; refresh before trying again';
+      }
+      throw error;
+    }
+    return { id: playlistId, language: 'ja', localization, defaultLanguage: snippet.defaultLanguage };
+  }
+
   async function addVideoToPlaylist({ playlistId, videoId } = {}) {
     const targetPlaylistId = String(playlistId || '').trim();
     const targetVideoId = String(videoId || '').trim();
@@ -198,7 +258,7 @@ function createYouTubePlaylistClient(getService) {
     return { alreadyAdded: false, itemId: inserted.data?.id || null };
   }
 
-  return { listOwnedPlaylists, listPlaylistVideoIds, createPlaylist, addVideoToPlaylist };
+  return { listOwnedPlaylists, listPlaylistVideoIds, createPlaylist, updateJapanesePlaylistLocalization, addVideoToPlaylist };
 }
 
 module.exports = { normalizePlaylistInput, canAddVideoToPlaylist, chooseAutoPlaylist, createYouTubePlaylistClient };
