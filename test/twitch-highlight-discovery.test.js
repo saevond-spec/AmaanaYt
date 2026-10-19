@@ -43,6 +43,7 @@ function makeClip(id, offset, duration = 20, views = 1, overrides = {}) {
 
 function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], liveBroadcast = null, video = null,
   liveCaptureIntervalMs = 3 * MINUTE, liveCaptureDurationSeconds = 60,
+  liveClips = [],
   startAt = Date.parse('2026-10-18T15:00:00.000Z'),
   now = () => startAt, getVodError, listError, clipErrorByVod = {}, onClipsRead,
   targetDurationSeconds = 15, visualGameplayVerificationAvailable = true } = {}) {
@@ -52,7 +53,7 @@ function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], live
   const enqueued = [];
   const enqueuedClips = [];
   const calls = { vodList: 0, vodGet: 0, clipList: 0, stateSaves: 0,
-    liveLookups: 0, liveClipCreates: [] };
+    liveLookups: 0, liveClipCreates: [], liveCommunityClipLookups: 0 };
   const liveClipRequests = new Map();
   let liveClipNumber = 0;
   const twitch = {
@@ -78,6 +79,10 @@ function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], live
     async getLiveBroadcast() {
       calls.liveLookups += 1;
       return typeof liveBroadcast === 'function' ? liveBroadcast() : liveBroadcast;
+    },
+    async listRecentLiveClips() {
+      calls.liveCommunityClipLookups += 1;
+      return liveClips;
     },
     async createClipFromVod(request) {
       calls.liveClipCreates.push(request);
@@ -317,6 +322,38 @@ test('captures and screens live segments, then queues the 15-minute review batch
   await h.discovery.runLive();
   assert.equal(h.calls.liveClipCreates.length, 15);
   assert.equal(h.drafts.length, 4);
+});
+
+test('queues a WizeBot-style clip during a live stream before Twitch links its VOD offset', async () => {
+  const clock = Date.parse('2026-10-18T15:00:00.000Z');
+  const streamStartedAt = clock - 60 * MINUTE;
+  const broadcast = makeLiveBroadcast(clock, streamStartedAt);
+  broadcast.vod = null;
+  const h = harness({
+    liveBroadcast: broadcast,
+    liveClips: [makeClip('LuckyTallPhoneRitzMitz-FmiVE7c8LdMuQo6o', null, 30, 0, {
+      broadcaster_id: '1001', video_id: '', vod_offset: null,
+      created_at: new Date(clock - MINUTE).toISOString(), title: 'Test'
+    })],
+    startAt: clock,
+    now: () => clock,
+    video: { async verifyGameplay() {}, async inspectMedia() {} }
+  });
+
+  const result = await h.discovery.runLive();
+  assert.equal(result.live, true);
+  assert.equal(result.communityClipsChecked, 1);
+  assert.equal(result.communityClipsQueued, 1);
+  assert.equal(result.status, 'active_vod_not_ready');
+  assert.equal(h.drafts.length, 1);
+  assert.equal(h.drafts[0].discoverySource, 'twitch_community_clip');
+  assert.equal(h.drafts[0].twitchClipId, 'LuckyTallPhoneRitzMitz-FmiVE7c8LdMuQo6o');
+  assert.equal(h.drafts[0].vodId, null);
+  assert.deepEqual(h.enqueuedClips, [h.drafts[0].id]);
+
+  await h.discovery.runLive();
+  assert.equal(h.drafts.length, 1);
+  assert.equal(h.enqueuedClips.length, 1);
 });
 
 test('does not keep or queue a live Twitch clip that fails visual gameplay review', async () => {
