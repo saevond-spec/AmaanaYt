@@ -18,7 +18,7 @@ Amaana also adds the exact YouTube video tag `@saevond` to app uploads (includin
 
 The owner dashboard can localize the channel profile, existing video titles and descriptions, and playlist titles and descriptions into Japanese. It uses the already configured SEO AI provider to prepare drafts in small batches. The owner reviews the text and explicitly saves each page; Amaana preserves the English default copy and other language entries. Video metadata updates do not change privacy or publication status. YouTube caption and spoken-audio tracks are separate and remain managed through YouTube Studio.
 
-The full video catalog scan must complete before the dashboard can show every uploaded video. Each saved video or playlist localization uses a YouTube update request, which currently costs 50 quota units. Japanese drafts preserve URLs, hashtags, creator handles, and chapter timestamps; the owner still reviews translation quality before saving.
+The video localization page reads directly from the channel's uploads playlist, so it does not depend on the SEO catalog scan. Each saved video or playlist localization uses a YouTube update request, which currently costs 50 quota units. Japanese drafts preserve URLs, hashtags, creator handles, and chapter timestamps; the owner still reviews translation quality before saving.
 
 ## Five-year capacity simulation
 
