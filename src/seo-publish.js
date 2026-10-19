@@ -509,7 +509,7 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
     if (typeof store.seoUpdatesToday === 'function' &&
         await store.seoUpdatesToday() >= dailyLimit) {
       const reason = 'Daily automatic metadata and thumbnail update budget reached';
-      logger.info?.('SEO update budget reached; remaining candidates will wait until the UTC day resets');
+      logger.info?.('SEO update budget reached; remaining candidates will wait until the Pacific quota day resets');
       return { state: 'deferred', reason, deferred: true };
     }
 
