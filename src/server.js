@@ -25,6 +25,7 @@ const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
   shouldPullForwardTwitchMetadataRetry, shouldRequeueUnexpectedTwitchDownloadHost,
   shouldPullForwardAllowedTwitchDownloadHost, shouldRequeueTwitchSegmentDurationFailure } = require('./highlight-pipeline');
 const { createTwitchHighlightDiscovery } = require('./twitch-highlight-discovery');
+const { clipRetryDelayMs, isRetryableCommunityClipError } = require('./twitch-community-clips');
 const { auditVideo, channelSuggestions, problem, assertVideoMatchesCatalog } = require('./seo-publish');
 const { createSessionStore } = require('./session-store');
 const { canAddVideoToPlaylist } = require('./youtube-playlists');
@@ -286,6 +287,16 @@ async function processTwitchClipDraft(id) {
   try {
     let draft = await store.getDraft(id);
     if (!draft || draft.sourceType !== 'twitch_vod' || draft.status === 'awaiting_owner_approval') return;
+    if (draft.discoverySource === 'twitch_community_clip' && draft.youtubeVideoId) {
+      await store.updateDraft(id, { status: 'awaiting_owner_approval', error: null });
+      return;
+    }
+    if (draft.discoverySource === 'twitch_community_clip') {
+      draft = await store.updateDraft(id, {
+        clipAttemptCount: (Number(draft.clipAttemptCount) || 0) + 1,
+        lastClipAttemptAt: new Date().toISOString()
+      });
+    }
     if (draft.discoverySource === 'twitch_live_capture' && !hasVerifiedLiveGameplayClip(draft)) {
       throw new Error('Live Twitch clip did not pass gameplay verification; no YouTube upload was made');
     }
@@ -325,6 +336,32 @@ async function processTwitchClipDraft(id) {
     ]);
     await store.updateDraft(id, { status: 'downloading_twitch_clip' });
     await twitch.downloadClip(landscapeUrl, sourcePath);
+    if (draft.discoverySource === 'twitch_community_clip') {
+      if (process.env.ENABLE_GAMEPLAY_SCREENING !== 'true' || !process.env.VIDEO_ANALYSIS_API_KEY ||
+          typeof video.verifyGameplay !== 'function' || typeof video.inspectMedia !== 'function') {
+        throw new Error('Community Twitch clip is held because visual gameplay verification is unavailable');
+      }
+      const media = await video.inspectMedia(sourcePath);
+      const width = Number(media && media.width);
+      const height = Number(media && media.height);
+      const mediaDuration = Number(media && media.durationSeconds);
+      if (!Number.isFinite(width) || !Number.isFinite(height) || height <= 0 || width / height < 1.6 ||
+          !Number.isFinite(mediaDuration) || Math.abs(mediaDuration - Number(draft.duration)) > 2) {
+        throw new Error('Community Twitch clip failed landscape media validation');
+      }
+      const gameplay = await video.verifyGameplay(sourcePath);
+      const totalFrames = Number(gameplay && gameplay.totalFrames);
+      const activeFrames = Number(gameplay && gameplay.activeGameplayFrames);
+      const confidence = Number(gameplay && gameplay.confidence);
+      if (gameplay?.verified !== true || !Number.isFinite(totalFrames) || totalFrames < 5 ||
+          !Number.isFinite(activeFrames) || activeFrames < Math.ceil(totalFrames * 0.8) ||
+          activeFrames > totalFrames || !Number.isFinite(confidence) || confidence < 0.8 || confidence > 1) {
+        throw new Error('Community Twitch clip failed visual gameplay verification');
+      }
+      draft = await store.updateDraft(id, {
+        visualGameplayVerification: { ...gameplay, media, verifiedAt: new Date().toISOString() }
+      });
+    }
     await store.updateDraft(id, { status: 'formatting_vertical_short' });
     await video.convertLandscapeToShort(sourcePath, shortPath);
     if (typeof video.validateShort !== 'function') {
@@ -333,9 +370,14 @@ async function processTwitchClipDraft(id) {
     await video.validateShort(shortPath, draft.duration);
 
     await store.updateDraft(id, { status: 'uploading_private_to_youtube' });
-    const sourceUrl = `https://www.twitch.tv/videos/${draft.vodId}?t=${Math.floor(draft.startSeconds)}s`;
+    const hasVodTimestamp = /^\d+$/.test(String(draft.vodId || '')) && Number.isFinite(Number(draft.startSeconds));
+    const sourceUrl = hasVodTimestamp
+      ? 'https://www.twitch.tv/videos/' + draft.vodId + '?t=' + Math.floor(draft.startSeconds) + 's'
+      : draft.twitchUrl || 'https://clips.twitch.tv/' + draft.twitchClipId;
     const description = [
-      draft.reason || 'AI-detected highlight from a Saevond livestream.',
+      draft.reason || (draft.discoverySource === 'twitch_community_clip'
+        ? 'Gameplay-verified community clip from a Saevond livestream.'
+        : 'AI-detected highlight from a Saevond livestream.'),
       '',
       `Full Twitch VOD: ${sourceUrl}`,
       '',
@@ -347,6 +389,12 @@ async function processTwitchClipDraft(id) {
       description,
       tags: ['@saevond', 'gaming', 'livestream highlights', 'Shorts'],
       madeForKids: false
+    });
+    await store.updateDraft(id, {
+      youtubeVideoId: uploaded.id,
+      status: 'awaiting_owner_approval',
+      error: null,
+      processedAt: new Date().toISOString()
     });
     const playlistAssignment = await autoAssignPlaylist({
       id: uploaded.id, privacyStatus: 'private', title: draft.title, description,
@@ -370,7 +418,24 @@ async function processTwitchClipDraft(id) {
     }).catch((error) => console.error('Short SEO registration failed:', error.message));
   } catch (error) {
     console.error(`Twitch clip job ${id} failed:`, error.message);
-    await store.updateDraft(id, { status: 'clip_failed', error: cleanText(error.message, 500) }).catch(() => {});
+    const latest = await store.getDraft(id).catch(() => null);
+    if (latest && latest.youtubeVideoId) {
+      await store.updateDraft(id, { status: 'awaiting_owner_approval', error: null }).catch(() => {});
+    } else if (latest && latest.discoverySource === 'twitch_community_clip' &&
+        latest.status !== 'uploading_private_to_youtube' && Number(latest.clipAttemptCount) < 8 &&
+        isRetryableCommunityClipError(error)) {
+      const attempt = Math.max(1, Number(latest.clipAttemptCount) || 1);
+      const nextClipAttemptAt = new Date(Date.now() + clipRetryDelayMs(attempt, id)).toISOString();
+      await store.updateDraft(id, {
+        status: 'clip_retry_wait', productionState: 'retry_scheduled', nextClipAttemptAt,
+        error: cleanText(error.message, 500)
+      }).catch(() => {});
+    } else if (latest && latest.discoverySource === 'twitch_community_clip' &&
+        latest.status === 'uploading_private_to_youtube') {
+      await store.updateDraft(id, { status: 'clip_upload_uncertain', error: cleanText(error.message, 500) }).catch(() => {});
+    } else {
+      await store.updateDraft(id, { status: 'clip_failed', error: cleanText(error.message, 500) }).catch(() => {});
+    }
   } finally {
     unlinkQuietly(sourcePath);
     unlinkQuietly(shortPath);
@@ -425,6 +490,11 @@ async function scheduleDueHighlightRetries() {
     const drafts = await store.listDrafts();
     const timestamp = Date.now();
     for (const draft of drafts) {
+      if (draft.sourceType === 'twitch_vod' && draft.discoverySource === 'twitch_community_clip' &&
+          draft.status === 'clip_retry_wait' && Date.parse(draft.nextClipAttemptAt || '') <= timestamp) {
+        enqueueClipProcessing(draft.id);
+        continue;
+      }
       if (shouldRequeueTwitchSegmentDurationFailure(draft)) {
         const retryAt = new Date(timestamp).toISOString();
         await store.updateDraft(draft.id, {
@@ -1256,9 +1326,11 @@ store.init()
           'waiting_for_clip_media',
           'downloading_twitch_clip',
           'formatting_vertical_short',
-          'uploading_private_to_youtube'
+          'uploading_private_to_youtube',
+          'clip_retry_wait'
         ]);
-        drafts.filter((draft) => draft.sourceType === 'twitch_vod' && resumable.has(draft.status))
+        drafts.filter((draft) => draft.sourceType === 'twitch_vod' && resumable.has(draft.status) &&
+          (draft.status !== 'clip_retry_wait' || Date.parse(draft.nextClipAttemptAt || '') <= Date.now()))
           .forEach((draft) => enqueueClipProcessing(draft.id));
         drafts.filter((draft) => draft.sourceType === 'twitch_highlight_batch'
           && ['clip_queued', 'creating_twitch_clips', 'assembling_highlight_video', 'creating_shorts'].includes(draft.status))
