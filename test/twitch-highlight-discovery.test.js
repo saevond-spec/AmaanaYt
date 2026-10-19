@@ -2,6 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
 const {
   createTwitchHighlightDiscovery,
   selectCommunityHighlights,
@@ -40,14 +41,20 @@ function makeClip(id, offset, duration = 20, views = 1, overrides = {}) {
   };
 }
 
-function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], startAt = Date.parse('2026-10-18T15:00:00.000Z'),
+function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], liveBroadcast = null, video = null,
+  liveCaptureIntervalMs = 3 * MINUTE, liveCaptureDurationSeconds = 60,
+  startAt = Date.parse('2026-10-18T15:00:00.000Z'),
   now = () => startAt, getVodError, listError, clipErrorByVod = {}, onClipsRead,
   targetDurationSeconds = 15, visualGameplayVerificationAvailable = true } = {}) {
   let clock = startAt;
   let persistedState = null;
   const drafts = [...initialDrafts];
   const enqueued = [];
-  const calls = { vodList: 0, vodGet: 0, clipList: 0, stateSaves: 0 };
+  const enqueuedClips = [];
+  const calls = { vodList: 0, vodGet: 0, clipList: 0, stateSaves: 0,
+    liveLookups: 0, liveClipCreates: [] };
+  const liveClipRequests = new Map();
+  let liveClipNumber = 0;
   const twitch = {
     async listRecentArchivedVods(options) {
       calls.vodList += 1;
@@ -67,6 +74,36 @@ function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], star
       return typeof clipsByVod[String(vod.id)] === 'function'
         ? clipsByVod[String(vod.id)]()
         : clipsByVod[String(vod.id)] || [];
+    },
+    async getLiveBroadcast() {
+      calls.liveLookups += 1;
+      return typeof liveBroadcast === 'function' ? liveBroadcast() : liveBroadcast;
+    },
+    async createClipFromVod(request) {
+      calls.liveClipCreates.push(request);
+      const clip = {
+        id: 'live-clip-' + (++liveClipNumber),
+        broadcasterId: '1001',
+        editorId: '1001'
+      };
+      liveClipRequests.set(clip.id, request);
+      return clip;
+    },
+    async waitForClipDownload({ clipId }) {
+      return { landscape_download_url: 'fixture://' + clipId };
+    },
+    async downloadClip(_url, destination) {
+      await fs.writeFile(destination, 'fixture');
+    },
+    async getClip(clipId) {
+      const request = liveClipRequests.get(clipId);
+      return {
+        id: clipId, video_id: String(request.vodId),
+        broadcaster_id: '1001', game_id: '509658',
+        vod_offset: request.vodOffset - request.duration,
+        duration: request.duration, view_count: 0,
+        title: 'Verified live gameplay', created_at: new Date(clock).toISOString()
+      };
     }
   };
   const store = {
@@ -84,15 +121,42 @@ function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], star
   };
   const logger = { info() {}, warn() {}, error() {} };
   const discovery = createTwitchHighlightDiscovery({
-    twitch, store, enqueueBatch: (id) => enqueued.push(id), logger,
+    twitch, store, video, enqueueBatch: (id) => enqueued.push(id),
+    enqueueClip: (id) => enqueuedClips.push(id), logger,
     idFactory: (() => { let id = 0; return () => `batch-${++id}`; })(), now,
     scanIntervalMs: 15 * MINUTE, targetDurationSeconds,
+    liveCaptureIntervalMs, liveCaptureDurationSeconds,
     visualGameplayVerificationAvailable: () => visualGameplayVerificationAvailable
   });
   return {
-    discovery, twitch, store, drafts, enqueued, calls, get state() { return persistedState; },
+    discovery, twitch, store, drafts, enqueued, enqueuedClips, calls,
+    get state() { return persistedState; },
     setNow(value) { clock = value; startAt = value; },
     getNow() { return clock; }
+  };
+}
+
+function formatTwitchDuration(totalSeconds) {
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = Math.floor(totalSeconds % 60);
+  return (hours ? hours + 'h' : '') + (minutes ? minutes + 'm' : '') + seconds + 's';
+}
+
+function makeLiveBroadcast(clock, streamStartedAt) {
+  const elapsed = Math.floor((clock - streamStartedAt) / 1000);
+  return {
+    user: { id: '1001' },
+    stream: {
+      id: '7777', user_id: '1001', user_name: 'AmaanaYT',
+      user_login: 'amaanayt', title: 'Ranked gaming session', game_id: '509658',
+      game_name: 'Test Game', started_at: new Date(streamStartedAt).toISOString()
+    },
+    vod: {
+      id: '9001', stream_id: '7777', user_id: '1001', type: 'archive',
+      title: 'Ranked gaming session', created_at: new Date(streamStartedAt).toISOString(),
+      duration: formatTwitchDuration(elapsed)
+    }
   };
 }
 
@@ -178,6 +242,128 @@ test('creates one private-pipeline batch from Amaana-discovered Twitch clip evid
   assert.equal(h.calls.vodListOptions.first, 20);
 });
 
+test('captures and screens live segments, then queues the 15-minute review batch before stream end', async () => {
+  let clock = Date.parse('2026-10-18T15:00:00.000Z');
+  const streamStartedAt = clock - 60 * MINUTE;
+  const video = {
+    async inspectMedia() { return { durationSeconds: 60, width: 1280, height: 720 }; },
+    async verifyGameplay() {
+      return { verified: true, totalFrames: 5, activeGameplayFrames: 5,
+        confidence: 0.95, gameName: 'Test Game', model: 'fixture' };
+    }
+  };
+  const h = harness({
+    liveBroadcast: () => makeLiveBroadcast(clock, streamStartedAt),
+    video, startAt: clock, now: () => clock, targetDurationSeconds: 900
+  });
+
+  const first = await h.discovery.runLive();
+  assert.equal(first.captureAccepted, true);
+  assert.equal(first.batchesQueued, 0);
+  assert.equal(h.state.liveSessions['7777'].candidates.length, 1);
+
+  let finalResult = first;
+  for (let index = 1; index < 15; index += 1) {
+    clock += 3 * MINUTE;
+    h.setNow(clock);
+    finalResult = await h.discovery.runLive();
+  }
+  assert.equal(finalResult.captureAccepted, true);
+  assert.equal(finalResult.batchesQueued, 1);
+  assert.equal(h.drafts.length, 4);
+  const batch = h.drafts.find((draft) =>
+    draft.sourceType === 'twitch_highlight_batch' && draft.discoverySource === 'twitch_live_capture');
+  const liveShorts = h.drafts.filter((draft) =>
+    draft.sourceType === 'twitch_vod' && draft.discoverySource === 'twitch_live_capture');
+  assert.equal(batch.discoverySource, 'twitch_live_capture');
+  assert.equal(batch.streamId, '7777');
+  assert.equal(batch.targetHighlightDurationSeconds, 900);
+  assert.equal(batch.highlights.reduce((sum, item) => sum + item.duration, 0), 900);
+  assert.equal(batch.twitchClips.length, 15);
+  assert.deepEqual(batch.shortCandidateIndexes, []);
+  assert.ok(batch.twitchClips.every((clip) =>
+    clip.liveCapture === true && clip.requestProofVersion === 1 &&
+    clip.requestedVodId === '9001'));
+  assert.deepEqual(h.enqueued, [batch.id]);
+  assert.equal(liveShorts.length, 3);
+  assert.equal(h.enqueuedClips.length, 3);
+  assert.ok(liveShorts.every((draft) =>
+    draft.status === 'clip_queued' && draft.liveCapture === true &&
+    draft.visualGameplayVerification.verified === true));
+  assert.equal(h.calls.liveClipCreates.length, 15);
+  assert.ok(h.calls.liveClipCreates.every((request, index, requests) =>
+    index === 0 || request.vodOffset - requests[index - 1].vodOffset === 180));
+
+  await h.discovery.runLive();
+  assert.equal(h.calls.liveClipCreates.length, 15);
+  assert.equal(h.drafts.length, 4);
+});
+
+test('does not keep or queue a live Twitch clip that fails visual gameplay review', async () => {
+  let clock = Date.parse('2026-10-18T15:00:00.000Z');
+  const streamStartedAt = clock - 60 * MINUTE;
+  const h = harness({
+    liveBroadcast: () => makeLiveBroadcast(clock, streamStartedAt),
+    video: {
+      async inspectMedia() { return { durationSeconds: 60, width: 1280, height: 720 }; },
+      async verifyGameplay() {
+        return { verified: false, totalFrames: 5, activeGameplayFrames: 1,
+          confidence: 0.4, gameName: 'Test Game', model: 'fixture' };
+      }
+    },
+    startAt: clock, now: () => clock, targetDurationSeconds: 60
+  });
+
+  const result = await h.discovery.runLive();
+  assert.equal(result.gameplayRejected, 1);
+  assert.equal(h.state.liveSessions['7777'].candidates.length, 0);
+  assert.equal(h.drafts.length, 0);
+  assert.deepEqual(h.enqueued, []);
+  assert.deepEqual(h.enqueuedClips, []);
+});
+
+test('flushes leftover verified live captures into a private Short draft when the stream ends', async () => {
+  let clock = Date.parse('2026-10-18T15:00:00.000Z');
+  const streamStartedAt = clock - 60 * MINUTE;
+  let isLive = true;
+  const h = harness({
+    liveBroadcast: () => isLive ? makeLiveBroadcast(clock, streamStartedAt) : null,
+    video: {
+      async inspectMedia() { return { durationSeconds: 60, width: 1280, height: 720 }; },
+      async verifyGameplay() {
+        return { verified: true, totalFrames: 5, activeGameplayFrames: 5,
+          confidence: 0.95, gameName: 'Test Game', model: 'fixture' };
+      }
+    },
+    startAt: clock, now: () => clock, targetDurationSeconds: 900
+  });
+  await h.discovery.runLive();
+  clock += 3 * MINUTE;
+  h.setNow(clock);
+  await h.discovery.runLive();
+  assert.equal(h.drafts.length, 0);
+
+  isLive = false;
+  const result = await h.discovery.runLive();
+
+  assert.equal(result.status, 'not_live');
+  assert.equal(result.liveShortsQueued, 1);
+  assert.equal(h.drafts.length, 1);
+  assert.equal(h.drafts[0].sourceType, 'twitch_vod');
+  assert.equal(h.drafts[0].liveCapture, true);
+  assert.deepEqual(h.enqueuedClips, [h.drafts[0].id]);
+});
+
+test('does not create Twitch clips for a live stream when visual gameplay screening is disabled', async () => {
+  const h = harness({ liveBroadcast: makeLiveBroadcast(Date.now(), Date.now() - 60 * MINUTE),
+    visualGameplayVerificationAvailable: false });
+  const result = await h.discovery.runLive();
+
+  assert.equal(result.status, 'visual_gameplay_screening_disabled');
+  assert.equal(h.calls.liveLookups, 0);
+  assert.equal(h.calls.liveClipCreates.length, 0);
+});
+
 test('ignores active streams and non-archive entries even if a provider returns them', async () => {
   const archive = makeVod();
   const live = makeVod('1002', { type: 'live' });
@@ -237,7 +423,6 @@ test('does not duplicate a batch already created for the VOD', async () => {
   assert.equal(h.calls.clipList, 0);
   assert.deepEqual(h.enqueued, []);
 });
-
 
 test('legacy short Twitch drafts do not block a replacement that supersedes them', async () => {
   const vod = makeVod();
