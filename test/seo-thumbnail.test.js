@@ -248,23 +248,32 @@ test('already-applied SEO can retry a transient thumbnail failure without repeat
 });
 
 test('public backlog drains in daily batches and remains idempotent over a two-year horizon', async () => {
+  const previousLimit = process.env.SEO_AUTO_DAILY_LIMIT;
+  process.env.SEO_AUTO_DAILY_LIMIT = '15';
   const privacy = { 130: 'private', 131: 'unlisted' };
   const h = makeHarness(132, { privacy });
   const appliedByDay = [];
-  for (let day = 0; day < 730; day += 1) {
-    h.resetDay();
-    const beforeMeta = h.metadataWrites;
-    const beforeThumb = h.thumbnailWrites;
-    await h.publisher.publishPending(50);
-    const metadataToday = h.metadataWrites - beforeMeta;
-    const thumbnailsToday = h.thumbnailWrites - beforeThumb;
-    assert.ok(metadataToday <= 50);
-    assert.ok(thumbnailsToday <= 50);
-    assert.equal(h.dailyWrites, metadataToday);
-    if (day < 3) appliedByDay.push(metadataToday);
-    else assert.equal(metadataToday, 0);
+  try {
+    for (let day = 0; day < 730; day += 1) {
+      h.resetDay();
+      const beforeMeta = h.metadataWrites;
+      const beforeThumb = h.thumbnailWrites;
+      await h.publisher.publishPending(50);
+      const metadataToday = h.metadataWrites - beforeMeta;
+      const thumbnailsToday = h.thumbnailWrites - beforeThumb;
+      assert.ok(metadataToday <= 15);
+      assert.ok(thumbnailsToday <= 15);
+      assert.equal(h.dailyWrites, metadataToday);
+      if (day < 3) appliedByDay.push(metadataToday);
+      else if (day < 8) assert.equal(metadataToday, 15);
+      else if (day === 8) assert.equal(metadataToday, 10);
+      else assert.equal(metadataToday, 0);
+    }
+  } finally {
+    if (previousLimit === undefined) delete process.env.SEO_AUTO_DAILY_LIMIT;
+    else process.env.SEO_AUTO_DAILY_LIMIT = previousLimit;
   }
-  assert.deepEqual(appliedByDay, [50, 50, 30]);
+  assert.deepEqual(appliedByDay, [15, 15, 15]);
   assert.equal(h.metadataWrites, 130);
   assert.equal(h.thumbnailWrites, 130);
   assert.equal([...h.live.values()].filter((video) => video.status.privacyStatus === 'public').length, 130);

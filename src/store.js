@@ -383,7 +383,12 @@ async function listSeoVideos(limit = 50, offset = 0) {
         LIMIT 2
       ) snapshot) AS "youtubeSearchSnapshots"
     FROM amaana_seo_packages p LEFT JOIN amaana_video_analysis a ON a.video_id = p.video_id
-    ORDER BY CASE WHEN p.source->>'privacyStatus' = 'public' THEN 0 ELSE 1 END,
+    ORDER BY CASE WHEN (p.source->>'publishedAt')::timestamptz >= NOW() - INTERVAL '14 days'
+        AND (p.source->>'publishedAt')::timestamptz <= NOW() + INTERVAL '1 day' THEN 0 ELSE 1 END,
+      CASE WHEN (p.source->>'publishedAt')::timestamptz >= NOW() - INTERVAL '14 days'
+        AND (p.source->>'publishedAt')::timestamptz <= NOW() + INTERVAL '1 day'
+        THEN (p.source->>'publishedAt')::timestamptz END DESC NULLS LAST,
+      CASE WHEN p.source->>'privacyStatus' = 'public' THEN 0 ELSE 1 END,
       CASE WHEN p.source->>'privacyStatus' = 'public'
         AND p.source->>'viewCount' ~ '^[0-9]+$' THEN 0 ELSE 1 END,
       CASE WHEN p.source->>'privacyStatus' = 'public'
@@ -668,10 +673,18 @@ async function claimSeoVideo() {
   const token = crypto.randomUUID();
   const result = await pool.query(`WITH candidate AS (
       SELECT video_id FROM amaana_seo_packages
-      WHERE source->>'privacyStatus' = 'public'
+      WHERE source->>'privacyStatus' IN ('public', 'private', 'unlisted')
+        AND (source->>'privacyStatus' = 'public' OR
+          ((source->>'publishedAt')::timestamptz >= NOW() - INTERVAL '14 days'
+            AND (source->>'publishedAt')::timestamptz <= NOW() + INTERVAL '1 day'))
         AND ((status IN ('queued', 'retry') AND (next_attempt_at IS NULL OR next_attempt_at <= NOW()))
         OR (status = 'generating' AND claimed_at < NOW() - INTERVAL '20 minutes'))
-      ORDER BY CASE WHEN source->>'viewCount' ~ '^[0-9]+$' THEN 0 ELSE 1 END,
+      ORDER BY CASE WHEN (source->>'publishedAt')::timestamptz >= NOW() - INTERVAL '14 days'
+          AND (source->>'publishedAt')::timestamptz <= NOW() + INTERVAL '1 day' THEN 0 ELSE 1 END,
+        CASE WHEN (source->>'publishedAt')::timestamptz >= NOW() - INTERVAL '14 days'
+          AND (source->>'publishedAt')::timestamptz <= NOW() + INTERVAL '1 day'
+          THEN (source->>'publishedAt')::timestamptz END DESC NULLS LAST,
+        CASE WHEN source->>'viewCount' ~ '^[0-9]+$' THEN 0 ELSE 1 END,
         CASE WHEN source->>'viewCount' ~ '^[0-9]+$'
           THEN (source->>'viewCount')::numeric END ASC NULLS LAST,
         source->>'publishedAt' ASC NULLS LAST, created_at ASC
@@ -747,6 +760,7 @@ async function listSeoAutoCandidates(limit = 20, autopilotVersion = SEO_AUTOPILO
           THEN jsonb_array_length(package->'missingEvidence')
         ELSE 2147483647 END AS "missingEvidenceCount",
       generated_at AS "generatedAt",
+      source->>'publishedAt' AS "publishedAt",
       CASE WHEN source->>'viewCount' ~ '^[0-9]+$'
         THEN source->>'viewCount' ELSE NULL END AS "viewCount"
     FROM amaana_seo_packages
@@ -768,8 +782,8 @@ async function listSeoAutoCandidates(limit = 20, autopilotVersion = SEO_AUTOPILO
 async function seoUpdatesToday() {
   await init();
   const result = await pool.query(`SELECT COUNT(*)::integer AS count FROM amaana_seo_packages
-    WHERE (applied->>'at')::timestamptz >= date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
-      OR (auto_result->>'thumbnailAt')::timestamptz >= date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`);
+    WHERE (applied->>'at')::timestamptz >= date_trunc('day', NOW() AT TIME ZONE 'America/Los_Angeles') AT TIME ZONE 'America/Los_Angeles'
+      OR (auto_result->>'thumbnailAt')::timestamptz >= date_trunc('day', NOW() AT TIME ZONE 'America/Los_Angeles') AT TIME ZONE 'America/Los_Angeles'`);
   return result.rows[0].count;
 }
 

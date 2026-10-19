@@ -7,6 +7,7 @@ const { rateThumbnailBriefs } = require('./thumbnail-rating');
 const { ensureCreatorTag, youtubeTagCharacters, isYouTubeAuthorizationError } = require('./channel-tags');
 const { findMetadataConflicts } = require('./metadata-uniqueness');
 const SEO_AUTOPILOT_VERSION = require('./seo-autopilot-version');
+const { isYouTubeQuotaError, youtubeQuotaRetryAt } = require('./youtube-quota');
 
 function problem(message, status = 400) {
   const error = new Error(message);
@@ -348,7 +349,7 @@ async function uploadSeoThumbnail(videoId, video, item, { youtube, fetchImpl, re
 function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetch,
   renderThumbnail = createThumbnailFromImage }) {
   const configuredLimit = Number(process.env.SEO_AUTO_DAILY_LIMIT);
-  const dailyLimit = Number.isSafeInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : 50;
+  const dailyLimit = Number.isSafeInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : 15;
   const legacyContextBlock = 'Video analysis or owner supplied video context is required for automatic publishing';
 
   async function recordResult(videoId, generation, metadata, thumbnail, prior = {}) {
@@ -375,6 +376,13 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
     }
     await store.markSeoAutoResult(videoId, result);
     return result;
+  }
+
+  async function recordFailure(videoId, generation, metadata, thumbnail, prior, error) {
+    const result = await recordResult(videoId, generation, metadata, thumbnail, prior);
+    return isYouTubeQuotaError(error)
+      ? { ...result, quotaBlocked: true, quotaRetryAt: youtubeQuotaRetryAt(error) }
+      : result;
   }
 
   async function publishVideo(videoId, currentPublicMetadata = null) {
@@ -418,6 +426,7 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
     }
 
     let metadata = metadataDone ? { state: prior.state, reason: prior.reason } : null;
+    let quotaFailure = null;
     let edit = null;
     if (!metadataDone) {
       try {
@@ -465,12 +474,13 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
       assertVideoMatchesCatalog(video, channel.id, item);
     } catch (error) {
       const retry = retryablePublishError(error);
+      if (isYouTubeQuotaError(error)) quotaFailure = error;
       if (metadataWritePending) metadata = { state: retry ? 'retry' : 'skipped',
         reason: publishErrorMessage(error) };
       if (thumbnailWritePending) thumbnail = { state: retry ? 'retry' : 'skipped',
         reason: publishErrorMessage(error) };
       logger.warn?.('SEO auto publish ' + videoId + ': ' + publishErrorMessage(error));
-      return recordResult(videoId, generation, metadata, thumbnail, prior);
+      return recordFailure(videoId, generation, metadata, thumbnail, prior, error);
     }
 
     if (typeof store.seoUpdatesToday === 'function' &&
@@ -497,6 +507,7 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
         logger.info?.('SEO metadata applied to public video ' + videoId);
       } catch (error) {
         const retry = retryablePublishError(error);
+        if (isYouTubeQuotaError(error)) quotaFailure = error;
         metadata = { state: retry ? 'retry' : 'skipped', reason: publishErrorMessage(error) };
         if (thumbnailWritePending) thumbnail = { state: retry ? 'retry' : 'skipped',
           reason: 'Thumbnail waits for metadata write: ' + publishErrorMessage(error).slice(0, 220) };
@@ -513,21 +524,28 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
         if (result.state === 'applied') logger.info?.('SEO thumbnail applied to public video ' + videoId);
       } catch (error) {
         const retry = retryablePublishError(error);
+        if (isYouTubeQuotaError(error)) quotaFailure = error;
         thumbnail = { state: retry ? 'retry' : 'skipped', reason: publishErrorMessage(error) };
         logger.warn?.('SEO thumbnail ' + videoId + ': ' + thumbnail.reason);
       }
     }
 
-    return recordResult(videoId, generation, metadata, thumbnail, prior);
+    return recordFailure(videoId, generation, metadata, thumbnail, prior, quotaFailure);
   }
 
   async function publishPending(limit = 20, currentPublicMetadata = null) {
     const candidates = await store.listSeoAutoCandidates(limit, SEO_AUTOPILOT_VERSION);
     logger.info?.('SEO metadata and thumbnail candidates: ' + candidates.length);
+    let processed = 0;
     for (const candidate of candidates) {
       const result = await publishVideo(candidate.videoId, currentPublicMetadata);
+      processed += 1;
+      if (result?.quotaBlocked) {
+        return { processed, quotaBlocked: true, quotaRetryAt: result.quotaRetryAt };
+      }
       if (result?.deferred) break;
     }
+    return { processed, quotaBlocked: false };
   }
 
   async function updateChannel() {

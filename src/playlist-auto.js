@@ -2,19 +2,11 @@
 
 const { chooseAutoPlaylist } = require('./youtube-playlists');
 const { isYouTubeAuthorizationError } = require('./channel-tags');
+const { youtubeQuotaDate } = require('./youtube-quota');
 
 function setting(value, fallback, cap) {
   const number = Number(value);
   return Number.isSafeInteger(number) && number > 0 ? Math.min(number, cap) : fallback;
-}
-
-function youtubeQuotaDate(timestamp) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit'
-  }).formatToParts(new Date(timestamp));
-  const value = Object.fromEntries(parts.filter((part) => part.type !== 'literal')
-    .map((part) => [part.type, part.value]));
-  return [value.year, value.month, value.day].join('-');
 }
 
 function playlistErrorState(error) {

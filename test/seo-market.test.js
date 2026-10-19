@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { createSeoMarket, detectGame } = require('../src/seo-market');
+const { createSeoMarket, detectGame, summarizeMarketSamples } = require('../src/seo-market');
 
 const NOW = Date.parse('2026-10-03T12:00:00.000Z');
 const PUBLIC_SOURCE = { title: 'ARC Raiders match', privacyStatus: 'public', channelId: 'owner-channel' };
@@ -14,6 +14,7 @@ function fixture(options = {}) {
   const savedBudgets = [];
   let budget = options.budget || null;
   let recentCalls = 0;
+  let requestedGame = null;
   let warnings = 0;
   const store = {
     getSeoMarketSnapshot: async (game) => snapshots.get(game) || null,
@@ -29,8 +30,9 @@ function fixture(options = {}) {
     ...(options.store || {})
   };
   const youtube = {
-    recentGameVideos: async () => {
+    recentGameVideos: async (game) => {
       recentCalls += 1;
+      requestedGame = game;
       if (options.error) throw options.error;
       return options.examples || [];
     },
@@ -45,7 +47,7 @@ function fixture(options = {}) {
   });
   return {
     market, snapshots, savedSnapshots, savedBudgets, currentTime,
-    calls: () => recentCalls, warnings: () => warnings,
+    calls: () => recentCalls, requestedGame: () => requestedGame, warnings: () => warnings,
     budget: () => budget
   };
 }
@@ -58,7 +60,7 @@ test('detects recognized games from title or a bounded description and ignores u
   assert.equal(detectGame({ title: 'Unrelated', description: 'x'.repeat(251) + ' ARC Raiders' }), null);
 });
 
-test('research is disabled for opt-out, non-public, unknown-game, and incomplete-store cases', async () => {
+test('research is disabled for opt-out, unknown-game, and incomplete-store cases; private uploads use only the game query', async () => {
   const disabled = fixture({ enabled: 'false' });
   const privateVideo = fixture();
   const unknown = fixture();
@@ -67,7 +69,8 @@ test('research is disabled for opt-out, non-public, unknown-game, and incomplete
   assert.equal(await privateVideo.market.research({ ...PUBLIC_SOURCE, privacyStatus: 'private' }), null);
   assert.equal(await unknown.market.research({ ...PUBLIC_SOURCE, title: 'Unrelated' }), null);
   assert.equal(await incomplete.market.research(PUBLIC_SOURCE), null);
-  assert.equal(disabled.calls() + privateVideo.calls() + unknown.calls() + incomplete.calls(), 0);
+  assert.equal(disabled.calls() + privateVideo.calls() + unknown.calls() + incomplete.calls(), 1);
+  assert.equal(privateVideo.requestedGame(), 'ARC Raiders');
 });
 
 test('reuses a fresh cached sample without spending the daily research budget', async () => {
@@ -95,24 +98,49 @@ test('refreshes stale samples, excludes the owner channel, caps examples at five
   assert.equal(state.calls(), 1);
   assert.equal(snapshot.samples.length, 5);
   assert.deepEqual(snapshot.samples.map((item) => item.id),
-    ['sample-1', 'sample-2', 'sample-3', 'sample-4', 'sample-5']);
-  assert.equal(snapshot.samples[0].estimatedViewsPerDay, 100);
+    ['sample-6', 'sample-5', 'sample-4', 'sample-3', 'sample-2']);
+  assert.equal(snapshot.samples[0].estimatedViewsPerDay, 600);
+  assert.equal(snapshot.metrics.sampleCount, 6);
+  assert.ok(snapshot.samples[0].smoothedViewsPerDay > 0);
+  assert.ok(snapshot.metrics.confidence > 0);
   assert.deepEqual(Object.keys(snapshot.samples[0]).sort(),
-    ['estimatedViewsPerDay', 'id', 'publishedAt', 'title', 'viewCount']);
+    ['estimatedViewsPerDay', 'id', 'publishedAt', 'smoothedViewsPerDay', 'title', 'velocityIndex', 'viewCount']);
   assert.equal(state.savedSnapshots.length, 1);
 });
 
-test('enforces the three-request UTC-day budget and resets it on the next day', async () => {
+test('enforces the three-query Pacific quota-day budget and resets at midnight Pacific', async () => {
   const currentTime = { value: NOW };
   const state = fixture({ currentTime, budget: { date: '2026-10-03', used: 3 },
-    examples: [{ id: 'sample', channelId: 'other-channel', viewCount: 20 }] });
+    examples: [{ id: 'sample', title: 'ARC Raiders gameplay', channelId: 'other-channel',
+      publishedAt: '2026-10-03T00:00:00.000Z', viewCount: 20 }] });
   assert.equal(await state.market.research(PUBLIC_SOURCE), null);
   assert.equal(state.calls(), 0);
-  currentTime.value = Date.parse('2026-10-04T00:01:00.000Z');
+  currentTime.value = Date.parse('2026-10-04T07:01:00.000Z');
   const result = await state.market.research(PUBLIC_SOURCE);
   assert.equal(result.samples.length, 1);
   assert.deepEqual(state.budget(), { date: '2026-10-04', used: 1 });
   assert.equal(state.calls(), 1);
+});
+
+test('market ranking shrinks very new view spikes, reports robust spread, and scores repeated title phrases', () => {
+  const now = Date.parse('2026-10-07T12:00:00Z');
+  const examples = [
+    { id: 'new-spike', title: 'ARC Raiders solo extraction', publishedAt: '2026-10-07T11:00:00Z', viewCount: 600 },
+    { id: 'steady-one', title: 'ARC Raiders solo extraction guide', publishedAt: '2026-10-04T12:00:00Z', viewCount: 900 },
+    { id: 'steady-two', title: 'ARC Raiders solo fight', publishedAt: '2026-10-04T12:00:00Z', viewCount: 600 },
+    { id: 'steady-three', title: 'ARC Raiders squad gameplay', publishedAt: '2026-10-04T12:00:00Z', viewCount: 300 }
+  ];
+  const summary = summarizeMarketSamples(examples, { now, game: 'ARC Raiders' });
+  assert.equal(summary.metrics.sampleCount, 4);
+  assert.equal(summary.metrics.priorDays, 2);
+  assert.equal(summary.metrics.priorViewsPerDay, 250);
+  assert.equal(summary.metrics.medianViewsPerDay, 250);
+  assert.equal(summary.samples[0].id, 'new-spike');
+  assert.equal(summary.samples[0].smoothedViewsPerDay, 367);
+  assert.ok(summary.samples[0].smoothedViewsPerDay < summary.samples[0].estimatedViewsPerDay);
+  assert.ok(summary.metrics.medianAbsoluteDeviation > 0);
+  assert.ok(summary.metrics.confidence > 0 && summary.metrics.confidence < 1);
+  assert.ok(summary.terms.some((term) => term.phrase === 'solo extraction' && term.sampleCount === 2));
 });
 
 test('fails closed on YouTube research errors and records a warning', async () => {
@@ -121,6 +149,29 @@ test('fails closed on YouTube research errors and records a warning', async () =
   assert.equal(state.calls(), 1);
   assert.equal(state.budget().used, 1);
   assert.equal(state.warnings(), 1);
+});
+
+test('daily YouTube quota failures persist a Pacific-midnight cooldown and suppress repeated market calls', async () => {
+  const currentTime = { value: Date.parse('2026-10-03T12:00:00.000Z') };
+  let savedState = null;
+  const state = fixture({ currentTime,
+    error: Object.assign(new Error('YouTube daily quota exceeded'), {
+      response: { status: 403, data: { error: { errors: [{ reason: 'quotaExceeded' }] } } }
+    }),
+    store: {
+      getSeoSyncState: async () => ({}),
+      saveSeoSyncState: async (next) => { savedState = next; }
+    }
+  });
+
+  await state.market.research(PUBLIC_SOURCE);
+  assert.equal(state.calls(), 1);
+  assert.equal(savedState.youtubeDataApiBlockReason, 'YouTube Data API daily quota exceeded');
+  assert.equal(savedState.youtubeDataApiBlockedUntil,
+    new Date(Date.parse('2026-10-04T07:00:00Z')).toISOString());
+  currentTime.value += 60 * 1000;
+  await state.market.research(PUBLIC_SOURCE);
+  assert.equal(state.calls(), 1);
 });
 
 test('backs off ordinary scheduler failures for five minutes instead of retrying on every health check', async () => {

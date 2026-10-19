@@ -219,7 +219,9 @@ function validatePackage(raw, source, context, analysis = null, marketEvidence =
     evidence: { chapterSource: markers[0]?.provenance || null, clipSource: clipMarkers[0]?.provenance || null,
       videoAnalysis: Boolean(analysis),
       marketObservedAt: marketEvidence?.observedAt || null,
-      marketSampleSize: marketEvidence?.samples?.length || 0 },
+      marketSampleSize: marketEvidence?.metrics?.sampleCount || marketEvidence?.samples?.length || 0,
+      marketMetrics: marketEvidence?.metrics || null,
+      marketTerms: marketEvidence?.terms?.slice(0, 8) || [] },
     generatedAt: new Date().toISOString()
   };
 }
@@ -271,6 +273,8 @@ async function generatePackage(source, context, { apiKey, model, baseUrl, fallba
     marketEvidence: marketEvidence ? {
       game: marketEvidence.game, query: marketEvidence.query,
       observedAt: marketEvidence.observedAt, windowDays: marketEvidence.windowDays,
+      metrics: marketEvidence.metrics || null,
+      terms: marketEvidence.terms?.slice(0, 8) || [],
       samples: marketEvidence.samples?.slice(0, 5)
     } : null,
     existingChannelVideos: (Array.isArray(metadataPeers) ? metadataPeers : []).slice(0, 80).map((item) => ({
@@ -290,7 +294,7 @@ The hook is 50 to 160 characters and includes the primary keyword naturally. The
 Each thumbnail overlay has at most four words, complements its title, and has clear contrast in light and dark feeds.
 Return 3 to 8 focused tags, ordered from most relevant to least relevant. The first tag must be the exact primaryKeyword verbatim; then add exact game or mode terms, meaningful aliases, and common misspellings. Do not pad the list with generic tags. Only the first eight candidates are considered; the exact primary keyword is moved to the first position or added if missing, and total tag text stays under 450 characters. Treat tags as supporting metadata rather than a ranking driver.
 Keep each title and thumbnail promise accurate to the actual footage. Optimize for viewer satisfaction and watch time rather than click-through rate alone; a click is not a success if the video does not deliver on its promise.
-Market examples are recent public videos, not search demand estimates or proof of this video's content. Their estimatedViewsPerDay is a rough age-adjusted view-velocity sample with a one-day age floor; never describe it as search demand, likely virality, or a forecast. Never copy another creator's title or imply that an event, weapon, outcome, or update appears here unless the owner input or video analysis confirms it.
+Market evidence is a sample of recent public YouTube search results, not search volume, total demand, or proof of this video's content. Compare age-adjusted and two-day median-shrunk view velocity, sample size, dispersion, and recurring title phrases only as weak market context. Use a phrase only when the footage, owner input, or video analysis supports it; never copy another creator's title or imply that an event, weapon, outcome, or update appears here unless the owner input or video analysis confirms it.
 Do not invent games, outcomes, quotes, products, events, or steps absent from the evidence.
 Do not turn approximate video analysis moments into verified timestamps. Chapter and clip times are assembled separately from grounded markers. Provide clipHooks only for the supplied clip markers.
 Write in the video's language. No Markdown fencing. JSON only.

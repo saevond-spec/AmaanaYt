@@ -414,6 +414,7 @@ test('market search keeps only recently published public videos and their observ
   const items = await youtube.recentGameVideos('ARC Raiders', { now: Date.parse('2026-10-02T12:00:00Z') });
   assert.equal(query.q, 'ARC Raiders gameplay');
   assert.equal(query.type, 'video');
+  assert.equal(query.maxResults, 50);
   assert.equal(query.publishedAfter, '2026-09-25T12:00:00.000Z');
   assert.deepEqual(items.map((item) => item.id), ['public-2', 'public-1']);
   assert.deepEqual(items.map((item) => item.estimatedViewsPerDay), [333, 67]);

@@ -48,7 +48,9 @@ services:
       - key: YOUTUBE_PUBLIC_LIVE_MONETIZATION
         value: 'true'
       - key: SEO_AUTO_DAILY_LIMIT
-        value: '50'
+        value: '15'
+      - key: SEO_SCAN_INTERVAL_MINUTES
+        value: '15'
       - key: ENABLE_VIDEO_ANALYSIS
         value: 'true'
       - key: VIDEO_ANALYSIS_API_KEY

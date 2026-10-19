@@ -253,6 +253,35 @@ test('publisher skips when live visibility differs from the scanned visibility',
   assert.match(result.reason, /visibility changed/);
 });
 
+test('publisher stops its batch after the first daily quota error and returns the reset time', async () => {
+  const row = item();
+  let result = null;
+  let videoReads = 0;
+  const quotaError = Object.assign(new Error('The YouTube Data API quota was exceeded'), {
+    response: { status: 403, data: { error: { errors: [{ reason: 'quotaExceeded' }] } } }
+  });
+  const store = {
+    listSeoAutoCandidates: async () => ['one', 'two', 'three'].map((videoId) => ({ videoId })),
+    getSeoVideo: async () => row,
+    getSeoSyncState: async () => ({ channelId: 'channel-1' }),
+    markSeoAutoResult: async (_id, value) => { result = value; }
+  };
+  const youtube = {
+    ownedChannel: async () => ({ id: 'channel-1' }),
+    assertTargetChannel: async () => {},
+    getVideo: async () => { videoReads += 1; throw quotaError; },
+    updateVideoSeo: async () => { throw new Error('A quota failure must not proceed to writes'); }
+  };
+  const publisher = createSeoPublisher({ store, youtube, logger: { info() {}, warn() {} } });
+  const outcome = await publisher.publishPending(3);
+
+  assert.equal(videoReads, 1);
+  assert.equal(outcome.processed, 1);
+  assert.equal(outcome.quotaBlocked, true);
+  assert.ok(outcome.quotaRetryAt > Date.now());
+  assert.equal(result.state, 'retry');
+});
+
 test('publisher does not change an active public livestream', async () => {
   const row = item();
   let updated = false;
@@ -564,6 +593,77 @@ test('worker analyzes a public upload, publishes its SEO, and updates channel ke
   assert.equal(events.length, 4);
 });
 
+test('fresh private uploads receive a current-market SEO package without YouTube writes', async () => {
+  const recentAt = new Date().toISOString();
+  const state = { channelId: 'channel-1', channelTitle: 'Saevond', recentAt,
+    completed: true, viewPriorityScanVersion: 1, enabled: true };
+  const source = { title: 'ARC Raiders squad extraction', description: 'Owner notes describe the observed match. '.repeat(3),
+    tags: [], channelId: 'channel-1', privacyStatus: 'private', publishedAt: recentAt, viewCount: null,
+    durationSeconds: 900 };
+  let claimed = false;
+  let row = { videoId: 'private-video', source, context: { takeaways: 'The squad reached extraction.' },
+    status: 'queued', package: null };
+  let generatedOptions;
+  let videoReads = 0;
+  let metadataWrites = 0;
+  let thumbnailWrites = 0;
+  const market = { research: async (currentSource) => {
+    assert.equal(currentSource.privacyStatus, 'private');
+    return { game: 'ARC Raiders', observedAt: recentAt, windowDays: 7,
+      metrics: { sampleCount: 12, medianViewsPerDay: 100, p90ViewsPerDay: 250, confidence: 0.4 },
+      terms: [{ phrase: 'squad extraction', score: 0.8, sampleCount: 4 }],
+      samples: [{ id: 'example', title: 'ARC Raiders squad extraction', viewCount: 700,
+        estimatedViewsPerDay: 100, smoothedViewsPerDay: 90 }] };
+  } };
+  const store = {
+    getSeoSyncState: async () => state,
+    saveSeoSyncState: async () => {},
+    listPublicSeoMetadata: async () => [],
+    countPublicSeoVideos: async () => 0,
+    listSeoAutoCandidates: async () => [],
+    listSeoChannelCandidates: async () => [],
+    seoCounts: async () => ({ attemptedToday: 0 }),
+    claimSeoVideo: async () => {
+      if (claimed) return null;
+      claimed = true;
+      return { ...row, claimToken: 'claim', attempts: 1 };
+    },
+    finishSeoVideo: async (_id, _token, generated) => {
+      row = { ...row, package: generated, status: 'ready', generatedAt: recentAt };
+    },
+    getSeoVideo: async () => row,
+    markSeoAutoResult: async () => {},
+    seoUpdatesToday: async () => 0
+  };
+  const youtube = {
+    isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Saevond', uploads: 'uploads-1' }),
+    channelSeo: async () => ({ id: 'channel-1', title: 'Saevond', description: 'Existing channel description',
+      keywords: 'gaming' }),
+    assertTargetChannel: async () => {},
+    updateChannelSeo: async () => {},
+    getVideo: async () => { videoReads += 1; throw new Error('Private package must not fetch for publishing'); },
+    updateVideoSeo: async () => { metadataWrites += 1; },
+    setThumbnail: async () => { thumbnailWrites += 1; }
+  };
+  const worker = createSeoWorker({ store, youtube, market, env: { SEO_AUTO_PUBLISH: 'true',
+    SEO_AI_API_KEY: 'test', SEO_AI_MODEL: 'test-model', SEO_DAILY_LIMIT: '1' },
+  generate: async (_source, _context, options) => {
+    generatedOptions = options;
+    return { ...item().package, missingEvidence: [] };
+  }, logger: { info() {}, warn() {}, error() {} } });
+
+  await worker.run();
+
+  assert.equal(row.status, 'ready');
+  assert.equal(row.package.primaryKeyword, 'ARC Raiders');
+  assert.equal(generatedOptions.marketEvidence.metrics.sampleCount, 12);
+  assert.equal(videoReads, 0);
+  assert.equal(metadataWrites, 0);
+  assert.equal(thumbnailWrites, 0);
+  assert.equal(row.source.privacyStatus, 'private');
+});
+
 test('worker reports missing YouTube connection once without accessing the catalog', async () => {
   const logs = [];
   const worker = createSeoWorker({ store: {}, youtube: {
@@ -573,6 +673,24 @@ test('worker reports missing YouTube connection once without accessing the catal
   await worker.run();
   await worker.run();
   assert.deepEqual(logs, ['SEO worker idle: YouTube is not connected']);
+});
+
+test('persisted YouTube daily quota pauses the SEO worker before any Data API reads', async () => {
+  const state = { youtubeDataApiBlockedUntil: new Date(Date.now() + 60 * 60 * 1000).toISOString() };
+  let channelReads = 0;
+  let claims = 0;
+  const worker = createSeoWorker({
+    store: { getSeoSyncState: async () => state,
+      claimSeoVideo: async () => { claims += 1; return null; } },
+    youtube: { isConnected: async () => true,
+      ownedChannel: async () => { channelReads += 1; return { id: 'channel-1' }; } },
+    logger: { info() {} }
+  });
+
+  await worker.run();
+
+  assert.equal(channelReads, 0);
+  assert.equal(claims, 0);
 });
 
 test('one-time owner approval resumes a paused catalog, then respects a later manual pause', async () => {

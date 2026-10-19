@@ -65,7 +65,7 @@ test('market samples use fresh public data, exclude the creator, and respect a p
   assert.deepEqual(snapshot.samples.map((sample) => sample.id), ['other']);
   assert.equal((await market.research(source)).samples[0].viewCount, 300);
   assert.deepEqual(searches, ['ARC Raiders']);
-  assert.equal(await market.research({ ...source, privacyStatus: 'private' }), null);
+  assert.equal((await market.research({ ...source, privacyStatus: 'private' })).samples[0].id, 'other');
   assert.equal(detectGame({ title: 'NARAKA Songbird Arena' }), 'NARAKA: BLADEPOINT');
   await market.research({ ...source, title: 'NARAKA Songbird' });
   await market.research({ ...source, title: 'Apex Legends' });
