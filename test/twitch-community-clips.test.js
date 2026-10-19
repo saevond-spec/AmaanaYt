@@ -5,7 +5,8 @@ const assert = require('node:assert/strict');
 const {
   buildCommunityClipDrafts,
   clipRetryDelayMs,
-  isRetryableCommunityClipError
+  isRetryableCommunityClipError,
+  reuseOrVerifyGameplay
 } = require('../src/twitch-community-clips');
 
 const STREAM_START = Date.parse('2026-10-19T10:00:00.000Z');
@@ -90,6 +91,39 @@ test('ranks with robust log-view signals plus a 30-minute recency half-life', ()
   const drafts = buildCommunityClipDrafts([old, recent], context());
   assert.equal(drafts[0].twitchClipId, 'recent');
   assert.ok(drafts.every((draft) => draft.communityClipScore >= 0 && draft.communityClipScore <= 1));
+});
+
+test('retry reuses a persisted gameplay verification without calling Gemini again', async () => {
+  const verified = {
+    verified: true, totalFrames: 5, activeGameplayFrames: 5, confidence: 0.98,
+    evidence: ['frame 1', 'frame 2', 'frame 3', 'frame 4', 'frame 5']
+  };
+  let calls = 0;
+  const result = await reuseOrVerifyGameplay(verified, async () => {
+    calls += 1;
+    throw new Error('Gemini returned HTTP 503');
+  });
+  assert.equal(result.reused, true);
+  assert.equal(result.gameplay, verified);
+  assert.equal(calls, 0);
+});
+
+test('retry runs screening when saved verification is missing or below the quality floor', async () => {
+  const verified = {
+    verified: true, totalFrames: 5, activeGameplayFrames: 4, confidence: 0.91,
+    evidence: ['frame 1', 'frame 2', 'frame 3', 'frame 4', 'frame 5']
+  };
+  let calls = 0;
+  const result = await reuseOrVerifyGameplay(null, async () => {
+    calls += 1;
+    return verified;
+  });
+  assert.equal(result.reused, false);
+  assert.equal(result.gameplay, verified);
+  assert.equal(calls, 1);
+  await assert.rejects(reuseOrVerifyGameplay(null, async () => ({
+    ...verified, confidence: 0.79
+  })), /failed visual gameplay verification/);
 });
 
 test('retry delays are deterministic, exponential with bounded jitter, and capped at six hours', () => {
