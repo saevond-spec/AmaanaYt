@@ -1,4 +1,6 @@
 const MAX_DESCRIPTION = 5000;
+const PROMPT_METADATA_PEER_LIMIT = 24;
+const PROMPT_METADATA_DESCRIPTION_LIMIT = 120;
 const { rateThumbnailBriefs } = require('./thumbnail-rating');
 const { ensureCreatorTag } = require('./channel-tags');
 const { canonicalText, descriptionCore, findMetadataConflicts } = require('./metadata-uniqueness');
@@ -277,9 +279,9 @@ async function generatePackage(source, context, { apiKey, model, baseUrl, fallba
       terms: marketEvidence.terms?.slice(0, 8) || [],
       samples: marketEvidence.samples?.slice(0, 5)
     } : null,
-    existingChannelVideos: (Array.isArray(metadataPeers) ? metadataPeers : []).slice(0, 80).map((item) => ({
+    existingChannelVideos: (Array.isArray(metadataPeers) ? metadataPeers : []).slice(0, PROMPT_METADATA_PEER_LIMIT).map((item) => ({
       videoId: String(item.videoId || '').slice(0, 32), title: String(item.title || '').slice(0, 100),
-      descriptionOpening: descriptionCore(item.description).slice(0, 240)
+      descriptionOpening: descriptionCore(item.description).slice(0, PROMPT_METADATA_DESCRIPTION_LIMIT)
     })),
     groundedChapters: evidence.chapters.map((item) => ({ time: clock(item.startSeconds), title: item.title })),
     groundedClips: evidence.clips.map((item) => ({ start: clock(item.startSeconds), end: clock(item.endSeconds), title: item.title }))
