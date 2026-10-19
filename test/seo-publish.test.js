@@ -357,6 +357,7 @@ test('publisher does not change an active public livestream', async () => {
 
 test('publisher rejects a wrong channel, changed metadata, and exhausted daily budget', async () => {
   const row = item();
+  const info = [];
   const cases = [
     { channelId: 'another-channel', title: row.source.title, budget: 0,
       reason: /not on the connected channel/, state: 'skipped' },
@@ -385,7 +386,7 @@ test('publisher rejects a wrong channel, changed metadata, and exhausted daily b
         }),
         updateVideoSeo: async () => { updated = true; }
       },
-      logger: { warn() {}, info() {} }
+      logger: { warn() {}, info: (message) => info.push(message) }
     });
     const result = await publisher.publishVideo(row.videoId);
     assert.equal(updated, false);
@@ -394,6 +395,7 @@ test('publisher rejects a wrong channel, changed metadata, and exhausted daily b
     if (value.state === 'deferred') assert.equal(outcome, undefined);
     else assert.equal(outcome.state, value.state);
   }
+  assert.ok(info.some((message) => /Pacific quota day resets/.test(message)));
 });
 
 test('publisher respects an already applied package and retries temporary API failures', async () => {
