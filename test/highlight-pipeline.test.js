@@ -345,24 +345,24 @@ test('legacy Twitch-discovered batches without a target duration cannot create u
   assert.equal(h.counters.publications.length, 0);
 });
 
-test('15-minute batches assemble exactly 900 seconds across verified 60-second sources', async (t) => {
+test('12-minute batches assemble exactly 720 seconds across verified 60-second sources', async (t) => {
   const h = await harness(t, { autoPublish: false, clipDuration: 60 });
-  h.batch.highlights = Array.from({ length: 15 }, (_value, index) => ({
+  h.batch.highlights = Array.from({ length: 12 }, (_value, index) => ({
     startSeconds: index * 120, endSeconds: index * 120 + 60, duration: 60,
     title: 'Gameplay moment ' + (index + 1), reason: 'Verified gameplay exchange', score: 95 - index
   }));
-  h.batch.targetHighlightDurationSeconds = 15 * 60;
-  h.batch.shortCandidateIndexes = [0, 14];
+  h.batch.targetHighlightDurationSeconds = 12 * 60;
+  h.batch.shortCandidateIndexes = [0, 11];
   h.drafts.set(h.batch.id, h.batch);
   await h.processor(h.batch.id);
 
   const parent = h.drafts.get(h.batch.id);
   const shorts = [...h.drafts.values()].filter((draft) => draft.sourceType === 'twitch_highlight_short');
-  assert.equal(h.counters.assemblyTarget, 900);
-  assert.deepEqual(h.counters.validationTarget, { expectedDuration: 900, exactDuration: true });
-  assert.equal(parent.duration, 900);
-  assert.deepEqual(shorts.map((draft) => draft.highlightIndex), [0, 14]);
-  assert.equal(h.counters.gameplayVerifications, 15);
+  assert.equal(h.counters.assemblyTarget, 720);
+  assert.deepEqual(h.counters.validationTarget, { expectedDuration: 720, exactDuration: true });
+  assert.equal(parent.duration, 720);
+  assert.deepEqual(shorts.map((draft) => draft.highlightIndex), [0, 11]);
+  assert.equal(h.counters.gameplayVerifications, 12);
   assert.equal(parent.status, 'awaiting_owner_approval');
   assert.equal(h.counters.publications.length, 0);
 });

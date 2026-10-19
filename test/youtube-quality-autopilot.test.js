@@ -8,14 +8,14 @@ const { qualityWindow, isDueForQualityCheck, runYoutubeQualityAutopilot } =
 function publishedHighlight(overrides = {}) {
   return {
     id: 'highlight-1', sourceType: 'twitch_highlight_batch',
-    targetHighlightDurationSeconds: 900, duration: 900,
+    targetHighlightDurationSeconds: 720, duration: 720,
     publicationStatus: 'published', status: 'completed',
     youtubeVideoId: 'abcdefghijk', publishedAt: '2026-10-01T12:00:00.000Z',
     ...overrides
   };
 }
 
-function report(summary = [['150', '900', '360', '40']], retention =
+function report(summary = [['150', '900', '360', '50']], retention =
   Array.from({ length: 21 }, (_, index) => [index / 20, 0.6])) {
   return { summaryRows: summary, retentionRows: retention };
 }
@@ -47,9 +47,10 @@ test('waits for seven Analytics calendar dates and a three-day reporting delay i
   assert.equal(qualityWindow('not-a-date', new Date('2026-10-10T00:00:00Z')), null);
 });
 
-test('only published 15-minute Twitch highlight videos with mature windows are measured', async () => {
+test('measures mature 12-minute highlights and preserves the 15-minute legacy cohort', async () => {
   const drafts = [
     publishedHighlight(),
+    publishedHighlight({ id: 'legacy-15', targetHighlightDurationSeconds: 900, duration: 900 }),
     publishedHighlight({ id: 'short-video', duration: 60 }),
     publishedHighlight({ id: 'scheduled', publicationStatus: 'scheduled', status: 'scheduled' }),
     publishedHighlight({ id: 'awaiting', publicationStatus: 'pending', status: 'awaiting_owner_approval' }),
@@ -70,11 +71,15 @@ test('only published 15-minute Twitch highlight videos with mature windows are m
     },
     now: new Date('2026-10-11T14:00:00Z'), logger: { info() {}, warn() {} }
   });
-  assert.equal(result.updatedCount, 1);
-  assert.deepEqual(measured, [{ id: 'abcdefghijk', start: '2026-10-02', end: '2026-10-08' }]);
+  assert.equal(result.updatedCount, 2);
+  assert.deepEqual(measured, [
+    { id: 'abcdefghijk', start: '2026-10-02', end: '2026-10-08' },
+    { id: 'abcdefghijk', start: '2026-10-02', end: '2026-10-08' }
+  ]);
   assert.equal(drafts[0].youtubeQualityAssessment.windowDays, 7);
   assert.equal(drafts[0].youtubeQualityAssessment.status, 'within_market_band');
   assert.equal(drafts[0].youtubeQualityRetryAfter, null);
+  assert.equal(drafts[1].youtubeQualityAssessment.status, 'within_market_band');
 });
 
 test('does not read or change drafts until read-only Analytics consent is available', async () => {
@@ -100,7 +105,10 @@ test('uses the ten prior qualifying highlights to score the current channel band
     youtubeQualityVideoId: undefined, youtubeVideoId: 'zzzzzzzzzzz',
     publishedAt: '2026-10-01T12:00:00Z'
   });
-  const drafts = [...older, current];
+  const legacy = publishedHighlight({ id: 'legacy-15', targetHighlightDurationSeconds: 900,
+    duration: 900, youtubeQualityAssessment: { assessedViews: 500, averageViewPercentage: 90,
+      relativeRetentionScore: 0.7 }, youtubeQualityLastCheckedAt: '2026-10-09T12:00:00Z' });
+  const drafts = [...older, legacy, current];
   const store = memoryStore(drafts);
   let calls = 0;
   const youtube = {

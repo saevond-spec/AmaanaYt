@@ -130,7 +130,7 @@ async function refreshTwitchConnection() {
     twitchConnectionHelp.textContent = status.connected && highlightStatus && !highlightStatus.visualGameplayVerificationConfigured
       ? 'Visual gameplay screening is off. Amaana holds edits until ENABLE_GAMEPLAY_SCREENING and VIDEO_ANALYSIS_API_KEY are configured.'
       : status.connected
-        ? 'While you are live, Amaana captures a 60-second segment every 3 minutes and checks for real gameplay. Every five verified captures (about 15 minutes of stream), it uploads a private Short for review. After collecting 15 minutes of verified gameplay footage, it also uploads the 15-minute highlight. Approve each video before it goes public.'
+        ? 'While you are live, Amaana captures a 60-second segment every 3 minutes and checks for real gameplay. Every five verified captures (about 15 minutes of stream), it uploads a private Short for review. After collecting 12 minutes of verified gameplay footage, it also uploads the 12-minute highlight. Approve each video before it goes public.'
         : (status.error || 'Connect the Twitch account that owns the Saevond channel.');
     twitchConnectButton.disabled = false;
     twitchConnectButton.textContent = status.connected ? 'Reconnect Twitch' : 'Connect Twitch';
@@ -240,11 +240,14 @@ function playlistAssignmentText(result) {
 }
 
 
+const ACCEPTED_VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS = new Set([12 * 60, 15 * 60]);
+
 function hasVerifiedGameplayHighlight(draft) {
   const duration = Number(draft && draft.duration);
+  const targetDuration = Number(draft && draft.targetHighlightDurationSeconds);
   if (!draft || draft.sourceType !== 'twitch_highlight_batch' ||
-      Number(draft.targetHighlightDurationSeconds) !== 900 ||
-      !Number.isFinite(duration) || Math.abs(duration - 900) > 0.5 ||
+      !ACCEPTED_VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS.has(targetDuration) ||
+      !Number.isFinite(duration) || Math.abs(duration - targetDuration) > 0.5 ||
       draft.mediaValidation !== 'passed' ||
       !Array.isArray(draft.highlights) || !draft.highlights.length ||
       !Array.isArray(draft.twitchClips) || draft.twitchClips.length !== draft.highlights.length) return false;
@@ -318,8 +321,9 @@ function renderDraft(draft, draftsById = new Map()) {
   if (isHighlight) {
     const measuredDuration = Number(draft.duration) ||
       (draft.highlights || []).reduce((sum, item) => sum + Number(item.duration || 0), 0);
-    const editLabel = verifiedHighlight ? '15-minute gameplay-verified highlight'
-      : formatHighlightDuration(measuredDuration) + ' legacy edit · not verified against the 15-minute gameplay target';
+    const verifiedMinutes = Math.round(Number(draft.targetHighlightDurationSeconds) / 60);
+    const editLabel = verifiedHighlight ? verifiedMinutes + '-minute gameplay-verified highlight'
+      : formatHighlightDuration(measuredDuration) + ' legacy edit · not verified against the 12-minute gameplay target';
     card.append(element('p', 'draft-meta', `Twitch VOD ${draft.vodId} · ${(draft.highlights || []).length} selected moments · ${editLabel} · ${(draft.shortCandidateIndexes || []).length || 2} Shorts`));
     const quality = draft.qualityCalibration;
     if (quality?.calibrated && Number.isFinite(Number(quality.qualityFloor)) &&
@@ -377,7 +381,7 @@ function renderDraft(draft, draftsById = new Map()) {
   }
   if (draft.status === 'awaiting_owner_approval' && draft.productionState === 'ready' && !publishBlocked) {
     const message = isHighlight
-      ? 'The 15-minute landscape highlight passed exact-duration checks. Every source segment passed the visual gameplay check, and the selected Shorts passed media validation. Review the private bundle before publishing.'
+      ? 'The gameplay highlight passed exact-duration checks. Every source segment passed the visual gameplay check, and the selected Shorts passed media validation. Review the private bundle before publishing.'
       : 'This Short passed media validation and YouTube processing, and its SEO package is registered. Review before publishing.';
     card.append(element('p', 'draft-meta', message));
   }
@@ -561,7 +565,7 @@ function renderDraft(draft, draftsById = new Map()) {
   }
 
   if (draft.status === 'awaiting_owner_approval' && publishBlocked && !isHighlightShort) {
-    card.append(element('p', 'draft-error', 'This legacy highlight does not meet the 15-minute gameplay-verification requirement. Publishing is disabled; keep this draft private.'));
+    card.append(element('p', 'draft-error', 'This highlight is not verified against the 12-minute target or the legacy 15-minute target. Publishing is disabled; keep it private.'));
   }
 
   if (draft.status === 'clip_failed' || (isHighlight && draft.error)) {
@@ -1286,7 +1290,7 @@ document.querySelector('#logoutButton').addEventListener('click', async () => {
   }
   if (params.get('twitch') === 'connected') {
     history.replaceState({}, '', '/');
-    showNotice('Twitch connected. Amaana will build a private 15-minute highlight only when enough game-category footage passes visual gameplay checks.');
+    showNotice('Twitch connected. Amaana will build a private 12-minute highlight only when enough game-category footage passes visual gameplay checks.');
   }
   if (params.get('tiktok') === 'connected') {
     history.replaceState({}, '', '/');

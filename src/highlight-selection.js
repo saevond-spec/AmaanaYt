@@ -3,7 +3,7 @@
 const { parseTwitchDuration, validateHighlightMoments } = require('./highlight-validation');
 const { isPlaceholderTestTitle, isNonGameplayTestClip } = require('./gameplay-intake-guard');
 
-const TARGET_HIGHLIGHT_DURATION_SECONDS = 15 * 60;
+const TARGET_HIGHLIGHT_DURATION_SECONDS = 12 * 60;
 const MAX_HIGHLIGHT_SEGMENTS = 20;
 const MIN_GAMEPLAY_SEGMENT_SECONDS = 15;
 const MAX_CLIP_SECONDS = 60;
@@ -131,7 +131,7 @@ function reconstruct(candidates, previousCounts, choice, stateWidth, rowWidth, c
   return selected.sort((left, right) => left.startSeconds - right.startSeconds);
 }
 
-function select15MinuteGameplayHighlights(clips, vod, {
+function selectGameplayHighlights(clips, vod, {
   targetDurationSeconds = TARGET_HIGHLIGHT_DURATION_SECONDS,
   maxSegments = MAX_HIGHLIGHT_SEGMENTS,
   minSegmentSeconds = MIN_GAMEPLAY_SEGMENT_SECONDS,
@@ -216,7 +216,7 @@ function select15MinuteGameplayHighlights(clips, vod, {
   }
 
   // Weighted interval knapsack: maximize clip quality while enforcing non-overlap,
-  // the 15-minute duration target, and a finite edit cut count.
+  // the 12-minute duration target, and a finite edit cut count.
   const maxTotalSeconds = target + MAX_CLIP_SECONDS;
   const countWidth = segmentLimit + 1;
   const stateWidth = countWidth;
@@ -318,7 +318,9 @@ function select15MinuteGameplayHighlights(clips, vod, {
 }
 
 module.exports = {
-  select15MinuteGameplayHighlights,
+  selectGameplayHighlights,
+  // Keep the old export name for integrations updated independently from Amaana.
+  select15MinuteGameplayHighlights: selectGameplayHighlights,
   TARGET_HIGHLIGHT_DURATION_SECONDS,
   MAX_HIGHLIGHT_SEGMENTS,
   MIN_GAMEPLAY_SEGMENT_SECONDS,

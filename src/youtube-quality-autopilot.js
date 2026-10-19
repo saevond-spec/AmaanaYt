@@ -2,6 +2,11 @@
 
 const { CHANNEL_MINIMUM_VIEWS, summarizeYoutubeVideoQuality } = require('./youtube-video-quality');
 const { isYouTubeAuthorizationError } = require('./channel-tags');
+const { VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS, LEGACY_VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS } = require('./highlight-validation');
+const ACCEPTED_GAMEPLAY_HIGHLIGHT_SECONDS = new Set([
+  VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS,
+  LEGACY_VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS
+]);
 
 const QUALITY_WINDOW_DAYS = 7;
 const REPORTING_DELAY_DAYS = 3;
@@ -42,9 +47,11 @@ function cleanError(error) {
 }
 
 function isPublishedHighlight(draft) {
+  const targetDuration = Number(draft && draft.targetHighlightDurationSeconds);
+  const duration = Number(draft && draft.duration);
   return draft?.sourceType === 'twitch_highlight_batch' &&
-    Number(draft.targetHighlightDurationSeconds) === 900 &&
-    Number(draft.duration) === 900 &&
+    ACCEPTED_GAMEPLAY_HIGHLIGHT_SECONDS.has(targetDuration) &&
+    duration === targetDuration &&
     draft.publicationStatus === 'published' &&
     /^[A-Za-z0-9_-]{11}$/.test(String(draft.youtubeVideoId || '')) &&
     Number.isFinite(Date.parse(draft.publishedAt || ''));
@@ -64,9 +71,10 @@ function isDueForQualityCheck(draft, timestamp) {
   return nowMs - lastCheck >= interval;
 }
 
-function channelHistory(drafts, beforePublishedAt) {
+function channelHistory(drafts, beforePublishedAt, targetDuration) {
   const cutoff = Date.parse(beforePublishedAt || '');
   return drafts.filter((draft) => isPublishedHighlight(draft) &&
+    Number(draft.targetHighlightDurationSeconds) === Number(targetDuration) &&
     Date.parse(draft.publishedAt) < cutoff && draft.youtubeQualityAssessment)
     .map((draft) => ({
       publishedAt: draft.publishedAt,
@@ -118,8 +126,8 @@ async function runYoutubeQualityAutopilot({ store, youtube, state = {}, now = ne
     try {
       const report = await youtube.videoQualityReports(draft.youtubeVideoId, window.startDate, window.endDate);
       const assessment = summarizeYoutubeVideoQuality(report?.summaryRows, report?.retentionRows, {
-        durationSeconds: 900,
-        history: channelHistory(drafts, draft.publishedAt)
+        durationSeconds: Number(draft.targetHighlightDurationSeconds),
+        history: channelHistory(drafts, draft.publishedAt, draft.targetHighlightDurationSeconds)
       });
       await store.updateDraft(draft.id, {
         youtubeQualityAssessment: {
@@ -174,7 +182,7 @@ async function runYoutubeQualityAutopilot({ store, youtube, state = {}, now = ne
   };
   await store.saveSeoSyncState(updatedState);
   logger.info?.('YouTube video quality autopilot: assessed ' + updatedCount + '/' +
-    selected.length + ' mature 15-minute highlights');
+    selected.length + ' mature gameplay highlights');
   return {
     state: updatedState,
     status: reconnectRequired ? 'needs_youtube_reconnect' : allFailed ? 'retry_scheduled' : 'complete',

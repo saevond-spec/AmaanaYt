@@ -201,7 +201,7 @@ test('enforces the requested segment cap and backfills lower ranked non-overlapp
   assert.equal(selectCommunityHighlights(clips, vod, { limit: 100, targetDurationSeconds: 100 }).highlights.length, 5);
 });
 
-test('keeps WzBot test titles out of 15-minute gameplay selection', () => {
+test('keeps WzBot test titles out of 12-minute gameplay selection', () => {
   const clips = [
     makeClip('ranked-gameplay', 100, 20, 1, { title: 'Ranked clutch' }),
     makeClip('wzbot-test', 200, 20, 100000, { title: 'WzBot CLIP | Test (by saevond)' })
@@ -240,7 +240,7 @@ test('creates one private-pipeline batch from Amaana-discovered Twitch clip evid
   const vod = makeVod();
   const clips = Array.from({ length: 20 }, (_, index) =>
     makeClip(`community-${index + 1}`, index * 120, 45, 100 - index));
-  const h = harness({ vods: [vod], targetDurationSeconds: 900,
+  const h = harness({ vods: [vod], targetDurationSeconds: 720,
     clipsByVod: { [vod.id]: clips } });
   const result = await h.discovery.run();
   assert.equal(result.queued, 1);
@@ -249,29 +249,30 @@ test('creates one private-pipeline batch from Amaana-discovered Twitch clip evid
   assert.equal(h.drafts[0].discoverySource, 'twitch_clips_api');
   assert.equal(h.drafts[0].sourceType, 'twitch_highlight_batch');
   assert.equal(h.drafts[0].sourceChannel, 'AmaanaYT');
-  assert.equal(h.drafts[0].sourceClipEvidence.length, 20);
-  assert.equal(h.drafts[0].targetHighlightDurationSeconds, 900);
-  assert.equal(h.drafts[0].highlights.reduce((sum, item) => sum + item.duration, 0), 900);
+  assert.equal(h.drafts[0].sourceClipEvidence.length, 16);
+  assert.equal(h.drafts[0].targetHighlightDurationSeconds, 720);
+  assert.equal(h.drafts[0].highlights.reduce((sum, item) => sum + item.duration, 0), 720);
   assert.equal(h.drafts[0].shortCandidateIndexes.length, 2);
   assert.deepEqual(h.enqueued, ['batch-1']);
   assert.equal(h.calls.vodListOptions.first, 20);
 });
 
-test('does not queue a 15-minute batch when the robust quality floor leaves only weak footage', async () => {
+test('does not queue a 12-minute batch when the robust quality floor leaves only weak footage', async () => {
   const vod = makeVod();
-  const highStarts = [1350, 1350, 1440, 1440, 1530, 1530, 1620, 1710, 1800, 1890, 1980, 2070, 2160, 2250, 2340];
+  const uniqueHighStarts = [1350, 1440, 1530, 1620, 1710, 1800, 1890, 1980, 2070, 2160, 2250];
+  const highStarts = Array.from({ length: 25 }, (_value, index) => uniqueHighStarts[index % uniqueHighStarts.length]);
   const clips = [
     ...Array.from({ length: 15 }, (_, index) => makeClip('low-' + index, index * 90, 60, 0)),
     ...highStarts.map((start, index) => makeClip('high-' + index, start, 60, 10000))
   ];
-  const h = harness({ vods: [vod], targetDurationSeconds: 900,
+  const h = harness({ vods: [vod], targetDurationSeconds: 720,
     clipsByVod: { [vod.id]: clips } });
 
   const result = await h.discovery.scanVod(vod);
 
   assert.equal(result.status, 'insufficient_quality_gameplay');
-  assert.equal(result.availableGameplaySeconds, 720);
-  assert.ok(result.unfilteredGameplaySeconds >= 900);
+  assert.equal(result.availableGameplaySeconds, 660);
+  assert.ok(result.unfilteredGameplaySeconds >= 720);
   assert.equal(result.qualityCalibration.method, 'per_vod_median_mad_capped_at_p90');
   assert.equal(h.drafts.length, 0);
   assert.deepEqual(h.enqueued, []);
@@ -303,7 +304,7 @@ test('skips a live broadcast titled Test before community clip intake or capture
   assert.deepEqual(h.enqueuedClips, []);
 });
 
-test('captures and screens live segments, then queues the 15-minute review batch before stream end', async () => {
+test('captures and screens live segments, then queues the 12-minute review batch before stream end', async () => {
   let clock = Date.parse('2026-10-18T15:00:00.000Z');
   const streamStartedAt = clock - 60 * MINUTE;
   const video = {
@@ -315,7 +316,7 @@ test('captures and screens live segments, then queues the 15-minute review batch
   };
   const h = harness({
     liveBroadcast: () => makeLiveBroadcast(clock, streamStartedAt),
-    video, startAt: clock, now: () => clock, targetDurationSeconds: 900
+    video, startAt: clock, now: () => clock, targetDurationSeconds: 720
   });
 
   const first = await h.discovery.runLive();
@@ -324,40 +325,40 @@ test('captures and screens live segments, then queues the 15-minute review batch
   assert.equal(h.state.liveSessions['7777'].candidates.length, 1);
 
   let finalResult = first;
-  for (let index = 1; index < 15; index += 1) {
+  for (let index = 1; index < 12; index += 1) {
     clock += 3 * MINUTE;
     h.setNow(clock);
     finalResult = await h.discovery.runLive();
   }
   assert.equal(finalResult.captureAccepted, true);
   assert.equal(finalResult.batchesQueued, 1);
-  assert.equal(h.drafts.length, 4);
+  assert.equal(h.drafts.length, 3);
   const batch = h.drafts.find((draft) =>
     draft.sourceType === 'twitch_highlight_batch' && draft.discoverySource === 'twitch_live_capture');
   const liveShorts = h.drafts.filter((draft) =>
     draft.sourceType === 'twitch_vod' && draft.discoverySource === 'twitch_live_capture');
   assert.equal(batch.discoverySource, 'twitch_live_capture');
   assert.equal(batch.streamId, '7777');
-  assert.equal(batch.targetHighlightDurationSeconds, 900);
-  assert.equal(batch.highlights.reduce((sum, item) => sum + item.duration, 0), 900);
-  assert.equal(batch.twitchClips.length, 15);
+  assert.equal(batch.targetHighlightDurationSeconds, 720);
+  assert.equal(batch.highlights.reduce((sum, item) => sum + item.duration, 0), 720);
+  assert.equal(batch.twitchClips.length, 12);
   assert.deepEqual(batch.shortCandidateIndexes, []);
   assert.ok(batch.twitchClips.every((clip) =>
     clip.liveCapture === true && clip.requestProofVersion === 1 &&
     clip.requestedVodId === '9001'));
   assert.deepEqual(h.enqueued, [batch.id]);
-  assert.equal(liveShorts.length, 3);
-  assert.equal(h.enqueuedClips.length, 3);
+  assert.equal(liveShorts.length, 2);
+  assert.equal(h.enqueuedClips.length, 2);
   assert.ok(liveShorts.every((draft) =>
     draft.status === 'clip_queued' && draft.liveCapture === true &&
     draft.visualGameplayVerification.verified === true));
-  assert.equal(h.calls.liveClipCreates.length, 15);
+  assert.equal(h.calls.liveClipCreates.length, 12);
   assert.ok(h.calls.liveClipCreates.every((request, index, requests) =>
     index === 0 || request.vodOffset - requests[index - 1].vodOffset === 180));
 
   await h.discovery.runLive();
-  assert.equal(h.calls.liveClipCreates.length, 15);
-  assert.equal(h.drafts.length, 4);
+  assert.equal(h.calls.liveClipCreates.length, 12);
+  assert.equal(h.drafts.length, 3);
 });
 
 test('queues a WizeBot-style clip during a live stream before Twitch links its VOD offset', async () => {
@@ -450,7 +451,7 @@ test('flushes leftover verified live captures into a private Short draft when th
           confidence: 0.95, gameName: 'Test Game', model: 'fixture' };
       }
     },
-    startAt: clock, now: () => clock, targetDurationSeconds: 900
+    startAt: clock, now: () => clock, targetDurationSeconds: 720
   });
   await h.discovery.runLive();
   clock += 3 * MINUTE;
@@ -472,7 +473,7 @@ test('flushes leftover verified live captures into a private Short draft when th
     enqueueClip: (id) => h.enqueuedClips.push(id),
     logger: { info() {}, error() {} },
     now: () => clock,
-    targetDurationSeconds: 900,
+    targetDurationSeconds: 720,
     visualGameplayVerificationAvailable: () => true
   });
   isLive = false;

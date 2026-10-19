@@ -1193,8 +1193,8 @@ app.post('/api/twitch/vod-clips', admin, async (req, res, next) => {
       const reason = result.status === 'no_gameplay_candidates'
         ? 'No Twitch clips with a game category are available for this VOD yet.'
         : result.status === 'insufficient_quality_gameplay'
-          ? 'The available clips did not meet the gameplay-quality threshold for a 15-minute highlight.'
-          : `Only ${Math.floor(available / 60)}m ${Math.floor(available % 60)}s of non-overlapping game-category footage is available; a 15-minute highlight needs 15m.`;
+          ? 'The available clips did not meet the gameplay-quality threshold for a 12-minute highlight.'
+          : `Only ${Math.floor(available / 60)}m ${Math.floor(available % 60)}s of non-overlapping game-category footage is available; a 12-minute highlight needs 12m.`;
       const queuedNotice = communityClipsQueued
         ? ` Queued ${communityClipsQueued} Twitch clip${communityClipsQueued === 1 ? '' : 's'} for Gemini gameplay screening; passing clips become private YouTube drafts for your review.`
         : '';
@@ -1274,12 +1274,12 @@ app.post('/api/drafts/:id/approve', admin, async (req, res, next) => {
       return res.status(409).json({ error: 'This live clip did not pass gameplay verification and cannot be published.' });
     }
     if (draft.sourceType === 'twitch_highlight_batch' && !hasVerifiedGameplayHighlight(draft)) {
-      return res.status(409).json({ error: 'This legacy highlight is not a verified 15-minute gameplay edit and cannot be published. Keep it private and create a new verified edit.' });
+      return res.status(409).json({ error: 'This highlight has not passed gameplay verification and cannot be published. Keep it private and create a new verified edit.' });
     }
     if (draft.sourceType === 'twitch_highlight_short') {
       const parent = await store.getDraft(draft.parentId);
       if (!parent || !hasVerifiedGameplayHighlight(parent)) {
-        return res.status(409).json({ error: 'This Short does not belong to a verified 15-minute gameplay edit and cannot be published. Keep it private.' });
+        return res.status(409).json({ error: 'This Short does not belong to a verified gameplay highlight and cannot be published. Keep it private.' });
       }
     }
     const published = await youtube.publish(draft.youtubeVideoId, req.body.publishAt || null);

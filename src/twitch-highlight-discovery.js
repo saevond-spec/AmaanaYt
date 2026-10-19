@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { select15MinuteGameplayHighlights, TARGET_HIGHLIGHT_DURATION_SECONDS,
+const { selectGameplayHighlights, TARGET_HIGHLIGHT_DURATION_SECONDS,
   MAX_HIGHLIGHT_SEGMENTS } = require('./highlight-selection');
 const { parseTwitchDuration } = require('./highlight-validation');
 const { buildCommunityClipDrafts } = require('./twitch-community-clips');
@@ -36,7 +36,7 @@ function selectCommunityHighlights(clips, vod, { limit = MAX_AUTO_HIGHLIGHTS,
       streamTitle: vod?.title
     }))
     : [];
-  return select15MinuteGameplayHighlights(eligibleClips, vod, {
+  return selectGameplayHighlights(eligibleClips, vod, {
     targetDurationSeconds,
     maxSegments: limit
   });
@@ -239,7 +239,7 @@ function createTwitchHighlightDiscovery({
       await markScanned(requestedId);
       enqueueBatch(saved.id);
       if (logger && typeof logger.info === 'function') {
-        logger.info(`Amaana selected ${selected.highlights.length} game-category moments for a 15-minute highlight from VOD ${requestedId}`);
+        logger.info(`Amaana selected ${selected.highlights.length} game-category moments for a 12-minute highlight from VOD ${requestedId}`);
       }
       return { status: 'queued', vodId: requestedId, batch: saved,
         clipsChecked: batch.candidateClipCount, communityClipsQueued };
