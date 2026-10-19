@@ -33,6 +33,7 @@ test('owned playlist listing paginates and returns only display-safe fields', as
   assert.deepEqual(calls.map((call) => call.mine), [true, true]);
   assert.equal(calls[1].pageToken, 'page-2');
   assert.equal(calls[0].maxResults, 50);
+  assert.deepEqual(calls[0].part, ['snippet', 'status', 'localizations']);
 });
 
 test('video playlist insertion is idempotent and uses the YouTube video resource type', async () => {
@@ -55,6 +56,50 @@ test('video playlist insertion is idempotent and uses the YouTube video resource
   await assert.rejects(client.addVideoToPlaylist({ playlistId: 'PL1', videoId: 'bad' }), /11-character/);
 });
 
+
+test('Japanese playlist localization preserves other languages and uses the playlist ETag', async () => {
+  const existing = {
+    id: 'PL-ARC', etag: '"playlist-etag"',
+    snippet: { title: 'Apex Legends Highlights',
+      description: 'English description https://example.com/playlist',
+      channelId: 'channel-1', defaultLanguage: 'en' },
+    localizations: {
+      es: { title: 'Destacados de Apex', description: 'Lista en español' },
+      ja: { title: '古いプレイリスト', description: '古い説明です。' }
+    }
+  };
+  let updateRequest;
+  const client = createYouTubePlaylistClient(async () => ({
+    playlists: {
+      list: async () => ({ data: { items: [existing] } }),
+      update: async (params, options) => { updateRequest = { params, options }; return { data: {} }; }
+    },
+    channels: { list: async () => ({ data: { items: [{
+      id: 'channel-1', snippet: { defaultLanguage: 'en' },
+      brandingSettings: { channel: { defaultLanguage: 'en' } }
+    }] } }) }
+  }));
+  await assert.rejects(client.updateJapanesePlaylistLocalization({ id: 'PL-ARC', etag: 'stale' }, {
+    title: 'Apex Legendsのハイライト',
+    description: 'Apexの名場面 https://example.com/playlist'
+  }), (error) => error.status === 409);
+  assert.equal(updateRequest, undefined);
+  await client.updateJapanesePlaylistLocalization({ id: 'PL-ARC', etag: '"playlist-etag"' }, {
+    title: 'Apex Legendsのハイライト',
+    description: 'Apexの名場面 https://example.com/playlist'
+  });
+  assert.deepEqual(updateRequest.params.part, ['snippet', 'localizations']);
+  assert.deepEqual(updateRequest.params.requestBody.snippet, {
+    title: existing.snippet.title, description: existing.snippet.description, defaultLanguage: 'en'
+  });
+  assert.deepEqual(updateRequest.params.requestBody.localizations.es, existing.localizations.es);
+  assert.deepEqual(updateRequest.params.requestBody.localizations.ja, {
+    title: 'Apex Legendsのハイライト',
+    description: 'Apexの名場面 https://example.com/playlist'
+  });
+  assert.equal(updateRequest.params.requestBody.status, undefined);
+  assert.equal(updateRequest.options.headers['If-Match'], '"playlist-etag"');
+});
 
 test('automatic playlist matching uses specific metadata and respects video privacy', () => {
   const { chooseAutoPlaylist } = require('../src/youtube-playlists');

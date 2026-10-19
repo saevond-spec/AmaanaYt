@@ -18,6 +18,7 @@ const { createMonetizationWorker } = require('./monetization-worker');
 const { createSeoMarket, detectGame } = require('./seo-market');
 const { normalizeContext } = require('./seo-package');
 const { normalizeJapaneseChannelLocalization, draftJapaneseChannelLocalization } = require('./channel-localization');
+const { draftJapaneseVideoLocalizations } = require('./japanese-translation');
 const { hasVerifiedGameplayHighlight } = require('./highlight-validation');
 const { buildHighlightTimeline, buildHighlightDescription } = require('./highlight-metadata');
 const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
@@ -642,6 +643,128 @@ app.put('/api/seo/channel/localization/ja', admin, async (req, res, next) => {
     res.json(result);
   } catch (error) {
     if (error.status === 400 || error.status === 409) return res.status(error.status).json({ error: error.message });
+    next(error);
+  }
+});
+
+app.get('/api/seo/localization/ja/videos', admin, async (req, res, next) => {
+  try {
+    const offset = Math.max(0, Number.parseInt(req.query.offset, 10) || 0);
+    if (!Number.isSafeInteger(offset) || offset > 100000) {
+      return res.status(400).json({ error: 'Invalid video page offset' });
+    }
+    const page = await youtube.ownedVideosPage(offset, 10);
+    const items = page.items.filter((video) => video.snippet?.channelId === page.channelId).map((video) => ({
+      id: video.id, etag: video.etag || null,
+      title: video.snippet?.title || '', description: video.snippet?.description || '',
+      privacyStatus: video.status?.privacyStatus || 'unknown',
+      defaultLanguage: video.snippet?.defaultLanguage || null,
+      localization: video.localizations?.ja || null
+    }));
+    res.set('Cache-Control', 'no-store');
+    res.json({ offset, total: page.total, pageSize: 10, uploadsRead: true, items });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/seo/localization/ja/videos/draft', admin, async (req, res, next) => {
+  try {
+    const videoIds = req.body?.videoIds;
+    if (!Array.isArray(videoIds) || videoIds.length < 1 || videoIds.length > 5 ||
+        videoIds.some((id) => typeof id !== 'string' || !/^[A-Za-z0-9_-]{11}$/.test(id)) ||
+        new Set(videoIds).size !== videoIds.length) {
+      return res.status(400).json({ error: 'Select 1–5 unique videos with valid YouTube IDs' });
+    }
+    const [channel, videos] = await Promise.all([
+      youtube.ownedChannel(), youtube.videoMetadata(videoIds)
+    ]);
+    const byId = new Map(videos.map((video) => [video.id, video]));
+    const source = videoIds.map((id) => {
+      const video = byId.get(id);
+      if (!video || video.snippet?.channelId !== channel.id) {
+        const error = new Error('A selected video was not found on the connected channel');
+        error.status = 404;
+        throw error;
+      }
+      return { id, title: video.snippet?.title || '', description: video.snippet?.description || '' };
+    });
+    const drafts = await draftJapaneseVideoLocalizations(source, {
+      apiKey: process.env.SEO_AI_API_KEY, model: process.env.SEO_AI_MODEL,
+      baseUrl: process.env.SEO_AI_BASE_URL || 'https://api.openai.com/v1',
+      timeoutMs: process.env.SEO_AI_TIMEOUT_MS
+    });
+    res.set('Cache-Control', 'no-store');
+    res.json({ drafts });
+  } catch (error) {
+    if (error.status === 400 || error.status === 404 || error.status === 403 || error.status === 409) {
+      return res.status(error.status).json({ error: error.message });
+    }
+    next(error);
+  }
+});
+
+app.put('/api/seo/videos/:id/localization/ja', admin, async (req, res, next) => {
+  try {
+    if (!/^[A-Za-z0-9_-]{11}$/.test(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid video ID' });
+    }
+    if (typeof req.body?.etag !== 'string' || !req.body.etag) {
+      return res.status(400).json({ error: 'Refresh the video before saving its Japanese localization' });
+    }
+    const result = await youtube.updateJapaneseVideoLocalization({
+      id: req.params.id, etag: req.body.etag
+    }, req.body);
+    res.set('Cache-Control', 'no-store');
+    res.json(result);
+  } catch (error) {
+    if ([400, 403, 404, 409].includes(error.status)) return res.status(error.status).json({ error: error.message });
+    next(error);
+  }
+});
+
+app.post('/api/seo/localization/ja/playlists/draft', admin, async (req, res, next) => {
+  try {
+    const playlistIds = req.body?.playlistIds;
+    if (!Array.isArray(playlistIds) || playlistIds.length < 1 || playlistIds.length > 5 ||
+        playlistIds.some((id) => typeof id !== 'string' || !id.trim() || id.length > 255) ||
+        new Set(playlistIds).size !== playlistIds.length) {
+      return res.status(400).json({ error: 'Select 1–5 unique playlists' });
+    }
+    const playlists = await youtube.listOwnedPlaylists();
+    const byId = new Map(playlists.map((playlist) => [playlist.id, playlist]));
+    const source = playlistIds.map((id) => {
+      const playlist = byId.get(id);
+      if (!playlist) {
+        const error = new Error('A selected playlist is not owned by the connected YouTube channel');
+        error.status = 404;
+        throw error;
+      }
+      return { id, title: playlist.title || '', description: playlist.description || '', titleLimit: 150 };
+    });
+    const drafts = await draftJapaneseVideoLocalizations(source, {
+      apiKey: process.env.SEO_AI_API_KEY, model: process.env.SEO_AI_MODEL,
+      baseUrl: process.env.SEO_AI_BASE_URL || 'https://api.openai.com/v1',
+      timeoutMs: process.env.SEO_AI_TIMEOUT_MS
+    });
+    res.set('Cache-Control', 'no-store');
+    res.json({ drafts });
+  } catch (error) {
+    if ([400, 404].includes(error.status)) return res.status(error.status).json({ error: error.message });
+    next(error);
+  }
+});
+
+app.put('/api/youtube/playlists/:playlistId/localization/ja', admin, async (req, res, next) => {
+  try {
+    if (typeof req.body?.etag !== 'string' || !req.body.etag) {
+      return res.status(400).json({ error: 'Refresh the playlist before saving its Japanese localization' });
+    }
+    const result = await youtube.updateJapanesePlaylistLocalization({
+      id: req.params.playlistId, etag: req.body.etag
+    }, req.body);
+    res.set('Cache-Control', 'no-store');
+    res.json(result);
+  } catch (error) {
+    if ([400, 403, 404, 409].includes(error.status)) return res.status(error.status).json({ error: error.message });
     next(error);
   }
 });

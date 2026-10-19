@@ -199,6 +199,35 @@
             <button class="primary" type="submit">Save Japanese localization</button>
           </form>
         </div>
+        <details id="jaVideoLocalizationPanel" class="japanese-localization-panel">
+          <summary>Japanese localizations for channel videos</summary>
+          <p class="muted">Translate existing video titles and descriptions in batches of 10. Amaana drafts them with the configured SEO AI provider; review each Japanese version, then save the page. English metadata, visibility, and other languages stay intact. Each saved item uses one YouTube update call (50 quota units).</p>
+          <p class="fine-print">This localizes metadata. Captions and spoken audio are separate YouTube language tracks.</p>
+          <div class="draft-actions">
+            <button id="jaVideoRefresh" class="ghost" type="button">Load video page</button>
+            <button id="jaVideoDraft" class="ghost" type="button" disabled>Draft missing translations</button>
+            <button id="jaVideoSave" class="primary" type="button" disabled>Save reviewed translations</button>
+            <button id="jaVideoPrevious" class="ghost" type="button" disabled>Previous 10</button>
+            <span id="jaVideoPage" class="draft-meta">No page loaded</span>
+            <button id="jaVideoNext" class="ghost" type="button" disabled>Next 10</button>
+          </div>
+          <p id="jaVideoStatus" class="draft-meta" role="status">Load the channel's owned uploads to begin.</p>
+          <div id="jaVideoList" class="japanese-localization-list"></div>
+        </details>
+        <details id="jaPlaylistLocalizationPanel" class="japanese-localization-panel">
+          <summary>Japanese localizations for playlists</summary>
+          <p class="muted">Draft Japanese playlist titles and descriptions with the configured SEO AI provider. Review the entries and save them when ready. Playlist visibility and the English originals stay unchanged.</p>
+          <div class="draft-actions">
+            <button id="jaPlaylistRefresh" class="ghost" type="button">Load playlists</button>
+            <button id="jaPlaylistDraft" class="ghost" type="button" disabled>Draft missing translations</button>
+            <button id="jaPlaylistSave" class="primary" type="button" disabled>Save reviewed translations</button>
+            <button id="jaPlaylistPrevious" class="ghost" type="button" disabled>Previous 10</button>
+            <span id="jaPlaylistPage" class="draft-meta">No page loaded</span>
+            <button id="jaPlaylistNext" class="ghost" type="button" disabled>Next 10</button>
+          </div>
+          <p id="jaPlaylistStatus" class="draft-meta" role="status">Load owned playlists to begin.</p>
+          <div id="jaPlaylistList" class="japanese-localization-list"></div>
+        </details>
         <div class="draft-actions">
           <button id="seoToggle" class="ghost" type="button">Pause SEO jobs</button>
           <button id="seoRescan" class="ghost" type="button">Rescan channel</button>
