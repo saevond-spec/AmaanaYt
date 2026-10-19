@@ -1,21 +1,28 @@
 'use strict';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const MARKET_AS_OF = '2026-10-06';
+const MARKET_AS_OF = '2026-10-19';
 const MARKET_EVENTS = [
   {
-    id: 'frozen-trail-free-play',
-    title: 'Frozen Trail update and free-play window',
-    startDate: '2026-10-08',
-    endDate: '2026-10-12',
-    source: 'https://arcraiders.com/news/play-for-free-weekend'
-  },
-  {
-    id: 'pve-toggle-test',
-    title: 'ARC Raiders PvE matchmaking toggle test',
+    id: 'arc-raiders-pve-toggle',
+    title: 'ARC Raiders PvE Toggle Beta Test',
     startDate: '2026-10-13',
     endDate: '2026-10-20',
-    source: 'https://arcraiders.com/de/news/pve-toggle-beta-test'
+    source: 'https://arcraiders.com/news/pve-toggle-what-to-know'
+  },
+  {
+    id: 'arc-raiders-trials-season-6',
+    title: 'ARC Raiders Trials Season 6: Frozen Trials',
+    startDate: '2026-10-08',
+    endDate: '2027-01-12',
+    source: 'https://arcraiders.com/news/trials-season-6'
+  },
+  {
+    id: 'naraka-legend-of-qin',
+    title: 'NARAKA: BLADEPOINT Legend of Qin crossover',
+    startDate: '2026-10-09',
+    endDate: '2026-11-04',
+    source: 'https://www.narakathegame.com/news/update/20260921/33459_1314537.html'
   }
 ];
 
@@ -60,9 +67,9 @@ function makeHorizon(input) {
   };
 }
 
-function marketEventForTargetDate(targetDate) {
+function marketEventsForTargetDate(targetDate) {
   const date = isoDate(targetDate);
-  return MARKET_EVENTS.find((event) => date >= event.startDate && date <= event.endDate) || null;
+  return MARKET_EVENTS.filter((event) => date >= event.startDate && date <= event.endDate);
 }
 
 function createJob(id, scheduledDay, shorts, start) {
@@ -82,7 +89,7 @@ function createJob(id, scheduledDay, shorts, start) {
     targetPublishDate,
     shorts,
     outputs,
-    marketEvent: marketEventForTargetDate(targetPublishDate),
+    marketEvents: marketEventsForTargetDate(targetPublishDate),
     status: 'queued',
     readyDay: scheduledDay,
     attempts: 0,
@@ -141,7 +148,8 @@ function summarizeMarketCoverage(jobs) {
     startDate: event.startDate,
     endDate: event.endDate,
     source: event.source,
-    candidatePackagesInWindow: jobs.filter((job) => job.marketEvent?.id === event.id).length
+    candidatePackagesInWindow: jobs.filter((job) =>
+      job.marketEvents.some((marketEvent) => marketEvent.id === event.id)).length
   }));
 }
 
@@ -379,13 +387,14 @@ function simulateTwoYears(input = {}) {
     currentMarketResearch: {
       asOf: MARKET_AS_OF,
       currentTopicEvents: MARKET_EVENTS,
-      publisherReportedArcRaidersAudienceSignals: {
-        friendlyCoopPercent: 37,
-        mixedPlayPercent: 27,
-        purePvpPercent: 34,
-        reportedInterestInDedicatedPvePercent: 51,
-        source: 'https://arcraiders.com/de/news/pve-toggle-beta-test',
-        use: 'Topic coverage only; not a search-volume or view-uplift multiplier.'
+      publisherAndPlatformSignals: {
+        reportQuarter: 'Q2 2026',
+        youtubeGamingHoursWatchedBillions: 1.79,
+        youtubeGamingQuarterOverQuarterPercent: -19.3,
+        youtubeGamingYearOverYearPercent: -18.9,
+        youtubeLiveYearOverYearPercent: 18.0,
+        source: 'https://streamlabs.com/content-hub/post/streamlabs-and-hatchet-q2-2026-live-streaming-report',
+        interpretation: 'The report separates YouTube Gaming from broader YouTube Live. Platform totals are category context, not a channel-level view or recommendation forecast.'
       },
       youtubeGuidance: {
         tags: 'YouTube says tags play a minimal discovery role except for common misspellings.',

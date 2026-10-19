@@ -3,6 +3,7 @@ const { youtubeQuotaDate, nextYoutubeQuotaReset, isYouTubeDailyQuotaError } = re
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const VELOCITY_PRIOR_DAYS = 2;
+const MIN_MARKET_SAMPLE_AGE_DAYS = 1 / 24;
 const STOP_WORDS = new Set(['the', 'and', 'for', 'with', 'from', 'this', 'that', 'your', 'you',
   'game', 'gameplay', 'video', 'live', 'stream', 'clip', 'short', 'shorts', 'official']);
 
@@ -56,7 +57,10 @@ function summarizeMarketSamples(samples, { now = Date.now(), game = '' } = {}) {
     const views = Number(sample?.viewCount);
     return Number.isFinite(publishedAt) && publishedAt <= now && Number.isFinite(views) && views >= 0;
   }).map((sample) => {
-    const ageDays = Math.max(1, (now - Date.parse(sample.publishedAt)) / DAY_MS);
+    // Use observed fractional age. The two-day Gamma-Poisson prior below keeps
+    // videos published minutes ago from producing unbounded daily-rate spikes.
+    const ageDays = Math.max(MIN_MARKET_SAMPLE_AGE_DAYS,
+      (now - Date.parse(sample.publishedAt)) / DAY_MS);
     const viewCount = Number(sample.viewCount);
     return { ...sample, ageDays, rawViewsPerDay: viewCount / ageDays, viewCount };
   });
@@ -158,7 +162,8 @@ function createSeoMarket({ store, youtube, env = process.env, logger = console, 
       const cohort = examples.filter((item) => item.channelId !== source.channelId);
       const summary = summarizeMarketSamples(cohort, { now: now(), game });
       const snapshot = { game, query: `${game} gameplay`, observedAt: new Date(now()).toISOString(),
-        windowDays: 7, ...summary };
+        windowDays: 7, sampleDesign: ['date', 'viewCount'],
+        viewMetricSemantics: { metric: 'public_views', definitionSince: '2026-08-24' }, ...summary };
       await store.saveSeoMarketSnapshot(game, snapshot);
       retryAfter = 0;
       logger.info?.(`SEO market snapshot ${game}: ${snapshot.metrics.sampleCount} recent public search examples; ` +

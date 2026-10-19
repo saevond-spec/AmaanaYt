@@ -1,11 +1,14 @@
 # Amaana gaming editor: market research and selection method
 
-**Checked:** October 18, 2026  
+**Checked:** October 19, 2026
+
 **Scope:** Amaana only; the creator's own archived Twitch VODs, a 15-minute landscape highlight, and up to two Shorts.
 
 ## Market findings
 
 - YouTube says there is no universal ideal video length and advises creators to avoid filler and use audience retention to tune length. The 15-minute duration here is the requested output format; it is not a claim that YouTube recommends 15 minutes. [YouTube recommendations guidance](https://support.google.com/youtube/answer/16559651?hl=en)
+- Since August 24, 2026, YouTube counts public views when playback starts across Shorts, long-form, and live. Its engaged-view metric preserves a stronger signal for people who continue watching. Amaana's seven-day competitor view velocity therefore measures public starts, not retention or satisfaction; assess the creator's own work with engaged views and retention. [YouTube view-count update](https://support.google.com/youtube/blog/433409976/an-update-to-how-we-count-public-views-across-youtube?hl=en-GB)
+- Streamlabs and Hatchet reported 1.79 billion YouTube Gaming hours watched in Q2 2026, down 18.9% year over year; broader YouTube Live was up 18.0%, but includes non-gaming viewing. This supports testing specific games and formats against the channel's own analytics, not assuming the overall platform trend predicts this channel's performance. [Q2 2026 streaming report](https://streamlabs.com/content-hub/post/streamlabs-and-hatchet-q2-2026-live-streaming-report)
 - Twitch's Get Clips response uses `vod_offset` for the clip's start in the VOD. The Create Clip From VOD endpoint instead interprets `vod_offset` as the clip's end and limits a clip to 5–60 seconds. Amaana keeps those meanings separate and verifies the requested timestamps. [Twitch API reference](https://dev.twitch.tv/docs/api/reference)
 - Eklipse advertises whole-VOD game-aware scoring using gameplay events, screen markers, audio energy, and chat reactions, followed by captions and vertical reframing. StreamLadder advertises AI stream clipping, captioning, layouts, and publishing. These are vendors' descriptions of their products, not independent performance benchmarks. [Eklipse highlights](https://eklipse.gg/features/ai-highlights/) · [Eklipse Content Agent](https://eklipse.gg/features/content-agent/) · [StreamLadder AI clipping](https://www.streamladder.com/clipgpt/ai-clipping) · [StreamLadder captions](https://www.streamladder.com/clip-editor/captions)
 
@@ -34,3 +37,5 @@ A weighted interval knapsack chooses the highest-scoring set subject to non-over
 Review the private draft before approval. After publication, compare similar gaming videos using YouTube Analytics: impressions click-through rate, first-30-second retention, retention dips and spikes, and comparable-length typical retention. For Shorts, compare engaged views, chose-to-view, average view duration, and average percentage viewed. Change one editing variable at a time; neither competitor feature pages nor this scoring formula establishes a view lift.
 
 The present patch improves clip selection, gameplay verification, exact duration, and source framing. It does not yet add full-VOD game-event/audio/chat scoring, auto-captioning, or action-tracked reframing. Those are the largest capability gaps suggested by the current product landscape.
+
+The current two-year scenario data is anchored to official ARC Raiders and NARAKA: BLADEPOINT event windows checked on October 19, 2026. When events overlap, the scenario counts a planned upload against each active game's window. Those windows are illustrative topic timing, not a claim that scheduled uploads receive extra recommendations.

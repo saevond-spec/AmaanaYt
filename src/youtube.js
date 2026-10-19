@@ -453,14 +453,44 @@ async function listOwnedBroadcasts() {
   return broadcasts;
 }
 
+const RECENT_GAME_VIDEO_WINDOW_DAYS = 7;
+const RECENT_GAME_VIDEO_SEARCH_ORDERS = Object.freeze(['date', 'viewCount']);
+const RECENT_GAME_VIDEO_RESULTS_PER_ORDER = 25;
+
+function buildRecentGameVideoSearchQueries(game, { now = Date.now() } = {}) {
+  const gameName = String(game || '').trim();
+  const timestamp = now instanceof Date ? now.getTime() : Number(now);
+  if (!gameName || !Number.isFinite(timestamp)) {
+    throw new Error('A game name and valid market research date are required');
+  }
+  const cutoff = new Date(timestamp - RECENT_GAME_VIDEO_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  if (!Number.isFinite(cutoff.getTime())) throw new Error('A valid market research date is required');
+  const publishedAfter = cutoff.toISOString();
+  return RECENT_GAME_VIDEO_SEARCH_ORDERS.map((order) => ({
+    part: ['snippet'], type: 'video', q: `${gameName} gameplay`, order,
+    publishedAfter, maxResults: RECENT_GAME_VIDEO_RESULTS_PER_ORDER
+  }));
+}
+
+function uniqueRecentGameVideoIds(searchResponses) {
+  const ids = new Set();
+  for (const response of Array.isArray(searchResponses) ? searchResponses : []) {
+    for (const item of response?.data?.items || []) {
+      const id = item?.id?.videoId;
+      if (typeof id === 'string' && id) ids.add(id);
+    }
+  }
+  return [...ids];
+}
+
 async function recentGameVideos(game, { now = Date.now() } = {}) {
   const youtube = await service();
-  const response = await youtube.search.list({
-    part: ['snippet'], type: 'video', q: `${game} gameplay`, order: 'viewCount',
-    publishedAfter: new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString(),
-    maxResults: 50
-  });
-  const ids = (response.data.items || []).map((item) => item.id?.videoId).filter(Boolean);
+  // A newest-first sample represents currently uploaded work; a view-count sample
+  // adds strong recent performers. Their deduplicated union avoids relying on the
+  // high-view tail alone, which would bias the estimated market median upward.
+  const queries = buildRecentGameVideoSearchQueries(game, { now });
+  const responses = await Promise.all(queries.map((query) => youtube.search.list(query)));
+  const ids = uniqueRecentGameVideoIds(responses);
   if (!ids.length) return [];
   const details = await youtube.videos.list({
     part: ['snippet', 'statistics', 'status'], id: ids,
@@ -541,6 +571,7 @@ module.exports = { isConnected, canApprove, hasAnalyticsReadAccess, authorizatio
   getVideo, updateVideoSeo, updateJapaneseVideoLocalization, updateVideoTags, channelSeo, updateChannelSeo, updateJapaneseChannelLocalization, assertTargetChannel,
   getVideoViews, googleSearchTraffic, videoQualityReports, ownedChannel, uploadsPage, videoMetadata, ownedVideosPage, ownedVideosCursorPage,
   listOwnedBroadcasts, enablePublicBroadcastAds, recentGameVideos,
+  buildRecentGameVideoSearchQueries, uniqueRecentGameVideoIds,
   listOwnedPlaylists: playlistClient.listOwnedPlaylists,
   listPlaylistVideoIds: playlistClient.listPlaylistVideoIds,
   createPlaylist: playlistClient.createPlaylist,

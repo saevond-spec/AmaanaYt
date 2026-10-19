@@ -100,6 +100,9 @@ test('refreshes stale samples, excludes the owner channel, caps examples at five
   assert.deepEqual(snapshot.samples.map((item) => item.id),
     ['sample-6', 'sample-5', 'sample-4', 'sample-3', 'sample-2']);
   assert.equal(snapshot.samples[0].estimatedViewsPerDay, 600);
+  assert.deepEqual(snapshot.sampleDesign, ['date', 'viewCount']);
+  assert.deepEqual(snapshot.viewMetricSemantics,
+    { metric: 'public_views', definitionSince: '2026-08-24' });
   assert.equal(snapshot.metrics.sampleCount, 6);
   assert.ok(snapshot.samples[0].smoothedViewsPerDay > 0);
   assert.ok(snapshot.metrics.confidence > 0);
@@ -136,7 +139,7 @@ test('market ranking shrinks very new view spikes, reports robust spread, and sc
   assert.equal(summary.metrics.priorViewsPerDay, 250);
   assert.equal(summary.metrics.medianViewsPerDay, 250);
   assert.equal(summary.samples[0].id, 'new-spike');
-  assert.equal(summary.samples[0].smoothedViewsPerDay, 367);
+  assert.equal(summary.samples[0].smoothedViewsPerDay, 539);
   assert.ok(summary.samples[0].smoothedViewsPerDay < summary.samples[0].estimatedViewsPerDay);
   assert.ok(summary.metrics.medianAbsoluteDeviation > 0);
   assert.ok(summary.metrics.confidence > 0 && summary.metrics.confidence < 1);

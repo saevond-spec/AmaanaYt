@@ -52,12 +52,14 @@ test('processing waits retry, unknown status does not count as finished, and fai
 });
 
 test('current market data annotates topic windows without inventing performance uplift', () => {
-  const result = simulateTwoYears({ startDate: '2026-10-06' });
-  assert.equal(result.currentMarketResearch.asOf, '2026-10-06');
-  assert.equal(result.currentMarketResearch.publisherReportedArcRaidersAudienceSignals.reportedInterestInDedicatedPvePercent, 51);
+  const result = simulateTwoYears({ startDate: '2026-10-19' });
+  assert.equal(result.currentMarketResearch.asOf, '2026-10-19');
+  assert.equal(result.currentMarketResearch.publisherAndPlatformSignals.reportQuarter, 'Q2 2026');
+  assert.equal(result.currentMarketResearch.publisherAndPlatformSignals.youtubeGamingYearOverYearPercent, -18.9);
   assert.equal(result.currentMarketResearch.youtubeGuidance.noPredictedViewLift, true);
-  assert.equal(result.currentMarketResearch.marketWindowCoverageFromPlannedCadence[0].candidatePackagesInWindow, 1);
-  assert.equal(result.currentMarketResearch.marketWindowCoverageFromPlannedCadence[1].candidatePackagesInWindow, 1);
+  assert.equal(result.currentMarketResearch.marketWindowCoverageFromPlannedCadence[0].candidatePackagesInWindow, 0);
+  assert.ok(result.currentMarketResearch.marketWindowCoverageFromPlannedCadence[1].candidatePackagesInWindow > 0);
+  assert.ok(result.currentMarketResearch.marketWindowCoverageFromPlannedCadence[2].candidatePackagesInWindow > 0);
   assert.deepEqual(result.lowViewPriorityPreview.priorityOrder, [
     'sample-12-views', 'sample-84-views', 'sample-1400-views', 'sample-unknown-views'
   ]);
