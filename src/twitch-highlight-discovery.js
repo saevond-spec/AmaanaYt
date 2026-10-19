@@ -223,11 +223,6 @@ function createTwitchHighlightDiscovery({
         String(draft.streamId) === String(stream.id) &&
         Number(draft.streamBatchIndex) === batchIndex);
       if (!batch) {
-        const shortCandidateIndexes = selectedEvidence.map((item, index) => ({
-          index, score: Number(item && item.selectionScore) || 0
-        })).sort((left, right) => right.score - left.score || left.index - right.index)
-          .slice(0, Math.min(MAX_AUTO_SHORTS, selected.highlights.length))
-          .map((item) => item.index);
         const streamTitle = clean(stream.title, 100);
         const channel = clean(stream.user_name || stream.user_login, 50) || 'Twitch channel';
         batch = {
@@ -561,9 +556,9 @@ function createTwitchHighlightDiscovery({
               createdAt: metadata && metadata.created_at || new Date(timestamp).toISOString(),
               title: clean(metadata && metadata.title || stream.title || 'Live gameplay moment', 100)
             });
-          session.shortCandidates.push(session.candidates[session.candidates.length - 1]);
+            session.shortCandidates.push(session.candidates[session.candidates.length - 1]);
             session.candidates = session.candidates.slice(-MAX_LIVE_CANDIDATES);
-          session.shortCandidates = session.shortCandidates.slice(-LIVE_SHORT_CANDIDATE_GROUP_SIZE * 2);
+            session.shortCandidates = session.shortCandidates.slice(-LIVE_SHORT_CANDIDATE_GROUP_SIZE * 2);
           }
           session.lastCaptureError = null;
           await saveState();
