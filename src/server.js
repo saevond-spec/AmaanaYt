@@ -1191,7 +1191,10 @@ app.post('/api/drafts/:id/approve', admin, async (req, res, next) => {
     const updated = await store.updateDraft(draft.id, {
       playlistAssignment,
       status: req.body.publishAt ? 'scheduled' : 'published',
+      publicationStatus: req.body.publishAt ? 'scheduled' : 'published',
+      publishedAt: req.body.publishAt ? null : new Date().toISOString(),
       publishAt: req.body.publishAt || null,
+      youtubePrivacyStatus: req.body.publishAt ? 'private' : 'public',
       youtubeUrl: `https://youtu.be/${draft.youtubeVideoId}`
     });
     res.json({ draft: updated, youtube: published.status });

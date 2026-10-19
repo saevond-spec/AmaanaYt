@@ -3,6 +3,7 @@ const { analyzeVideo } = require('./video-analysis');
 const { createSeoPublisher } = require('./seo-publish');
 const { isYouTubeAuthorizationError } = require('./channel-tags');
 const { runYoutubeSearchAutopilot } = require('./youtube-search-autopilot');
+const { runYoutubeQualityAutopilot } = require('./youtube-quality-autopilot');
 const { isYouTubeQuotaError, youtubeQuotaRetryAt } = require('./youtube-quota');
 
 function createSeoWorker({ store, youtube, env = process.env, logger = console, sleep,
@@ -275,6 +276,19 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           logger.warn?.('YouTube search analytics autopilot failed:', error.message);
         }
       }
+      if (typeof youtube.hasAnalyticsReadAccess === 'function' &&
+          typeof youtube.videoQualityReports === 'function' &&
+          typeof store.listDrafts === 'function' && typeof store.updateDraft === 'function') {
+        try {
+          const qualityRun = await runYoutubeQualityAutopilot({ store, youtube, state, logger,
+            batchSize: Number(env.YOUTUBE_VIDEO_QUALITY_BATCH_SIZE) || 5 });
+          state = qualityRun.state || state;
+          if (qualityRun.updatedCount) logger.info?.('YouTube retention quality assessed for ' +
+            qualityRun.updatedCount + ' mature 15-minute highlights');
+        } catch (error) {
+          logger.warn?.('YouTube video quality autopilot failed:', error.message);
+        }
+      }
       await assignCatalogPlaylists(state);
       if (Date.parse(state.youtubeDataApiBlockedUntil) > Date.now()) return;
       const coverageAudit = await auditPlaylistCoverage(state);
@@ -543,7 +557,11 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       youtubeSearchAnalyticsNeedsReconnect: false,
       youtubeSearchAnalyticsRetryAfter: null,
       youtubeSearchAnalyticsLastError: null,
-      youtubeSearchAnalyticsRunDate: null
+      youtubeSearchAnalyticsRunDate: null,
+      youtubeQualityAnalyticsNeedsReconnect: false,
+      youtubeQualityAnalyticsRetryAfter: null,
+      youtubeQualityAnalyticsLastError: null,
+      youtubeQualityAnalyticsRunDate: null
     });
   }
 

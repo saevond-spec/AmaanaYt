@@ -250,8 +250,10 @@ function hasVerifiedGameplayHighlight(draft) {
     const result = clip && clip.visualGameplayVerification;
     const total = Number(result && result.totalFrames);
     const active = Number(result && result.activeGameplayFrames);
-    return result?.verified === true && total >= 5 && active >= Math.ceil(total * 0.8) &&
-      Number(result.confidence) >= 0.8;
+    const confidence = Number(result && result.confidence);
+    return result?.verified === true && Number.isFinite(total) && total >= 5 &&
+      Number.isFinite(active) && active >= Math.ceil(total * 0.8) && active <= total &&
+      Number.isFinite(confidence) && confidence >= 0.8 && confidence <= 1;
   });
 }
 
@@ -303,6 +305,41 @@ function renderDraft(draft, draftsById = new Map()) {
     const editLabel = verifiedHighlight ? '15-minute gameplay-verified highlight'
       : formatHighlightDuration(measuredDuration) + ' legacy edit · not verified against the 15-minute gameplay target';
     card.append(element('p', 'draft-meta', `Twitch VOD ${draft.vodId} · ${(draft.highlights || []).length} selected moments · ${editLabel} · ${(draft.shortCandidateIndexes || []).length || 2} Shorts`));
+    const quality = draft.qualityCalibration;
+    if (quality?.calibrated && Number.isFinite(Number(quality.qualityFloor)) &&
+        Number.isFinite(Number(quality.qualityCeiling))) {
+      card.append(element('p', 'draft-meta',
+        `Clip quality floor ${Math.round(Number(quality.qualityFloor) * 100)}/100 · ceiling ${Math.round(Number(quality.qualityCeiling) * 100)}/100 · median/MAD from ${quality.sampleSize} same-VOD clips`));
+    } else if (quality && Number.isFinite(Number(quality.sampleSize))) {
+      card.append(element('p', 'draft-meta',
+        `Clip quality band used fallback ranking (${quality.sampleSize} same-VOD candidates; not enough varied evidence for a reliable floor)`));
+    }
+    const assessment = draft.youtubeQualityAssessment;
+    if (assessment) {
+      if (assessment.status === 'low_sample') {
+        card.append(element('p', 'draft-meta',
+          `Post-upload quality is still measuring: ${Number(assessment.assessedViews) || 0} views so far; the comparison needs at least 100 for a stable reading.`));
+      } else if (assessment.status === 'insufficient_retention_data') {
+        card.append(element('p', 'draft-meta',
+          'YouTube has not returned enough audience-retention data for this 7-day quality check yet.'));
+      } else if (assessment.relativeRetentionScore !== null && assessment.relativeRetentionScore !== undefined &&
+          Number.isFinite(Number(assessment.relativeRetentionScore))) {
+        const score = Math.round(Number(assessment.relativeRetentionScore) * 100);
+        const intro = assessment.introRelativeRetentionScore === null || assessment.introRelativeRetentionScore === undefined
+          ? '' : ` · first 30 seconds ${Math.round(Number(assessment.introRelativeRetentionScore) * 100)}/100`;
+        card.append(element('p', 'draft-meta',
+          `Post-upload 7-day retention ${score}/100 vs similar-length YouTube videos (median floor ${Math.round(Number(assessment.marketFloor) * 100)}/100; strong ceiling ${Math.round(Number(assessment.marketCeiling) * 100)}/100)${intro}. Status: ${String(assessment.status).replaceAll('_', ' ')}.`));
+      }
+      const channelBand = assessment.channelBand;
+      if (channelBand?.calibrated && Number.isFinite(Number(assessment.averageViewPercentage)) &&
+          Number.isFinite(Number(channelBand.floor)) && Number.isFinite(Number(channelBand.ceiling))) {
+        card.append(element('p', 'draft-meta',
+          `Channel comparison from ${channelBand.sampleSize} similar highlights: average viewed ${Number(assessment.averageViewPercentage).toFixed(1)}% · floor ${Number(channelBand.floor).toFixed(1)}% · ceiling ${Number(channelBand.ceiling).toFixed(1)}%.`));
+      } else if (channelBand && Number.isFinite(Number(channelBand.sampleSize))) {
+        card.append(element('p', 'draft-meta',
+          `Channel-specific performance band warming up (${channelBand.sampleSize}/${channelBand.requiredSampleSize} comparable highlights with enough views).`));
+      }
+    }
   }
   if (isHighlight && draft.chapterStatus) {
     const moments = draft.chapters?.length ? draft.chapters : (draft.chapterTimestamps || []);
@@ -324,7 +361,7 @@ function renderDraft(draft, draftsById = new Map()) {
   }
   if (draft.status === 'awaiting_owner_approval' && draft.productionState === 'ready' && !publishBlocked) {
     const message = isHighlight
-      ? 'The 15-minute landscape highlight passed exact-duration checks. Every source segment passed a five-frame visual gameplay check, and the selected Shorts passed media validation. Review the private bundle before publishing.'
+      ? 'The 15-minute landscape highlight passed exact-duration checks. Every source segment passed the visual gameplay check, and the selected Shorts passed media validation. Review the private bundle before publishing.'
       : 'This Short passed media validation and YouTube processing, and its SEO package is registered. Review before publishing.';
     card.append(element('p', 'draft-meta', message));
   }

@@ -397,6 +397,46 @@ test('worker uses Retry-After on 429 and pauses 60 minutes when absent', async (
   }
 });
 
+test('SEO worker automatically measures mature published 15-minute highlights', async () => {
+  const draft = {
+    id: 'quality-highlight', sourceType: 'twitch_highlight_batch',
+    youtubeVideoId: 'abcdefghijk', publicationStatus: 'published', status: 'completed',
+    targetHighlightDurationSeconds: 900, duration: 900,
+    publishedAt: '2026-09-01T12:00:00.000Z'
+  };
+  const today = new Date().toISOString().slice(0, 10);
+  let state = { channelId: 'channel-1', recentAt: new Date().toISOString(), completed: true,
+    viewPriorityScanVersion: 1, enabled: true };
+  let reportCalls = 0;
+  const store = {
+    async getSeoSyncState() { return state; },
+    async saveSeoSyncState(next) { state = next; },
+    async listDrafts() { return [draft]; },
+    async updateDraft(id, patch) { assert.equal(id, draft.id); Object.assign(draft, patch); return draft; }
+  };
+  const youtube = {
+    async isConnected() { return true; },
+    async ownedChannel() { return { id: 'channel-1', title: 'Owner' }; },
+    async hasAnalyticsReadAccess() { return true; },
+    async videoQualityReports(id, startDate, endDate) {
+      reportCalls += 1;
+      assert.equal(id, draft.youtubeVideoId);
+      assert.equal(startDate, '2026-09-02');
+      assert.equal(endDate, '2026-09-08');
+      return { summaryRows: [['150', '900', '360', '40']],
+        retentionRows: Array.from({ length: 21 }, (_, index) => [index / 20, 0.6]) };
+    }
+  };
+  const worker = createSeoWorker({ store, youtube, env: {}, logger: { info() {}, warn() {} } });
+
+  await worker.run();
+
+  assert.equal(reportCalls, 1);
+  assert.equal(draft.youtubeQualityAssessment.status, 'within_market_band');
+  assert.equal(draft.youtubeQualityAssessment.windowDays, 7);
+  assert.equal(state.youtubeQualityAnalyticsRunDate, today);
+});
+
 test('worker grows consecutive 503 pauses to 120 minutes', async () => {
   let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
     completed: true, viewPriorityScanVersion: 1, enabled: true };

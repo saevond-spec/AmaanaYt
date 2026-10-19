@@ -7,6 +7,14 @@ const MAX_HIGHLIGHT_SEGMENTS = 20;
 const MIN_GAMEPLAY_SEGMENT_SECONDS = 15;
 const MAX_CLIP_SECONDS = 60;
 const MAX_CANDIDATES_FOR_OPTIMIZATION = 160;
+const QUALITY_FLOOR_PERCENTILE = 0.5;
+const QUALITY_CEILING_PERCENTILE = 0.9;
+const ROBUST_SIGMA_SCALE = 1.4826;
+const ROBUST_CEILING_SIGMAS = 1.5;
+// A median floor should leave enough candidates to fill the production target
+// from 60-second clips. Smaller pools are too noisy to define a stable cutoff.
+const MINIMUM_QUALITY_CALIBRATION_CANDIDATES =
+  2 * Math.ceil(TARGET_HIGHLIGHT_DURATION_SECONDS / MAX_CLIP_SECONDS);
 
 function clean(value, limit) {
   return String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ')
@@ -29,6 +37,67 @@ function clipQuality(candidate, maxViews, vodCreatedAt, coverageBinCounts) {
   const temporalCoverage = 1 / Math.sqrt(coverageBinCounts.get(candidate.coverageBin) || 1);
   // Log engagement prevents one viral clip from overwhelming every other signal.
   return 0.65 * engagement + 0.25 * freshness + 0.10 * temporalCoverage;
+}
+
+function quantile(values, probability) {
+  const sorted = values.filter(Number.isFinite).sort((left, right) => left - right);
+  if (!sorted.length) return 0;
+  const position = (sorted.length - 1) * probability;
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  const fraction = position - lower;
+  return sorted[lower] * (1 - fraction) + sorted[upper] * fraction;
+}
+
+function summarizeClipQuality(candidates, { minimumSampleSize = MINIMUM_QUALITY_CALIBRATION_CANDIDATES } = {}) {
+  const scores = candidates.map((candidate) => candidate.rawQuality).filter(Number.isFinite);
+  const median = scores.length ? quantile(scores, QUALITY_FLOOR_PERCENTILE) : 0;
+  const p90 = scores.length ? quantile(scores, QUALITY_CEILING_PERCENTILE) : 0;
+  const variedViewCounts = new Set(candidates.map((candidate) => candidate.viewCount)).size > 1;
+  const calibrated = scores.length >= minimumSampleSize && variedViewCounts;
+  if (!calibrated) {
+    return {
+      method: scores.length < minimumSampleSize ? 'insufficient_sample_fallback' : 'no_engagement_variation_fallback',
+      calibrated: false,
+      sampleSize: scores.length,
+      qualityFloor: scores.length ? Math.min(...scores) : null,
+      qualityCeiling: scores.length ? Math.max(...scores) : null,
+      medianAbsoluteDeviation: null,
+      floorPercentile: null,
+      ceilingPercentile: null
+    };
+  }
+
+  const mad = quantile(scores.map((score) => Math.abs(score - median)), 0.5);
+  const robustCeiling = mad > 0
+    ? median + ROBUST_CEILING_SIGMAS * ROBUST_SIGMA_SCALE * mad
+    : p90;
+  return {
+    method: 'per_vod_median_mad_capped_at_p90',
+    calibrated: true,
+    sampleSize: scores.length,
+    qualityFloor: median,
+    qualityCeiling: Math.max(median, Math.min(p90, robustCeiling)),
+    medianAbsoluteDeviation: mad,
+    floorPercentile: QUALITY_FLOOR_PERCENTILE,
+    ceilingPercentile: QUALITY_CEILING_PERCENTILE
+  };
+}
+
+function availableNonOverlappingSeconds(candidates, segmentLimit) {
+  const sorted = [...candidates].sort((left, right) =>
+    left.endSeconds - right.endSeconds || left.startSeconds - right.startSeconds);
+  const compatibleCounts = sorted.map((_candidate, index) => previousCompatibleCount(sorted, index));
+  const best = Array.from({ length: sorted.length + 1 }, () => new Float64Array(segmentLimit + 1));
+  for (let row = 1; row <= sorted.length; row += 1) {
+    const candidate = sorted[row - 1];
+    for (let count = 1; count <= segmentLimit; count += 1) {
+      const skip = best[row - 1][count];
+      const include = best[compatibleCounts[row - 1]][count - 1] + candidate.duration;
+      best[row][count] = Math.max(skip, include);
+    }
+  }
+  return Number(Math.max(...best[sorted.length]).toFixed(1));
 }
 
 function previousCompatibleCount(candidates, index) {
@@ -109,10 +178,25 @@ function select15MinuteGameplayHighlights(clips, vod, {
     coverageBinCounts.set(candidate.coverageBin, (coverageBinCounts.get(candidate.coverageBin) || 0) + 1);
   }
   for (const candidate of candidates) {
-    candidate.quality = clipQuality(candidate, maxViews, vodCreatedAt, coverageBinCounts);
+    candidate.rawQuality = clipQuality(candidate, maxViews, vodCreatedAt, coverageBinCounts);
     candidate.durationUnits = Math.max(1, Math.round(candidate.duration));
   }
-  const optimizationCandidates = candidates
+  const qualityCalibration = summarizeClipQuality(candidates);
+  const belowFloorCandidates = qualityCalibration.calibrated
+    ? candidates.filter((candidate) => candidate.rawQuality + 1e-12 < qualityCalibration.qualityFloor)
+    : [];
+  const qualityCandidates = candidates.filter((candidate) =>
+    !qualityCalibration.calibrated || candidate.rawQuality + 1e-12 >= qualityCalibration.qualityFloor);
+  for (const candidate of qualityCandidates) {
+    candidate.quality = Math.min(candidate.rawQuality, qualityCalibration.qualityCeiling);
+  }
+  const qualitySummary = {
+    ...qualityCalibration,
+    candidateCount: candidates.length,
+    qualifiedCandidateCount: qualityCandidates.length,
+    rejectedBelowFloorCount: belowFloorCandidates.length
+  };
+  const optimizationCandidates = qualityCandidates
     .sort((left, right) => right.quality - left.quality || right.viewCount - left.viewCount ||
       left.startSeconds - right.startSeconds || left.clipId.localeCompare(right.clipId))
     .slice(0, Math.max(1, Math.min(MAX_CANDIDATES_FOR_OPTIMIZATION, Math.floor(Number(maxCandidates) || MAX_CANDIDATES_FOR_OPTIMIZATION))))
@@ -121,7 +205,7 @@ function select15MinuteGameplayHighlights(clips, vod, {
 
   if (!optimizationCandidates.length) {
     return { vodDurationSeconds, targetDurationSeconds: target, highlights: [], evidence: [],
-      rejectionReason: 'no_game_category_clips', availableGameplaySeconds: 0 };
+      rejectionReason: 'no_game_category_clips', availableGameplaySeconds: 0, qualityCalibration: qualitySummary };
   }
 
   // Weighted interval knapsack: maximize clip quality while enforcing non-overlap,
@@ -182,17 +266,14 @@ function select15MinuteGameplayHighlights(clips, vod, {
     left.selected.length - right.selected.length);
 
   if (!solutions.length) {
-    const byEnd = [...optimizationCandidates].sort((left, right) => left.endSeconds - right.endSeconds);
-    const nonOverlapping = [];
-    for (const candidate of byEnd) {
-      if (nonOverlapping.length >= segmentLimit) break;
-      if (!nonOverlapping.some((selected) =>
-        Math.min(selected.endSeconds, candidate.endSeconds) > Math.max(selected.startSeconds, candidate.startSeconds) ||
-        Math.abs(selected.endSeconds - candidate.endSeconds) < 3)) nonOverlapping.push(candidate);
-    }
-    const availableGameplaySeconds = Number(nonOverlapping.reduce((sum, candidate) => sum + candidate.duration, 0).toFixed(1));
+    const availableGameplaySeconds = availableNonOverlappingSeconds(optimizationCandidates, segmentLimit);
+    const unfilteredGameplaySeconds = availableNonOverlappingSeconds(candidates, segmentLimit);
+    const qualityFloorBlockedTarget = qualityCalibration.calibrated &&
+      unfilteredGameplaySeconds >= target && availableGameplaySeconds < target;
     return { vodDurationSeconds, targetDurationSeconds: target, highlights: [], evidence: [],
-      rejectionReason: 'insufficient_non_overlapping_gameplay_duration', availableGameplaySeconds };
+      rejectionReason: qualityFloorBlockedTarget
+        ? 'insufficient_quality_gameplay_duration' : 'insufficient_non_overlapping_gameplay_duration',
+      availableGameplaySeconds, unfilteredGameplaySeconds, qualityCalibration: qualitySummary };
   }
 
   const best = solutions[0];
@@ -224,7 +305,8 @@ function select15MinuteGameplayHighlights(clips, vod, {
     highlights,
     evidence: highlights.map((moment) => evidenceByMoment.get(`${moment.startSeconds}:${moment.duration}`)).filter(Boolean),
     availableGameplaySeconds: target,
-    rejectionReason: null
+    rejectionReason: null,
+    qualityCalibration: qualitySummary
   };
 }
 
@@ -232,5 +314,7 @@ module.exports = {
   select15MinuteGameplayHighlights,
   TARGET_HIGHLIGHT_DURATION_SECONDS,
   MAX_HIGHLIGHT_SEGMENTS,
-  MIN_GAMEPLAY_SEGMENT_SECONDS
+  MIN_GAMEPLAY_SEGMENT_SECONDS,
+  MINIMUM_QUALITY_CALIBRATION_CANDIDATES,
+  summarizeClipQuality
 };

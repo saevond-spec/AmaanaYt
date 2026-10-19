@@ -242,6 +242,26 @@ test('creates one private-pipeline batch from Amaana-discovered Twitch clip evid
   assert.equal(h.calls.vodListOptions.first, 20);
 });
 
+test('does not queue a 15-minute batch when the robust quality floor leaves only weak footage', async () => {
+  const vod = makeVod();
+  const highStarts = [1350, 1350, 1440, 1440, 1530, 1530, 1620, 1710, 1800, 1890, 1980, 2070, 2160, 2250, 2340];
+  const clips = [
+    ...Array.from({ length: 15 }, (_, index) => makeClip('low-' + index, index * 90, 60, 0)),
+    ...highStarts.map((start, index) => makeClip('high-' + index, start, 60, 10000))
+  ];
+  const h = harness({ vods: [vod], targetDurationSeconds: 900,
+    clipsByVod: { [vod.id]: clips } });
+
+  const result = await h.discovery.scanVod(vod);
+
+  assert.equal(result.status, 'insufficient_quality_gameplay');
+  assert.equal(result.availableGameplaySeconds, 720);
+  assert.ok(result.unfilteredGameplaySeconds >= 900);
+  assert.equal(result.qualityCalibration.method, 'per_vod_median_mad_capped_at_p90');
+  assert.equal(h.drafts.length, 0);
+  assert.deepEqual(h.enqueued, []);
+});
+
 test('captures and screens live segments, then queues the 15-minute review batch before stream end', async () => {
   let clock = Date.parse('2026-10-18T15:00:00.000Z');
   const streamStartedAt = clock - 60 * MINUTE;
@@ -319,6 +339,28 @@ test('does not keep or queue a live Twitch clip that fails visual gameplay revie
   assert.equal(h.state.liveSessions['7777'].candidates.length, 0);
   assert.equal(h.drafts.length, 0);
   assert.deepEqual(h.enqueued, []);
+  assert.deepEqual(h.enqueuedClips, []);
+});
+
+test('rejects live gameplay results above the valid frame or confidence ceiling', async () => {
+  const clock = Date.parse('2026-10-18T15:00:00.000Z');
+  const streamStartedAt = clock - 60 * MINUTE;
+  const h = harness({
+    liveBroadcast: () => makeLiveBroadcast(clock, streamStartedAt),
+    video: {
+      async inspectMedia() { return { durationSeconds: 60, width: 1280, height: 720 }; },
+      async verifyGameplay() {
+        return { verified: true, totalFrames: 5, activeGameplayFrames: 6,
+          confidence: 1.01, gameName: 'Test Game', model: 'fixture' };
+      }
+    },
+    startAt: clock, now: () => clock, targetDurationSeconds: 60
+  });
+
+  const result = await h.discovery.runLive();
+  assert.equal(result.gameplayRejected, 1);
+  assert.equal(h.state.liveSessions['7777'].candidates.length, 0);
+  assert.equal(h.drafts.length, 0);
   assert.deepEqual(h.enqueuedClips, []);
 });
 
