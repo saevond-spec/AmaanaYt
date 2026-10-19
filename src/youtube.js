@@ -492,4 +492,5 @@ module.exports = { isConnected, canApprove, hasAnalyticsReadAccess, authorizatio
   listOwnedPlaylists: playlistClient.listOwnedPlaylists,
   listPlaylistVideoIds: playlistClient.listPlaylistVideoIds,
   createPlaylist: playlistClient.createPlaylist,
+  updateJapanesePlaylistLocalization: playlistClient.updateJapanesePlaylistLocalization,
   addVideoToPlaylist: playlistClient.addVideoToPlaylist };
