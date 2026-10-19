@@ -821,6 +821,19 @@ test('transient publication failure resumes from the first still-private output'
   assert.equal(h.counters.publications.length, 5);
 });
 
+test('excluded highlight batches stop before any worker or YouTube processing', async (t) => {
+  const h = await harness(t);
+  h.batch.status = 'excluded_by_owner';
+
+  await h.processor(h.batch.id);
+
+  assert.equal(h.drafts.get(h.batch.id).status, 'excluded_by_owner');
+  assert.equal(h.counters.clipCreates, 0);
+  assert.equal(h.counters.uploads.length, 0);
+  assert.equal(h.counters.thumbnailCreates, 0);
+  assert.equal(h.counters.publications.length, 0);
+});
+
 test('old private batches and disabled automatic publication remain private for owner review', async (t) => {
   const old = await harness(t);
   old.batch.autoPublishEligible = false;
