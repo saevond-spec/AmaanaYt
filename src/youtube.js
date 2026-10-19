@@ -6,6 +6,7 @@ const { ensureCreatorTag, buildCreatorTagUpdate } = require('./channel-tags');
 const { mergeYouTubeOAuthTokens } = require('./youtube-oauth');
 const { summarizeYoutubeSearchPerformance, hasYoutubeAnalyticsReadScopes, youtubeSearchReportQueries } = require('./youtube-search-performance');
 const { normalizeJapaneseChannelLocalization } = require('./channel-localization');
+const { normalizeJapaneseVideoLocalization } = require('./japanese-translation');
 
 const SCOPES = [
   'https://www.googleapis.com/auth/youtube.upload',
@@ -141,6 +142,71 @@ async function updateVideoSeo(videoId, video, edit) {
   return response.data;
 }
 
+async function updateJapaneseVideoLocalization(expected, edit) {
+  const videoId = String(expected?.id || '').trim();
+  if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
+    const error = new Error('A valid 11-character YouTube video ID is required');
+    error.status = 400;
+    throw error;
+  }
+  const youtube = await service();
+  const [videoResponse, channelResponse] = await Promise.all([
+    youtube.videos.list({
+      part: ['snippet', 'localizations'], id: [videoId],
+      fields: 'items(id,etag,snippet(title,description,tags,categoryId,defaultLanguage,defaultAudioLanguage,channelId),localizations)'
+    }),
+    youtube.channels.list({
+      part: ['snippet', 'brandingSettings'], mine: true,
+      fields: 'items(id,snippet(defaultLanguage),brandingSettings(channel(defaultLanguage)))'
+    })
+  ]);
+  const current = videoResponse.data.items?.[0];
+  if (!current?.id) {
+    const error = new Error('YouTube video was not found');
+    error.status = 404;
+    throw error;
+  }
+  const channel = channelResponse.data.items?.[0];
+  if (!channel?.id || current.snippet?.channelId !== channel.id) {
+    const error = new Error('Only videos owned by the connected YouTube channel can be localized');
+    error.status = 403;
+    throw error;
+  }
+  if (!expected?.etag || !current.etag || expected.etag !== current.etag) {
+    const error = new Error('Video settings changed; refresh before saving the Japanese localization');
+    error.status = 409;
+    throw error;
+  }
+  const localization = normalizeJapaneseVideoLocalization(edit, {
+    title: current.snippet?.title || '',
+    description: current.snippet?.description || ''
+  });
+  const localizations = { ...(current.localizations || {}), ja: localization };
+  // A snippet update replaces writable snippet fields, so send their existing values unchanged.
+  const snippet = {
+    title: current.snippet?.title || '',
+    description: current.snippet?.description || '',
+    tags: Array.isArray(current.snippet?.tags) ? current.snippet.tags : [],
+    defaultLanguage: current.snippet?.defaultLanguage ||
+      channel.brandingSettings?.channel?.defaultLanguage || channel.snippet?.defaultLanguage || 'en'
+  };
+  if (current.snippet?.categoryId) snippet.categoryId = current.snippet.categoryId;
+  if (current.snippet?.defaultAudioLanguage) snippet.defaultAudioLanguage = current.snippet.defaultAudioLanguage;
+  try {
+    await youtube.videos.update({
+      part: ['snippet', 'localizations'],
+      requestBody: { id: videoId, snippet, localizations }
+    }, { headers: { 'If-Match': current.etag } });
+  } catch (error) {
+    if (Number(error.status || error.code) === 412) {
+      error.status = 409;
+      error.message = 'Video settings changed while saving; refresh before trying again';
+    }
+    throw error;
+  }
+  return { id: videoId, language: 'ja', localization, defaultLanguage: snippet.defaultLanguage };
+}
+
 async function updateVideoTags(video, channelId) {
   const update = buildCreatorTagUpdate(video, channelId);
   if (!update.changed) return { state: 'already_tagged', tags: update.tags };
@@ -261,13 +327,14 @@ async function updateJapaneseChannelLocalization(expected, edit) {
 
 async function ownedChannel() {
   const youtube = await service();
-  const response = await youtube.channels.list({ part: ['snippet', 'contentDetails'], mine: true,
-    fields: 'items(id,snippet(title),contentDetails(relatedPlaylists(uploads)))' });
+  const response = await youtube.channels.list({ part: ['snippet', 'contentDetails', 'brandingSettings'], mine: true,
+    fields: 'items(id,snippet(title,defaultLanguage),brandingSettings(channel(defaultLanguage)),contentDetails(relatedPlaylists(uploads)))' });
   const channel = response.data.items?.[0];
   if (!channel?.id || !channel.contentDetails?.relatedPlaylists?.uploads) {
     throw new Error('The connected YouTube account has no uploads playlist');
   }
-  return { id: channel.id, title: channel.snippet?.title, uploads: channel.contentDetails.relatedPlaylists.uploads };
+  return { id: channel.id, title: channel.snippet?.title, uploads: channel.contentDetails.relatedPlaylists.uploads,
+    defaultLanguage: channel.brandingSettings?.channel?.defaultLanguage || channel.snippet?.defaultLanguage || null };
 }
 
 async function uploadsPage(playlistId, pageToken) {
@@ -285,8 +352,8 @@ async function videoMetadata(ids) {
   if (!Array.isArray(ids) || ids.length > 50) throw new Error('Request metadata for up to 50 videos');
   if (!ids.length) return [];
   const youtube = await service();
-  const response = await youtube.videos.list({ part: ['snippet', 'status', 'contentDetails', 'statistics'], id: ids,
-    fields: 'items(id,etag,snippet(title,description,tags,publishedAt,channelId,categoryId,defaultLanguage,defaultAudioLanguage),status(privacyStatus),contentDetails(duration),statistics(viewCount))' });
+  const response = await youtube.videos.list({ part: ['snippet', 'status', 'contentDetails', 'statistics', 'localizations'], id: ids,
+    fields: 'items(id,etag,snippet(title,description,tags,publishedAt,channelId,categoryId,defaultLanguage,defaultAudioLanguage),status(privacyStatus),contentDetails(duration),statistics(viewCount),localizations)' });
   return response.data.items || [];
 }
 
@@ -419,7 +486,7 @@ async function enablePublicBroadcastAds(broadcast) {
 }
 
 module.exports = { isConnected, canApprove, hasAnalyticsReadAccess, authorizationUrl, exchangeCode, uploadPrivate, setThumbnail, publish,
-  getVideo, updateVideoSeo, updateVideoTags, channelSeo, updateChannelSeo, updateJapaneseChannelLocalization, assertTargetChannel,
+  getVideo, updateVideoSeo, updateJapaneseVideoLocalization, updateVideoTags, channelSeo, updateChannelSeo, updateJapaneseChannelLocalization, assertTargetChannel,
   getVideoViews, googleSearchTraffic, ownedChannel, uploadsPage, videoMetadata,
   listOwnedBroadcasts, enablePublicBroadcastAds, recentGameVideos,
   listOwnedPlaylists: playlistClient.listOwnedPlaylists,
