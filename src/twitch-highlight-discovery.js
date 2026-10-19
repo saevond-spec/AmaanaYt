@@ -7,6 +7,7 @@ const path = require('path');
 const { select15MinuteGameplayHighlights, TARGET_HIGHLIGHT_DURATION_SECONDS,
   MAX_HIGHLIGHT_SEGMENTS } = require('./highlight-selection');
 const { parseTwitchDuration } = require('./highlight-validation');
+const { buildCommunityClipDrafts } = require('./twitch-community-clips');
 
 const DEFAULT_SCAN_INTERVAL_MS = 15 * 60 * 1000;
 const DEFAULT_LIVE_SCAN_INTERVAL_MS = 60 * 1000;
@@ -111,6 +112,32 @@ function createTwitchHighlightDiscovery({
     await saveState();
   }
 
+  async function queueCommunityClips(clips, context, result, knownDrafts) {
+    if (!Array.isArray(clips) || !clips.length) return 0;
+    const drafts = Array.isArray(knownDrafts) ? knownDrafts : await store.listDrafts();
+    const queued = buildCommunityClipDrafts(clips, {
+      ...context,
+      existingDrafts: drafts,
+      now: now(),
+      idFactory
+    });
+    let count = 0;
+    for (const draft of queued) {
+      const saved = await store.addDraft(draft);
+      drafts.push(saved);
+      enqueueClip(saved.id);
+      count += 1;
+      if (logger && typeof logger.info === 'function') {
+        logger.info('Amaana queued Twitch community clip ' + draft.twitchClipId + ' for gameplay screening');
+      }
+    }
+    if (result) {
+      result.communityClipsChecked = (Number(result.communityClipsChecked) || 0) + clips.length;
+      result.communityClipsQueued = (Number(result.communityClipsQueued) || 0) + count;
+    }
+    return count;
+  }
+
   async function scanVod(vodOrId, { drafts: knownDrafts } = {}) {
     const requestedId = String(typeof vodOrId === 'object' && vodOrId ? vodOrId.id : vodOrId || '');
     if (!/^\d+$/.test(requestedId)) throw new Error('A numeric Twitch VOD ID is required');
@@ -136,6 +163,18 @@ function createTwitchHighlightDiscovery({
       }
 
       const clips = await twitch.listClipsForVod(vod);
+      const broadcasterId = String(vod.user_id || '');
+      await queueCommunityClips(clips, {
+        broadcasterId,
+        editorId: broadcasterId,
+        streamId: String(vod.stream_id || vod.id),
+        streamStartedAt: vod.created_at,
+        streamTitle: vod.title,
+        sourceChannel: vod.user_name || vod.user_login,
+        gameId: vod.game_id || null,
+        gameName: vod.game_name || '',
+        vodId: requestedId
+      }, null, drafts);
       const selected = selectCommunityHighlights(clips, vod, { targetDurationSeconds });
       if (!selected.highlights.length) {
         await markScanned(requestedId);
@@ -393,6 +432,31 @@ function createTwitchHighlightDiscovery({
       result.status = 'invalid_live_broadcast';
       return result;
     }
+    const timestamp = now();
+    if (typeof twitch.listRecentLiveClips === 'function') {
+      try {
+        const clips = await twitch.listRecentLiveClips({
+          startedAt: stream.started_at,
+          endedAt: new Date(timestamp).toISOString()
+        });
+        await queueCommunityClips(clips, {
+          broadcasterId: userId,
+          editorId: userId,
+          streamId,
+          streamStartedAt: stream.started_at,
+          streamTitle: stream.title,
+          sourceChannel: stream.user_name || stream.user_login,
+          gameId: stream.game_id || null,
+          gameName: stream.game_name || '',
+          vodId: vod && vod.id
+        }, result);
+      } catch (error) {
+        result.communityClipScanError = clean(error && error.message || 'Twitch clip scan failed', 300);
+        if (logger && typeof logger.warn === 'function') {
+          logger.warn('Amaana live community clip scan failed: ' + result.communityClipScanError);
+        }
+      }
+    }
     if (!vod || vod.type !== 'archive' || String(vod.user_id || '') !== userId ||
         String(vod.stream_id || '') !== streamId || !/^\d+$/.test(String(vod.id || ''))) {
       result.status = 'active_vod_not_ready';
@@ -406,7 +470,6 @@ function createTwitchHighlightDiscovery({
       result.status = 'active_vod_not_ready';
       return result;
     }
-    const timestamp = now();
     const startedAt = Date.parse(stream.started_at || '');
     const elapsedSeconds = Number.isFinite(startedAt)
       ? Math.max(0, Math.floor((timestamp - startedAt) / 1000)) : vodDurationSeconds;
