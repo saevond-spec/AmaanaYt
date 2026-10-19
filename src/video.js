@@ -6,15 +6,16 @@ function convertLandscapeToShort(inputPath, outputPath) {
   if (!ffmpegPath) throw new Error('FFmpeg is not available');
   const filter = [
     '[0:v]split=2[bgsrc][fgsrc]',
-    '[bgsrc]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=18:2[bg]',
-    '[fgsrc]scale=720:1280:force_original_aspect_ratio=decrease[fg]',
-    '[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]'
+    '[bgsrc]scale=360:640:force_original_aspect_ratio=increase:flags=fast_bilinear,' +
+      'crop=360:640,boxblur=9:1,scale=720:1280:flags=bilinear[bg]',
+    '[fgsrc]scale=720:1280:force_original_aspect_ratio=decrease:flags=fast_bilinear[fg]',
+    '[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=1,format=yuv420p[v]'
   ].join(';');
   const args = [
-    '-y', '-i', inputPath,
+    '-filter_complex_threads', '1', '-y', '-i', inputPath,
     '-filter_complex', filter,
     '-map', '[v]', '-map', '0:a?',
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+    '-c:v', 'libx264', '-preset', 'superfast', '-crf', '24', '-threads', '1',
     '-c:a', 'aac', '-b:a', '128k',
     '-movflags', '+faststart', '-t', '60',
     outputPath
