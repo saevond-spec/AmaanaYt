@@ -4,15 +4,26 @@ function cleanError(error) {
   return String(error?.message || 'YouTube Analytics request failed')
     .replace(/[\r\n\t]+/g, ' ').slice(0, 240);
 }
+function isYoutubeAnalyticsApiDisabledError(value) {
+  const text = typeof value === 'string' ? value : [
+    value?.message,
+    value?.response?.data,
+    value?.code
+  ].filter(Boolean).map((part) => typeof part === 'string' ? part : JSON.stringify(part)).join(' ');
+  return /youtube analytics api has not been used in project|youtubeanalytics\.googleapis\.com|service_disabled|accessnotconfigured/i
+    .test(text);
+}
 function safeCursor(value, total) {
   const cursor = Number(value);
   return Number.isSafeInteger(cursor) && cursor >= 0 && total > 0 ? cursor % total : 0;
 }
 async function runYoutubeSearchAutopilot({ store, youtube, state = {}, now = new Date(),
-  logger = console, batchSize = 20 }) {
+  logger = console, batchSize = 20, retryDisabledApiOnStartup = false }) {
   const timestamp = new Date(now);
   if (!Number.isFinite(timestamp.getTime())) throw new Error('A valid autopilot date is required');
   const today = timestamp.toISOString().slice(0, 10);
+  const shouldProbeDisabledApi = retryDisabledApiOnStartup &&
+    isYoutubeAnalyticsApiDisabledError(state.youtubeSearchAnalyticsLastError);
   if (typeof youtube?.hasAnalyticsReadAccess !== 'function' ||
       !await youtube.hasAnalyticsReadAccess()) {
     return { state, status: 'needs_youtube_analytics_consent', updatedCount: 0, failedCount: 0 };
@@ -20,11 +31,11 @@ async function runYoutubeSearchAutopilot({ store, youtube, state = {}, now = new
   if (state.youtubeSearchAnalyticsNeedsReconnect === true) {
     return { state, status: 'needs_youtube_reconnect', updatedCount: 0, failedCount: 0 };
   }
-  if (state.youtubeSearchAnalyticsRunDate === today) {
+  if (!shouldProbeDisabledApi && state.youtubeSearchAnalyticsRunDate === today) {
     return { state, status: 'already_ran_today', updatedCount: 0, failedCount: 0 };
   }
   const retryAfter = Date.parse(state.youtubeSearchAnalyticsRetryAfter || '');
-  if (Number.isFinite(retryAfter) && retryAfter > timestamp.getTime()) {
+  if (!shouldProbeDisabledApi && Number.isFinite(retryAfter) && retryAfter > timestamp.getTime()) {
     return { state, status: 'cooldown', updatedCount: 0, failedCount: 0 };
   }
   if (typeof store.countPublicSeoVideos !== 'function' ||
@@ -102,7 +113,7 @@ async function runYoutubeSearchAutopilot({ store, youtube, state = {}, now = new
     youtubeSearchAnalyticsNeedsReconnect: reconnectRequired,
     youtubeSearchAnalyticsRetryAfter: reconnectRequired ? null : allFailed
       ? new Date(timestamp.getTime() + 6 * 60 * 60 * 1000).toISOString() : null,
-    ...(allFailed || reconnectRequired ? {} : { youtubeSearchAnalyticsRunDate: today })
+    youtubeSearchAnalyticsRunDate: allFailed || reconnectRequired ? null : today
   };
   await store.saveSeoSyncState(updatedState);
   logger.info?.('YouTube search analytics autopilot: updated ' + updatedCount + '/' +
@@ -112,4 +123,4 @@ async function runYoutubeSearchAutopilot({ store, youtube, state = {}, now = new
     : allFailed ? 'retry_scheduled' : 'complete',
     updatedCount, failedCount, windows };
 }
-module.exports = { runYoutubeSearchAutopilot, safeCursor };
+module.exports = { runYoutubeSearchAutopilot, safeCursor, isYoutubeAnalyticsApiDisabledError };

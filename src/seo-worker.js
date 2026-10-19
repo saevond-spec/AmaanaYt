@@ -2,7 +2,7 @@ const { normalizeSource, normalizeContext, generatePackage, createModelCircuitBr
 const { analyzeVideo } = require('./video-analysis');
 const { createSeoPublisher } = require('./seo-publish');
 const { isYouTubeAuthorizationError } = require('./channel-tags');
-const { runYoutubeSearchAutopilot } = require('./youtube-search-autopilot');
+const { runYoutubeSearchAutopilot, isYoutubeAnalyticsApiDisabledError } = require('./youtube-search-autopilot');
 const { runYoutubeQualityAutopilot } = require('./youtube-quality-autopilot');
 const { isYouTubeQuotaError, youtubeQuotaRetryAt } = require('./youtube-quota');
 
@@ -12,6 +12,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   let scheduled = false;
   let rerunRequested = false;
   let lastRun = 0;
+  let analyticsStartupRecheckPending = true;
   let youtubeAuthBlockedUntil = 0;
   let catalogScanIncomplete = false;
   let lastDiagnostic = null;
@@ -267,8 +268,15 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           typeof store.listYoutubeSearchCandidates === 'function' &&
           typeof store.saveYoutubeSearchSnapshots === 'function') {
         try {
+          const retryDisabledApiOnStartup = analyticsStartupRecheckPending &&
+            isYoutubeAnalyticsApiDisabledError(state.youtubeSearchAnalyticsLastError);
+          analyticsStartupRecheckPending = false;
+          if (retryDisabledApiOnStartup) {
+            logger.info?.('Retrying YouTube Analytics once after a previously disabled API became available');
+          }
           const analyticsRun = await runYoutubeSearchAutopilot({ store, youtube, state, logger,
-            batchSize: Number(env.YOUTUBE_SEARCH_ANALYTICS_BATCH_SIZE) || 20 });
+            batchSize: Number(env.YOUTUBE_SEARCH_ANALYTICS_BATCH_SIZE) || 20,
+            retryDisabledApiOnStartup });
           state = analyticsRun.state || state;
           if (analyticsRun.updatedCount) logger.info?.('Google referral and YouTube Search metrics refreshed for ' +
             analyticsRun.updatedCount + ' low-view-priority videos');

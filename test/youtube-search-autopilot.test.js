@@ -2,7 +2,17 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { youtubeSearchComparisonWindows, isGoogleExternalReferrer, hasYoutubeAnalyticsReadScopes,
   youtubeSearchReportQueries, summarizeYoutubeSearchPerformance } = require('../src/youtube-search-performance');
-const { runYoutubeSearchAutopilot, safeCursor } = require('../src/youtube-search-autopilot');
+const { runYoutubeSearchAutopilot, safeCursor, isYoutubeAnalyticsApiDisabledError } =
+  require('../src/youtube-search-autopilot');
+
+test('recognizes YouTube Analytics service-disabled errors for recovery checks', () => {
+  assert.equal(isYoutubeAnalyticsApiDisabledError(
+    'YouTube Analytics API has not been used in project 878027589263 before or it is disabled.'), true);
+  assert.equal(isYoutubeAnalyticsApiDisabledError({ response: { data: {
+    error: { status: 'SERVICE_DISABLED', message: 'API disabled' }
+  } } }), true);
+  assert.equal(isYoutubeAnalyticsApiDisabledError('quota exceeded'), false);
+});
 
 test('requests owner-scoped source-type and capped external-detail reports with read-only scopes', () => {
   const scopes = 'https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/yt-analytics.readonly';
@@ -114,9 +124,51 @@ test('autopilot waits for read-only consent and schedules a cooldown after total
     logger: { info() {}, warn() {} } });
   assert.equal(failed.status, 'retry_scheduled');
   assert.equal(failed.failedCount, 1);
-  assert.equal(failed.state.youtubeSearchAnalyticsRunDate, undefined);
   assert.equal(Date.parse(failed.state.youtubeSearchAnalyticsRetryAfter),
     Date.parse('2026-10-06T00:30:00.000Z'));
+  assert.equal(failed.state.youtubeSearchAnalyticsRunDate, null);
+});
+
+test('startup recovery bypasses one stale cooldown only for the disabled Analytics API error', async () => {
+  const now = new Date('2026-10-05T18:30:00.000Z');
+  const state = {
+    youtubeSearchAnalyticsRetryAfter: '2026-10-05T23:00:00.000Z',
+    youtubeSearchAnalyticsLastError: 'abcdefghijk: YouTube Analytics API has not been used in project 878027589263 before or it is disabled.'
+  };
+  let calls = 0;
+  const store = {
+    async countPublicSeoVideos() { return 1; },
+    async listYoutubeSearchCandidates() { return [{ videoId: 'abcdefghijk' }]; },
+    async saveYoutubeSearchSnapshots() {},
+    async saveSeoSyncState(next) { this.state = next; }
+  };
+  const youtube = {
+    async hasAnalyticsReadAccess() { return true; },
+    async googleSearchTraffic() {
+      calls += 1;
+      return { youtubeSearchViews: 1, googleSearchReferralViews: 0,
+        googleSearchReferralComplete: true, googleSearchDetailRows: 0 };
+    }
+  };
+  const cooling = await runYoutubeSearchAutopilot({ store, youtube, state, now,
+    logger: { info() {}, warn() {} } });
+  assert.equal(cooling.status, 'cooldown');
+  assert.equal(calls, 0);
+
+  const recovered = await runYoutubeSearchAutopilot({ store, youtube, state, now,
+    retryDisabledApiOnStartup: true, logger: { info() {}, warn() {} } });
+  assert.equal(recovered.status, 'complete');
+  assert.equal(recovered.updatedCount, 1);
+  assert.equal(calls, 2);
+  assert.equal(recovered.state.youtubeSearchAnalyticsLastError, null);
+  assert.equal(recovered.state.youtubeSearchAnalyticsRetryAfter, null);
+  assert.equal(recovered.state.youtubeSearchAnalyticsRunDate, '2026-10-05');
+
+  const unrelatedError = await runYoutubeSearchAutopilot({ store, youtube,
+    state: { ...state, youtubeSearchAnalyticsLastError: 'quota exceeded' }, now,
+    retryDisabledApiOnStartup: true, logger: { info() {}, warn() {} } });
+  assert.equal(unrelatedError.status, 'cooldown');
+  assert.equal(calls, 2);
 });
 
 test('autopilot pauses on revoked OAuth, preserves its cursor, and retries after reconnect', async () => {
@@ -143,7 +195,7 @@ test('autopilot pauses on revoked OAuth, preserves its cursor, and retries after
   assert.equal(failed.state.youtubeSearchAnalyticsCursor, 4);
   assert.equal(failed.state.youtubeSearchAnalyticsNeedsReconnect, true);
   assert.equal(failed.state.youtubeSearchAnalyticsRetryAfter, null);
-  assert.equal(failed.state.youtubeSearchAnalyticsRunDate, undefined);
+  assert.equal(failed.state.youtubeSearchAnalyticsRunDate, null);
   assert.equal(savedState, failed.state);
 
   const waiting = await runYoutubeSearchAutopilot({ store: storeApi, youtube,

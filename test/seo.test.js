@@ -437,6 +437,39 @@ test('SEO worker automatically measures mature published 15-minute highlights', 
   assert.equal(state.youtubeQualityAnalyticsRunDate, today);
 });
 
+test('SEO worker probes a previously disabled Analytics API once after process startup', async () => {
+  const disabledError = 'YouTube Analytics API has not been used in project 878027589263 before or it is disabled.';
+  let state = {
+    channelId: 'channel-1', channelTitle: 'Owner', recentAt: new Date().toISOString(),
+    completed: true, viewPriorityScanVersion: 1, enabled: true,
+    youtubeSearchAnalyticsLastError: 'abcdefghijk: ' + disabledError,
+    youtubeSearchAnalyticsRetryAfter: new Date(Date.now() + 60 * 60 * 1000).toISOString()
+  };
+  let analyticsCalls = 0;
+  const store = {
+    async getSeoSyncState() { return state; },
+    async saveSeoSyncState(next) { state = next; },
+    async countPublicSeoVideos() { return 1; },
+    async listYoutubeSearchCandidates() { return [{ videoId: 'abcdefghijk' }]; },
+    async saveYoutubeSearchSnapshots() {}
+  };
+  const youtube = {
+    async isConnected() { return true; },
+    async ownedChannel() { return { id: 'channel-1', title: 'Owner' }; },
+    async hasAnalyticsReadAccess() { return true; },
+    async googleSearchTraffic() { analyticsCalls += 1; throw new Error(disabledError); }
+  };
+  const worker = createSeoWorker({ store, youtube, env: {}, logger: { info() {}, warn() {}, error() {} } });
+
+  await worker.run();
+  assert.equal(analyticsCalls, 2);
+  assert.equal(state.youtubeSearchAnalyticsRunDate, null);
+  assert.equal(Date.parse(state.youtubeSearchAnalyticsRetryAfter) > Date.now(), true);
+
+  await worker.run();
+  assert.equal(analyticsCalls, 2);
+});
+
 test('worker grows consecutive 503 pauses to 120 minutes', async () => {
   let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
     completed: true, viewPriorityScanVersion: 1, enabled: true };
