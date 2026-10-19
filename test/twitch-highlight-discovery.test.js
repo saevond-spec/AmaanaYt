@@ -267,6 +267,32 @@ test('does not queue a 15-minute batch when the robust quality floor leaves only
   assert.deepEqual(h.enqueued, []);
 });
 
+test('skips a live broadcast titled Test before community clip intake or capture', async () => {
+  const clock = Date.parse('2026-10-18T15:00:00.000Z');
+  const streamStartedAt = clock - 60 * MINUTE;
+  const broadcast = makeLiveBroadcast(clock, streamStartedAt);
+  broadcast.stream.title = 'Test';
+  broadcast.vod.title = 'Test';
+  const video = {
+    async inspectMedia() { return { durationSeconds: 60, width: 1280, height: 720 }; },
+    async verifyGameplay() {
+      return { verified: true, totalFrames: 5, activeGameplayFrames: 5, confidence: 0.95 };
+    }
+  };
+  const h = harness({ liveBroadcast: broadcast, video, startAt: clock, liveClips: [
+    makeClip('should-not-queue', 360, 30, 100, { broadcaster_id: '1001' })
+  ] });
+
+  const result = await h.discovery.runLive();
+
+  assert.equal(result.status, 'test_stream_skipped');
+  assert.equal(result.captureAttempted, false);
+  assert.equal(h.calls.liveCommunityClipLookups, 0);
+  assert.equal(h.calls.liveClipCreates.length, 0);
+  assert.equal(h.drafts.length, 0);
+  assert.deepEqual(h.enqueuedClips, []);
+});
+
 test('captures and screens live segments, then queues the 15-minute review batch before stream end', async () => {
   let clock = Date.parse('2026-10-18T15:00:00.000Z');
   const streamStartedAt = clock - 60 * MINUTE;
@@ -333,7 +359,7 @@ test('queues a WizeBot-style clip during a live stream before Twitch links its V
     liveBroadcast: broadcast,
     liveClips: [makeClip('LuckyTallPhoneRitzMitz-FmiVE7c8LdMuQo6o', null, 30, 0, {
       broadcaster_id: '1001', video_id: '', vod_offset: null,
-      created_at: new Date(clock - MINUTE).toISOString(), title: 'Test'
+      created_at: new Date(clock - MINUTE).toISOString(), title: 'Ranked clutch'
     })],
     startAt: clock,
     now: () => clock,
@@ -549,6 +575,24 @@ test('continues scanning other VODs after one Twitch request fails', async () =>
   assert.equal(result.queued, 1);
   assert.equal(h.drafts[0].vodId, second.id);
   assert.equal(h.state.lastScannedAt[first.id], undefined);
+});
+
+test('manual and scheduled archive discovery skip a placeholder Test VOD before reading clips', async () => {
+  const vod = makeVod('1001', { user_id: '1001', title: 'Test' });
+  const h = harness({ vods: [vod], clipsByVod: { [vod.id]: [makeClip('not-gameplay', 360, 30, 100)] } });
+
+  const manual = await h.discovery.scanVod(vod);
+  assert.equal(manual.status, 'test_stream_skipped');
+  assert.equal(h.calls.clipList, 0);
+  assert.equal(h.drafts.length, 0);
+  assert.deepEqual(h.enqueued, []);
+  assert.deepEqual(h.enqueuedClips, []);
+
+  const scheduledHarness = harness({ vods: [vod] });
+  const scheduled = await scheduledHarness.discovery.run();
+  assert.equal(scheduled.testStreamsSkipped, 1);
+  assert.equal(scheduledHarness.calls.clipList, 0);
+  assert.equal(scheduledHarness.drafts.length, 0);
 });
 
 test('manual VOD scans resolve the ID through Amaana’s own broadcaster authorization', async () => {
