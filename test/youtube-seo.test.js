@@ -69,6 +69,49 @@ test('video metadata update sends only writable snippet fields and uses the curr
   assert.equal(Object.hasOwn(request.params.requestBody, 'status'), false);
 });
 
+test('owned upload pagination returns the requested page across YouTube upload-list pages', async (t) => {
+  const oldYoutube = google.youtube;
+  const oldTokens = store.getTokens;
+  const oldBaseUrl = process.env.BASE_URL;
+  t.after(() => {
+    google.youtube = oldYoutube;
+    store.getTokens = oldTokens;
+    process.env.BASE_URL = oldBaseUrl;
+  });
+  process.env.BASE_URL = 'https://amaana.example.test';
+  store.getTokens = async () => ({ access_token: 'unit-test', expiry_date: Date.now() + 3600000 });
+  const ids = Array.from({ length: 60 }, (_, index) => String(index).padStart(11, '0'));
+  const playlistCalls = [];
+  google.youtube = () => ({
+    channels: { list: async () => ({ data: { items: [{
+      id: 'channel-1', snippet: { title: 'Saevond', defaultLanguage: 'en' },
+      contentDetails: { relatedPlaylists: { uploads: 'uploads-1' } }
+    }] } }) },
+    playlistItems: { list: async (params) => {
+      playlistCalls.push(params);
+      const start = params.pageToken ? 50 : 0;
+      return { data: {
+        nextPageToken: start === 0 ? 'page-2' : undefined,
+        pageInfo: { totalResults: ids.length },
+        items: ids.slice(start, start + 50).map((videoId) => ({ contentDetails: { videoId } }))
+      } };
+    } },
+    videos: { list: async (params) => ({ data: { items: params.id.map((id) => ({
+      id, etag: '"etag-' + id + '"',
+      snippet: { title: 'Title ' + id, description: '', channelId: 'channel-1' },
+      status: { privacyStatus: 'public' }, localizations: {}
+    })) } }) }
+  });
+  const page = await youtube.ownedVideosPage(50, 10);
+  assert.equal(page.channelId, 'channel-1');
+  assert.equal(page.total, 60);
+  assert.equal(page.items.length, 10);
+  assert.deepEqual(page.items.map((item) => item.id), ids.slice(50));
+  assert.equal(playlistCalls.length, 2);
+  assert.equal(playlistCalls[0].playlistId, 'uploads-1');
+  assert.equal(playlistCalls[1].pageToken, 'page-2');
+});
+
 test('Japanese video localization preserves English metadata and other languages with an ETag check', async (t) => {
   const oldYoutube = google.youtube;
   const oldTokens = store.getTokens;
