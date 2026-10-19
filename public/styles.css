@@ -192,6 +192,10 @@ button:disabled { cursor: wait; opacity: .58; }
 .seo-field { margin-top: 16px; }
 .seo-field h4 { margin: 0 0 5px; font-size: .85rem; }
 .seo-copy { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 0; color: var(--muted); line-height: 1.5; }
+.channel-localization-form { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.channel-localization-form h4 { margin: 0 0 6px; }
+.channel-localization-form .muted { line-height: 1.5; }
+.channel-localization-form button { margin-top: 10px; }
 .seo-context { margin: 20px 0; border-top: 1px solid var(--line); padding-top: 8px; }
 .seo-context button { margin-top: 12px; }
 .seo-details > button { margin-top: 12px; }
