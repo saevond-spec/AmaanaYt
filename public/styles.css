@@ -219,3 +219,16 @@ button:disabled { cursor: wait; opacity: .58; }
   .schedule-row { grid-template-columns: 1fr; grid-column: auto; }
   .section-heading { align-items: flex-start; }
 }
+
+.japanese-localization-panel { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
+.japanese-localization-panel > summary { cursor: pointer; font-weight: 750; color: #d9ceff; }
+.japanese-localization-panel[open] > summary { margin-bottom: 10px; }
+.japanese-localization-panel .draft-actions { margin: 12px 0; align-items: center; }
+.japanese-localization-entry { padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--card-2); }
+.japanese-localization-entry > summary { cursor: pointer; font-weight: 700; overflow-wrap: anywhere; }
+.japanese-localization-entry label { display: block; margin: 12px 0 5px; }
+.japanese-localization-entry input, .japanese-localization-entry textarea { display: block; width: 100%; }
+.japanese-localization-source { max-height: 10rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0; padding: 9px; border-radius: 9px; background: rgba(255,255,255,.035); color: var(--muted); font-size: .8rem; }
+.japanese-localization-list { display: grid; gap: 10px; margin: 12px 0; }
+.japanese-localization-panel .draft-actions .draft-meta { margin: 0; text-align: center; }
+
