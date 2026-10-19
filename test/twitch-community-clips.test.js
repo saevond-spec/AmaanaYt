@@ -173,6 +173,7 @@ test('five-year synthetic stream replay is restart-safe, deduplicated, and bound
   const totalDays = 1826;
   let allDrafts = [];
   let streams = 0;
+  let testStreamsSkipped = 0;
   let apiEvents = 0;
   let invalid = 0;
   let restarts = 0;
@@ -180,6 +181,8 @@ test('five-year synthetic stream replay is restart-safe, deduplicated, and bound
 
   for (let streamNo = 0, dayNo = 0; dayNo < totalDays; dayNo += 3, streamNo += 1) {
     streams += 1;
+    const isTestStream = streamNo % 97 === 0;
+    if (isTestStream) testStreamsSkipped += 1;
     const start = firstDay + dayNo * day;
     const now = start + 3 * 60 * 60 * 1000;
     const count = 3 + Math.floor(random() * 10);
@@ -214,10 +217,12 @@ test('five-year synthetic stream replay is restart-safe, deduplicated, and bound
     const contextFor = (vodId) => context({
       broadcasterId: '1001', streamId: String(100_000 + streamNo),
       streamStartedAt: new Date(start).toISOString(), gameId: '509658',
+      streamTitle: isTestStream ? 'Test' : 'Ranked session',
       now, vodId, existingDrafts: allDrafts,
       idFactory: (() => { let i = 0; return () => `d-${streamNo}-${i++}`; })()
     });
     const firstPass = buildCommunityClipDrafts(generated, contextFor(null));
+    if (isTestStream) assert.deepEqual(firstPass, []);
     allDrafts.push(...firstPass);
     restarts += 1;
     // A restart replays duplicates. Archive reconciliation later fills in VOD linkage.
@@ -237,6 +242,7 @@ test('five-year synthetic stream replay is restart-safe, deduplicated, and bound
   }
 
   assert.equal(streams, 609);
+  assert.ok(testStreamsSkipped >= 6);
   assert.ok(apiEvents > 3000);
   assert.ok(invalid > 100);
   assert.equal(restarts, streams);
