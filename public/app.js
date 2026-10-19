@@ -1076,12 +1076,14 @@ async function saveJapaneseLocalizationPage(kind) {
     }
     showNotice('Saved Japanese localizations for ' + saved + (isVideo ? ' videos.' : ' playlists.'));
   } catch (error) {
-    status.textContent = saved
+    const message = saved
       ? 'Saved ' + saved + ' item(s) before stopping: ' + error.message
       : error.message;
     if (error.status === 401) showLogin();
     if (isVideo) await loadJapaneseVideoLocalizations();
     else await loadJapanesePlaylists();
+    status.textContent = message;
+    showNotice(message, true);
   } finally {
     updateLocalizationSaveState(kind);
   }
