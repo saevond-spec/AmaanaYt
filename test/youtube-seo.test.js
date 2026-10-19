@@ -23,8 +23,9 @@ test('catalog metadata request includes statistics needed for view-count triage'
 
   await youtube.videoMetadata(['abcdefghijk']);
 
-  assert.deepEqual(request.part, ['snippet', 'status', 'contentDetails', 'statistics']);
+  assert.deepEqual(request.part, ['snippet', 'status', 'contentDetails', 'statistics', 'localizations']);
   assert.match(request.fields, /statistics\(viewCount\)/);
+  assert.match(request.fields, /localizations/);
 });
 
 test('video metadata update sends only writable snippet fields and uses the current ETag', async (t) => {
@@ -66,6 +67,81 @@ test('video metadata update sends only writable snippet fields and uses the curr
   });
   assert.equal(request.options.headers['If-Match'], current.etag);
   assert.equal(Object.hasOwn(request.params.requestBody, 'status'), false);
+});
+
+test('Japanese video localization preserves English metadata and other languages with an ETag check', async (t) => {
+  const oldYoutube = google.youtube;
+  const oldTokens = store.getTokens;
+  const oldBaseUrl = process.env.BASE_URL;
+  t.after(() => {
+    google.youtube = oldYoutube;
+    store.getTokens = oldTokens;
+    process.env.BASE_URL = oldBaseUrl;
+  });
+  process.env.BASE_URL = 'https://amaana.example.test';
+  store.getTokens = async () => ({ access_token: 'unit-test', expiry_date: Date.now() + 3600000 });
+  const existing = {
+    id: 'abcdefghijk', etag: '"video-etag"',
+    snippet: { title: 'Apex Legends clutch #Shorts',
+      description: 'English description https://example.com/vod\n00:01:23 - Final fight',
+      tags: ['existing'], categoryId: '20', defaultLanguage: 'en',
+      defaultAudioLanguage: 'en', channelId: 'channel-1' },
+    localizations: {
+      es: { title: 'Apex ES', description: 'Descripción en español' },
+      ja: { title: 'Old Japanese', description: '古い説明です。' }
+    }
+  };
+  let updateRequest;
+  let failPrecondition = false;
+  google.youtube = () => ({
+    videos: {
+      list: async () => ({ data: { items: [existing] } }),
+      update: async (params, options) => {
+        updateRequest = { params, options };
+        if (failPrecondition) {
+          const error = new Error('Precondition failed');
+          error.code = 412;
+          throw error;
+        }
+        return { data: {} };
+      }
+    },
+    channels: { list: async () => ({ data: { items: [{
+      id: 'channel-1', snippet: { defaultLanguage: 'en' },
+      brandingSettings: { channel: { defaultLanguage: 'en' } }
+    }] } }) }
+  });
+  await assert.rejects(youtube.updateJapaneseVideoLocalization({ id: 'abcdefghijk', etag: '"stale"' }, {
+    title: 'Apex Legendsのクラッチ #Shorts',
+    description: 'ランク動画 https://example.com/vod\n00:01:23 - 最後の戦い'
+  }), (error) => error.status === 409);
+  assert.equal(updateRequest, undefined);
+
+  failPrecondition = true;
+  await assert.rejects(youtube.updateJapaneseVideoLocalization({ id: 'abcdefghijk', etag: '"video-etag"' }, {
+    title: 'Apex Legendsのクラッチ #Shorts',
+    description: 'ランク動画 https://example.com/vod\n00:01:23 - 最後の戦い'
+  }), (error) => error.status === 409 && /changed while saving/.test(error.message));
+  failPrecondition = false;
+  await youtube.updateJapaneseVideoLocalization({ id: 'abcdefghijk', etag: '"video-etag"' }, {
+    title: 'Apex Legendsのクラッチ #Shorts',
+    description: 'ランク動画 https://example.com/vod\n00:01:23 - 最後の戦い'
+  });
+  assert.deepEqual(updateRequest.params.part, ['snippet', 'localizations']);
+  assert.equal(updateRequest.params.requestBody.id, 'abcdefghijk');
+  assert.deepEqual(updateRequest.params.requestBody.snippet, {
+    title: existing.snippet.title,
+    description: existing.snippet.description,
+    tags: ['existing'], categoryId: '20', defaultLanguage: 'en',
+    defaultAudioLanguage: 'en'
+  });
+  assert.deepEqual(updateRequest.params.requestBody.localizations.es, existing.localizations.es);
+  assert.deepEqual(updateRequest.params.requestBody.localizations.ja, {
+    title: 'Apex Legendsのクラッチ #Shorts',
+    description: 'ランク動画 https://example.com/vod\n00:01:23 - 最後の戦い'
+  });
+  assert.equal(updateRequest.params.requestBody.status, undefined);
+  assert.equal(updateRequest.options.headers['If-Match'], '"video-etag"');
 });
 
 test('channel update retains supported branding fields and rejects a stale channel snapshot', async (t) => {
