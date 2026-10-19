@@ -767,7 +767,7 @@ app.post('/api/seo/localization/ja/playlists/draft', admin, async (req, res, nex
         error.status = 404;
         throw error;
       }
-      return { id, title: playlist.title || '', description: playlist.description || '' };
+      return { id, title: playlist.title || '', description: playlist.description || '', titleLimit: 150 };
     });
     const drafts = await draftJapaneseVideoLocalizations(source, {
       apiKey: process.env.SEO_AI_API_KEY, model: process.env.SEO_AI_MODEL,
