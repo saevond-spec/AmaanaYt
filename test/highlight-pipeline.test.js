@@ -331,7 +331,6 @@ async function harness(t, options = {}) {
     createProcessor: () => createHighlightProcessor(dependencies) };
 }
 
-
 test('legacy Twitch-discovered batches without a target duration cannot create uploads', async (t) => {
   const h = await harness(t);
   h.batch.discoverySource = 'twitch_clips_api';
@@ -431,6 +430,43 @@ test('discovered batches verify accepted VOD requests when Twitch link metadata 
   assert.equal(h.counters.publications.length, 0);
   assert.equal(h.counters.visibilityMutations, 0);
   assert.deepEqual(h.counters.readyLogs, [{ batchId: batch.id, shortCount: 3 }]);
+});
+
+test('live-captured batches reuse screened clips and leave YouTube uploads private for owner review', async (t) => {
+  const h = await harness(t, { autoPublish: false });
+  const batch = {
+    ...h.batch,
+    discoverySource: 'twitch_live_capture',
+    streamId: '987654',
+    streamBatchIndex: 1,
+    targetHighlightDurationSeconds: 90,
+    shortCandidateIndexes: [],
+    twitchClips: moments.map((moment) => ({
+      id: 'clip-' + moment.endSeconds,
+      broadcasterId: 'broadcaster',
+      editorId: 'editor',
+      requestedVodId: h.batch.vodId,
+      requestedVodOffset: moment.endSeconds,
+      requestedDuration: moment.duration,
+      requestProofVersion: 1,
+      liveCapture: true
+    }))
+  };
+  h.drafts.set(batch.id, batch);
+
+  await h.processor(batch.id);
+
+  const ready = h.drafts.get(batch.id);
+  const shorts = [...h.drafts.values()].filter((draft) => draft.sourceType === 'twitch_highlight_short');
+  assert.equal(ready.status, 'awaiting_owner_approval');
+  assert.equal(ready.productionState, 'ready');
+  assert.equal(ready.twitchClips.length, 3);
+  assert.ok(ready.twitchClips.every((clip) => clip.timestampVerification.verified === true));
+  assert.equal(shorts.length, 0);
+  assert.equal(h.counters.clipCreates, 0);
+  assert.equal(h.counters.uploads.filter((upload) => upload.succeeded).length, 1);
+  assert.ok(h.counters.uploads.every((upload) => upload.privacyStatus === 'private'));
+  assert.equal(h.counters.publications.length, 0);
 });
 
 test('bounded metadata polling schedules retry and reuses an existing Twitch clip', async (t) => {
@@ -796,3 +832,4 @@ test('permanent publication permission failure stops with owner review and leave
   assert.equal(h.drafts.get(h.batch.id).publicationStatus, 'failed');
   assert.equal(h.counters.publications.length, 1);
 });
+
