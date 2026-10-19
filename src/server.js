@@ -662,7 +662,7 @@ app.get('/api/seo/localization/ja/videos', admin, async (req, res, next) => {
       localization: video.localizations?.ja || null
     }));
     res.set('Cache-Control', 'no-store');
-    res.json({ offset, total: page.total, pageSize: 10, catalogComplete: true, items });
+    res.json({ offset, total: page.total, pageSize: 10, uploadsRead: true, items });
   } catch (error) { next(error); }
 });
 
