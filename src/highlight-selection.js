@@ -1,6 +1,7 @@
 'use strict';
 
 const { parseTwitchDuration, validateHighlightMoments } = require('./highlight-validation');
+const { isPlaceholderTestTitle, isNonGameplayTestClip } = require('./gameplay-intake-guard');
 
 const TARGET_HIGHLIGHT_DURATION_SECONDS = 15 * 60;
 const MAX_HIGHLIGHT_SEGMENTS = 20;
@@ -141,10 +142,16 @@ function select15MinuteGameplayHighlights(clips, vod, {
   const vodDurationSeconds = parseTwitchDuration(vod && vod.duration);
   const target = Number(targetDurationSeconds);
   if (!Number.isSafeInteger(target) || target <= 0) throw new Error('A positive whole-second highlight target is required');
+  if (isPlaceholderTestTitle(vod && vod.title)) {
+    return { vodDurationSeconds, targetDurationSeconds: target, highlights: [], evidence: [],
+      rejectionReason: 'test_stream', availableGameplaySeconds: 0, unfilteredGameplaySeconds: 0,
+      qualityCalibration: summarizeClipQuality([]) };
+  }
   const segmentLimit = Math.max(1, Math.min(MAX_HIGHLIGHT_SEGMENTS, Math.floor(Number(maxSegments) || MAX_HIGHLIGHT_SEGMENTS)));
   const minimum = Math.max(5, Math.min(MAX_CLIP_SECONDS, Number(minSegmentSeconds) || MIN_GAMEPLAY_SEGMENT_SECONDS));
   const candidates = (Array.isArray(clips) ? clips : []).flatMap((clip) => {
-    if (!clip || !clip.id || String(clip.video_id || '') !== vodId ||
+    if (!clip || isNonGameplayTestClip({ clipTitle: clip.title, streamTitle: vod && vod.title }) ||
+        !clip.id || String(clip.video_id || '') !== vodId ||
         broadcasterId && String(clip.broadcaster_id || '') !== broadcasterId ||
         !String(clip.game_id || '').trim()) return [];
     const startSeconds = clip.vod_offset === null || clip.vod_offset === undefined || clip.vod_offset === ''
