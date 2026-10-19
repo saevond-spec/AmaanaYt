@@ -342,10 +342,11 @@ async function uploadsPage(playlistId, pageToken) {
   const response = await youtube.playlistItems.list({
     part: ['contentDetails'], playlistId, maxResults: 50,
     ...(pageToken ? { pageToken } : {}),
-    fields: 'nextPageToken,items(contentDetails(videoId))'
+    fields: 'nextPageToken,pageInfo(totalResults),items(contentDetails(videoId))'
   });
   return { ids: (response.data.items || []).map((item) => item.contentDetails?.videoId).filter(Boolean),
-    nextPageToken: response.data.nextPageToken || null };
+    nextPageToken: response.data.nextPageToken || null,
+    totalResults: Number(response.data.pageInfo?.totalResults) || 0 };
 }
 
 async function videoMetadata(ids) {
@@ -355,6 +356,33 @@ async function videoMetadata(ids) {
   const response = await youtube.videos.list({ part: ['snippet', 'status', 'contentDetails', 'statistics', 'localizations'], id: ids,
     fields: 'items(id,etag,snippet(title,description,tags,publishedAt,channelId,categoryId,defaultLanguage,defaultAudioLanguage),status(privacyStatus),contentDetails(duration),statistics(viewCount),localizations)' });
   return response.data.items || [];
+}
+
+async function ownedVideosPage(offset = 0, pageSize = 10) {
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100000 ||
+      !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 50) {
+    const error = new Error('Request a valid channel video page of up to 50 videos');
+    error.status = 400;
+    throw error;
+  }
+  const channel = await ownedChannel();
+  const ids = [];
+  const seenTokens = new Set();
+  let pageToken = null;
+  let total = 0;
+  do {
+    const page = await uploadsPage(channel.uploads, pageToken);
+    ids.push(...page.ids);
+    total = page.totalResults || ids.length;
+    const nextPageToken = page.nextPageToken;
+    if (ids.length >= offset + pageSize || !nextPageToken) break;
+    if (seenTokens.has(nextPageToken)) throw new Error('YouTube uploads pagination repeated a page token');
+    seenTokens.add(nextPageToken);
+    pageToken = nextPageToken;
+  } while (true);
+  const selectedIds = ids.slice(offset, offset + pageSize);
+  const items = await videoMetadata(selectedIds);
+  return { channelId: channel.id, offset, pageSize, total, items };
 }
 
 async function getVideoViews(videoIds) {
@@ -487,7 +515,7 @@ async function enablePublicBroadcastAds(broadcast) {
 
 module.exports = { isConnected, canApprove, hasAnalyticsReadAccess, authorizationUrl, exchangeCode, uploadPrivate, setThumbnail, publish,
   getVideo, updateVideoSeo, updateJapaneseVideoLocalization, updateVideoTags, channelSeo, updateChannelSeo, updateJapaneseChannelLocalization, assertTargetChannel,
-  getVideoViews, googleSearchTraffic, ownedChannel, uploadsPage, videoMetadata,
+  getVideoViews, googleSearchTraffic, ownedChannel, uploadsPage, videoMetadata, ownedVideosPage,
   listOwnedBroadcasts, enablePublicBroadcastAds, recentGameVideos,
   listOwnedPlaylists: playlistClient.listOwnedPlaylists,
   listPlaylistVideoIds: playlistClient.listPlaylistVideoIds,
