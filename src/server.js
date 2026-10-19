@@ -25,7 +25,7 @@ const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
   shouldPullForwardTwitchMetadataRetry, shouldRequeueUnexpectedTwitchDownloadHost,
   shouldPullForwardAllowedTwitchDownloadHost, shouldRequeueTwitchSegmentDurationFailure } = require('./highlight-pipeline');
 const { createTwitchHighlightDiscovery } = require('./twitch-highlight-discovery');
-const { clipRetryDelayMs, isRetryableCommunityClipError } = require('./twitch-community-clips');
+const { clipRetryDelayMs, isRetryableCommunityClipError, isVerifiedGameplayResult, reuseOrVerifyGameplay } = require('./twitch-community-clips');
 const { auditVideo, channelSuggestions, problem, assertVideoMatchesCatalog } = require('./seo-publish');
 const { createSessionStore } = require('./session-store');
 const { canAddVideoToPlaylist } = require('./youtube-playlists');
@@ -337,8 +337,10 @@ async function processTwitchClipDraft(id) {
     await store.updateDraft(id, { status: 'downloading_twitch_clip' });
     await twitch.downloadClip(landscapeUrl, sourcePath);
     if (draft.discoverySource === 'twitch_community_clip') {
-      if (process.env.ENABLE_GAMEPLAY_SCREENING !== 'true' || !process.env.VIDEO_ANALYSIS_API_KEY ||
-          typeof video.verifyGameplay !== 'function' || typeof video.inspectMedia !== 'function') {
+      const reusableGameplay = isVerifiedGameplayResult(draft.visualGameplayVerification);
+      if (typeof video.inspectMedia !== 'function' || (!reusableGameplay &&
+          (process.env.ENABLE_GAMEPLAY_SCREENING !== 'true' || !process.env.VIDEO_ANALYSIS_API_KEY ||
+           typeof video.verifyGameplay !== 'function'))) {
         throw new Error('Community Twitch clip is held because visual gameplay verification is unavailable');
       }
       const media = await video.inspectMedia(sourcePath);
@@ -349,18 +351,13 @@ async function processTwitchClipDraft(id) {
           !Number.isFinite(mediaDuration) || Math.abs(mediaDuration - Number(draft.duration)) > 2) {
         throw new Error('Community Twitch clip failed landscape media validation');
       }
-      const gameplay = await video.verifyGameplay(sourcePath);
-      const totalFrames = Number(gameplay && gameplay.totalFrames);
-      const activeFrames = Number(gameplay && gameplay.activeGameplayFrames);
-      const confidence = Number(gameplay && gameplay.confidence);
-      if (gameplay?.verified !== true || !Number.isFinite(totalFrames) || totalFrames < 5 ||
-          !Number.isFinite(activeFrames) || activeFrames < Math.ceil(totalFrames * 0.8) ||
-          activeFrames > totalFrames || !Number.isFinite(confidence) || confidence < 0.8 || confidence > 1) {
-        throw new Error('Community Twitch clip failed visual gameplay verification');
+      const { gameplay, reused } = await reuseOrVerifyGameplay(
+        draft.visualGameplayVerification, () => video.verifyGameplay(sourcePath));
+      if (!reused) {
+        draft = await store.updateDraft(id, {
+          visualGameplayVerification: { ...gameplay, media, verifiedAt: new Date().toISOString() }
+        });
       }
-      draft = await store.updateDraft(id, {
-        visualGameplayVerification: { ...gameplay, media, verifiedAt: new Date().toISOString() }
-      });
     }
     await store.updateDraft(id, { status: 'formatting_vertical_short' });
     await video.convertLandscapeToShort(sourcePath, shortPath);
