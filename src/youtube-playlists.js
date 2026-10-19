@@ -215,7 +215,7 @@ function createYouTubePlaylistClient(getService) {
       throw error;
     }
     const source = { title: current.snippet?.title || '', description: current.snippet?.description || '' };
-    const localization = normalizeJapaneseVideoLocalization(edit, source);
+    const localization = normalizeJapaneseVideoLocalization(edit, source, { titleLimit: 150 });
     const localizations = { ...(current.localizations || {}), ja: localization };
     const snippet = {
       title: source.title,
