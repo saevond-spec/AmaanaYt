@@ -55,6 +55,24 @@ test('collects only a test VOD parent, its clips, and Shorts from the same batch
   ], otherId), []);
 });
 
+test('lets a test VOD community clip exclude its whole related review group', () => {
+  const testVodId = '2905056660';
+  const unrelatedId = '00000000-0000-4000-8000-000000000006';
+  const drafts = [
+    { id: parentId, sourceType: 'twitch_highlight_batch', vodId: testVodId, streamTitle: 'Test' },
+    { id: secondBatchId, sourceType: 'twitch_highlight_batch', vodId: testVodId, streamTitle: 'Test' },
+    { id: shortId, sourceType: 'twitch_highlight_short', parentId },
+    { id: clipId, sourceType: 'twitch_vod', vodId: testVodId, streamTitle: 'Test',
+      visualGameplayVerification: { verified: true } },
+    { id: otherId, sourceType: 'twitch_vod', vodId: testVodId, streamTitle: 'Test' },
+    { id: unrelatedId, sourceType: 'twitch_vod', vodId: '2905056661', streamTitle: 'Ranked session' }
+  ];
+
+  assert.deepEqual(collectTestVodDrafts(drafts, clipId).map((draft) => draft.id).sort(),
+    [parentId, secondBatchId, shortId, clipId, otherId].sort());
+  assert.deepEqual(collectTestVodDrafts(drafts, unrelatedId), []);
+});
+
 test('blocks exclusion of public, published, or scheduled videos', () => {
   assert.equal(hasProtectedPublication([{ status: 'published' }]), true);
   assert.equal(hasProtectedPublication([{ youtubePrivacyStatus: 'public' }]), true);
