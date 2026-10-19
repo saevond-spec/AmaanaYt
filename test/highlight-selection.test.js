@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { select15MinuteGameplayHighlights, summarizeClipQuality } = require('../src/highlight-selection');
+const { selectGameplayHighlights, summarizeClipQuality } = require('../src/highlight-selection');
 
 const vod = {
   id: '1001', user_id: 'broadcaster-1', type: 'archive', duration: '2h',
@@ -19,7 +19,7 @@ function clip(id, start, duration, views, overrides = {}) {
 }
 
 test('selects a non-overlapping set that fills the target duration exactly', () => {
-  const result = select15MinuteGameplayHighlights([
+  const result = selectGameplayHighlights([
     clip('one', 0, 60, 100),
     clip('two', 120, 45, 70),
     clip('three', 240, 45, 60),
@@ -35,14 +35,14 @@ test('selects a non-overlapping set that fills the target duration exactly', () 
 });
 
 test('rejects placeholder test streams and test-marked clips before quality ranking', () => {
-  const testStream = select15MinuteGameplayHighlights([
+  const testStream = selectGameplayHighlights([
     clip('real-looking-clip', 0, 60, 1000)
   ], { ...vod, title: 'Test' }, { targetDurationSeconds: 30 });
 
   assert.equal(testStream.rejectionReason, 'test_stream');
   assert.deepEqual(testStream.highlights, []);
 
-  const testClip = select15MinuteGameplayHighlights([
+  const testClip = selectGameplayHighlights([
     clip('bot-test-clip', 0, 60, 1000, { title: 'WzBot CLIP | Test (by saevond)' })
   ], vod, { targetDurationSeconds: 30 });
 
@@ -50,13 +50,13 @@ test('rejects placeholder test streams and test-marked clips before quality rank
   assert.deepEqual(testClip.highlights, []);
 });
 
-test('fifteen 60-second live clips can fill the exact 15-minute highlight target', () => {
-  const result = select15MinuteGameplayHighlights(Array.from({ length: 15 }, (_, index) =>
+test('twelve 60-second live clips can fill the exact 12-minute highlight target', () => {
+  const result = selectGameplayHighlights(Array.from({ length: 12 }, (_, index) =>
     clip('live-' + index, index * 180, 60, 0)), vod);
 
   assert.equal(result.rejectionReason, null);
-  assert.equal(result.highlights.length, 15);
-  assert.equal(result.highlights.reduce((sum, moment) => sum + moment.duration, 0), 900);
+  assert.equal(result.highlights.length, 12);
+  assert.equal(result.highlights.reduce((sum, moment) => sum + moment.duration, 0), 720);
   assert.ok(result.highlights.every((moment) => moment.duration === 60));
 });
 
@@ -75,11 +75,11 @@ test('quality floor and ceiling use a robust median/MAD band with enough varied 
 });
 
 test('the median floor selects above-baseline clips and the robust ceiling caps outliers', () => {
-  const result = select15MinuteGameplayHighlights(Array.from({ length: 40 }, (_, index) =>
+  const result = selectGameplayHighlights(Array.from({ length: 40 }, (_, index) =>
     clip('quality-' + index, index * 70, 60, index + 1)), vod);
 
   assert.equal(result.rejectionReason, null);
-  assert.equal(result.highlights.reduce((sum, moment) => sum + moment.duration, 0), 900);
+  assert.equal(result.highlights.reduce((sum, moment) => sum + moment.duration, 0), 720);
   assert.equal(result.qualityCalibration.method, 'per_vod_median_mad_capped_at_p90');
   assert.equal(result.qualityCalibration.sampleSize, 40);
   assert.ok(result.qualityCalibration.qualifiedCandidateCount < 40);
@@ -87,19 +87,20 @@ test('the median floor selects above-baseline clips and the robust ceiling caps 
   assert.ok(result.evidence.every((item) => item.selectionScore <= result.qualityCalibration.qualityCeiling * 100 + 1e-8));
 });
 
-test('weak candidates cannot be used as filler when the floor leaves less than 15 minutes', () => {
-  const highStarts = [1350, 1350, 1440, 1440, 1530, 1530, 1620, 1710, 1800, 1890, 1980, 2070, 2160, 2250, 2340];
+test('weak candidates cannot be used as filler when the floor leaves less than 12 minutes', () => {
+  const highStarts = [1350, 1350, 1440, 1440, 1530, 1530, 1620, 1710, 1800, 1890, 1980, 2070, 2160];
   const clips = [
     ...Array.from({ length: 15 }, (_, index) => clip('low-' + index, index * 90, 60, 0)),
     ...highStarts.map((start, index) => clip('high-' + index, start, 60, 10000))
   ];
-  const result = select15MinuteGameplayHighlights(clips, vod);
+  const result = selectGameplayHighlights(clips, vod);
 
   assert.deepEqual(result.highlights, []);
   assert.equal(result.rejectionReason, 'insufficient_quality_gameplay_duration');
-  assert.equal(result.qualityCalibration.qualifiedCandidateCount, 15);
-  assert.equal(result.availableGameplaySeconds, 720);
-  assert.ok(result.unfilteredGameplaySeconds >= 900);
+  assert.ok(result.qualityCalibration.qualifiedCandidateCount >= 11);
+  assert.ok(result.qualityCalibration.qualifiedCandidateCount < clips.length);
+  assert.equal(result.availableGameplaySeconds, 660);
+  assert.ok(result.unfilteredGameplaySeconds >= 720);
 });
 
 test('731-day quality-band simulation stays bounded across low-sample, flat, seasonal, and viral pools', () => {
@@ -143,7 +144,7 @@ test('731-day quality-band simulation stays bounded across low-sample, flat, sea
 });
 
 test('prefers a sparse five-minute window when otherwise equal candidates are clustered', () => {
-  const result = select15MinuteGameplayHighlights([
+  const result = selectGameplayHighlights([
     clip('dense-a', 0, 45, 10),
     clip('dense-b', 60, 45, 10),
     clip('sparse', 1200, 45, 10)
@@ -157,7 +158,7 @@ test('prefers a sparse five-minute window when otherwise equal candidates are cl
 });
 
 test('rejects source clips without a Twitch game category as unverified gameplay', () => {
-  const result = select15MinuteGameplayHighlights([
+  const result = selectGameplayHighlights([
     clip('no-game-id', 0, 60, 100, { game_id: '' }),
     clip('valid-but-short', 120, 30, 50)
   ], vod, { targetDurationSeconds: 90, minSegmentSeconds: 15 });
@@ -167,19 +168,19 @@ test('rejects source clips without a Twitch game category as unverified gameplay
   assert.equal(result.availableGameplaySeconds, 30);
 });
 
-test('reports when the VOD has less than fifteen minutes of eligible material', () => {
-  const result = select15MinuteGameplayHighlights([
+test('reports when the VOD has less than twelve minutes of eligible material', () => {
+  const result = selectGameplayHighlights([
     clip('one', 0, 60, 100), clip('two', 120, 45, 70)
   ], vod);
 
   assert.deepEqual(result.highlights, []);
   assert.equal(result.rejectionReason, 'insufficient_non_overlapping_gameplay_duration');
   assert.equal(result.availableGameplaySeconds, 105);
-  assert.equal(result.targetDurationSeconds, 900);
+  assert.equal(result.targetDurationSeconds, 720);
 });
 
 test('rejects overlapping candidates, wrong VODs, invalid lengths and segments outside the VOD', () => {
-  const result = select15MinuteGameplayHighlights([
+  const result = selectGameplayHighlights([
     clip('wrong-vod', 0, 60, 10000, { video_id: '9999' }),
     clip('too-long', 100, 60.1, 10000),
     clip('past-end', 7190, 30, 10000),

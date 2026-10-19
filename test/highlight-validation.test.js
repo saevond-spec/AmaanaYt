@@ -4,7 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { parseTwitchDuration, validateHighlightMoments, verifyCreatedClip,
   verifyClipCreationRequest, hasVerifiedGameplayHighlight, hasVerifiedLiveGameplayClip,
-  VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS } = require('../src/highlight-validation');
+  VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS, LEGACY_VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS } = require('../src/highlight-validation');
 
 test('parses Twitch archive duration strings', () => {
   assert.equal(parseTwitchDuration('6h26m14s'), 23174);
@@ -89,11 +89,11 @@ test('checks that each created Twitch clip points back to the requested VOD mome
     { video_id: '123', vod_offset: 36, duration: 30 }, '123'), { status: 422 });
 });
 
-test('only an exact 15-minute render with complete visual gameplay checks qualifies for publishing', () => {
+test('only exact 12-minute highlights and previously verified 15-minute highlights qualify for publishing', () => {
   const valid = {
     sourceType: 'twitch_highlight_batch',
     targetHighlightDurationSeconds: VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS,
-    duration: 900,
+    duration: VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS,
     mediaValidation: 'passed',
     highlights: [{ duration: 60 }],
     twitchClips: [{ visualGameplayVerification: {
@@ -101,9 +101,14 @@ test('only an exact 15-minute render with complete visual gameplay checks qualif
     } }]
   };
   assert.equal(hasVerifiedGameplayHighlight(valid), true);
+  const legacy = { ...valid,
+    targetHighlightDurationSeconds: LEGACY_VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS,
+    duration: LEGACY_VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS
+  };
+  assert.equal(hasVerifiedGameplayHighlight(legacy), true);
   assert.equal(hasVerifiedGameplayHighlight({ ...valid, duration: 119.6 }), false);
   assert.equal(hasVerifiedGameplayHighlight({ ...valid, duration: undefined }), false);
-  assert.equal(hasVerifiedGameplayHighlight({ ...valid, targetHighlightDurationSeconds: 899 }), false);
+  assert.equal(hasVerifiedGameplayHighlight({ ...valid, targetHighlightDurationSeconds: 719 }), false);
   assert.equal(hasVerifiedGameplayHighlight({ ...valid, mediaValidation: 'failed' }), false);
   assert.equal(hasVerifiedGameplayHighlight({ ...valid, twitchClips: [] }), false);
   assert.equal(hasVerifiedGameplayHighlight({ ...valid, twitchClips: [{ visualGameplayVerification: {

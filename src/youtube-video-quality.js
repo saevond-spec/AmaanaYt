@@ -56,7 +56,7 @@ function finiteMetric(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function summarizeRelativeRetention(rows, durationSeconds = 900) {
+function summarizeRelativeRetention(rows, durationSeconds = 12 * 60) {
   const duration = Number(durationSeconds);
   const byPosition = new Map();
   for (const row of Array.isArray(rows) ? rows : []) {
@@ -133,7 +133,7 @@ function summarizeChannelBand(history, currentAverageViewPercentage) {
 }
 
 function summarizeYoutubeVideoQuality(summaryRows, retentionRows, {
-  durationSeconds = 900,
+  durationSeconds = 12 * 60,
   history = []
 } = {}) {
   const row = Array.isArray(summaryRows) && Array.isArray(summaryRows[0]) ? summaryRows[0] : [];

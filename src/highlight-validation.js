@@ -64,13 +64,19 @@ function requireArchivedTwitchVod(vod, expectedVodId, broadcasterId) {
 }
 
 const MAX_HIGHLIGHT_MOMENTS = 20;
-const VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS = 900;
+const VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS = 12 * 60;
+const LEGACY_VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS = 15 * 60;
+const ACCEPTED_VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS = new Set([
+  VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS,
+  LEGACY_VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS
+]);
 
 function hasVerifiedGameplayHighlight(draft) {
   const duration = Number(draft && draft.duration);
+  const targetDuration = Number(draft && draft.targetHighlightDurationSeconds);
   if (!draft || draft.sourceType !== 'twitch_highlight_batch' ||
-      Number(draft.targetHighlightDurationSeconds) !== VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS ||
-      !Number.isFinite(duration) || Math.abs(duration - VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS) > 0.5 ||
+      !ACCEPTED_VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS.has(targetDuration) ||
+      !Number.isFinite(duration) || Math.abs(duration - targetDuration) > 0.5 ||
       draft.mediaValidation !== 'passed') return false;
   const moments = draft.highlights;
   const clips = draft.twitchClips;
@@ -225,6 +231,7 @@ module.exports = {
   parseTwitchDuration, requireArchivedTwitchVod, validateHighlightMoments, MAX_HIGHLIGHT_MOMENTS,
   verifyCreatedClip, verifyClipCreationRequest, hasVerifiedGameplayHighlight,
   hasVerifiedLiveGameplayClip,
-  VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS
+  VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS,
+  LEGACY_VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS
 };
 
