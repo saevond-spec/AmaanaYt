@@ -82,7 +82,7 @@ function select15MinuteGameplayHighlights(clips, vod, {
       ? NaN : Number(clip.vod_offset);
     const rawDuration = clip.duration === null || clip.duration === undefined || clip.duration === ''
       ? NaN : Number(clip.duration);
-    const duration = Math.min(rawDuration, 59.8);
+    const duration = Math.min(rawDuration, MAX_CLIP_SECONDS);
     const endSeconds = startSeconds + duration;
     if (!Number.isFinite(startSeconds) || !Number.isFinite(rawDuration) || !Number.isFinite(duration) ||
         startSeconds < 0 || rawDuration > MAX_CLIP_SECONDS || duration < minimum ||
