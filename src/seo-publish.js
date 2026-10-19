@@ -18,6 +18,9 @@ function problem(message, status = 400) {
 function retryablePublishError(error) {
   if (isYouTubeAuthorizationError(error)) return true;
   const code = Number(error?.status || error?.response?.status || error?.code);
+  if (code === 409 && /metadata changed since the package was generated/i.test(String(error?.message || ''))) {
+    return true;
+  }
   if ([401, 408, 425, 429, 500, 502, 503, 504].includes(code)) return true;
   if (code !== 403) return ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED', 'EPIPE'].includes(error?.code);
   const apiError = error?.response?.data?.error || {};
@@ -106,6 +109,38 @@ function metadataOwnerReviewReason(item) {
     return 'Public video metadata catalog is incomplete; owner review is required before automatic edits';
   }
   return null;
+}
+
+function isSelfRecoveringReviewHold(reason) {
+  return /closely matches existing channel metadata|metadata catalog is incomplete/i.test(String(reason || ''));
+}
+
+function refreshedPackageEvidence(item, currentPublicMetadata, catalogComplete) {
+  if (!Array.isArray(currentPublicMetadata) || !item.package) return item;
+  const source = item.source || {};
+  const pkg = { ...item.package };
+  let missingEvidence = (Array.isArray(pkg.missingEvidence) ? pkg.missingEvidence : []).filter((warning) =>
+    !/^Generated (?:title|description) closely matches another public video; owner review is required$/i.test(String(warning)) &&
+    !/public metadata catalog is incomplete/i.test(String(warning)));
+
+  if (typeof catalogComplete === 'boolean') {
+    pkg.metadataCatalogComplete = catalogComplete;
+    if (!catalogComplete && source.privacyStatus === 'public') {
+      missingEvidence.push('Public metadata catalog is incomplete; owner review is required before automatic edits');
+    }
+  }
+
+  const title = (String(source.title || '').length > 70
+    ? pkg.titles?.search?.[0] || pkg.titles?.hybrid?.[0]
+    : pkg.titles?.hybrid?.[0] || pkg.titles?.search?.[0] || '').trim();
+  const conflicts = findMetadataConflicts({ title, description: pkg.description || '',
+    videoId: item.videoId, peers: currentPublicMetadata });
+  for (const kind of new Set(conflicts.map((conflict) => conflict.kind))) {
+    missingEvidence.push(`Generated ${kind} closely matches another public video; owner review is required`);
+  }
+  pkg.metadataConflicts = conflicts;
+  pkg.missingEvidence = [...new Set(missingEvidence)];
+  return { ...item, package: pkg };
 }
 
 function verifiedPackageChapters(item, originalDescription) {
@@ -385,26 +420,10 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
       : result;
   }
 
-  async function publishVideo(videoId, currentPublicMetadata = null) {
+  async function publishVideo(videoId, currentPublicMetadata = null, { catalogComplete } = {}) {
     let item = await store.getSeoVideo(videoId);
     if (!item || !item.package) return;
-    if (Array.isArray(currentPublicMetadata)) {
-      const title = item.package.titles?.hybrid?.[0] || item.package.titles?.search?.[0] || '';
-      const conflicts = findMetadataConflicts({
-        title, description: item.package.description || '', videoId, peers: currentPublicMetadata
-      });
-      const known = new Set((item.package.metadataConflicts || []).map((conflict) =>
-        String(conflict.kind) + ':' + String(conflict.videoId)));
-      const merged = [...(item.package.metadataConflicts || [])];
-      for (const conflict of conflicts) {
-        const key = String(conflict.kind) + ':' + String(conflict.videoId);
-        if (!known.has(key)) {
-          known.add(key);
-          merged.push(conflict);
-        }
-      }
-      if (merged.length) item = { ...item, package: { ...item.package, metadataConflicts: merged } };
-    }
+    item = refreshedPackageEvidence(item, currentPublicMetadata, catalogComplete);
     const privacyStatus = item.source?.privacyStatus;
     if (!ALLOWED_VIDEO_PRIVACY_STATUSES.has(privacyStatus)) return;
 
@@ -412,9 +431,13 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
     const prior = item.autoResult || {};
     const sameGeneration = prior.packageGeneratedAt === generation;
     const legacyContextSkip = sameGeneration && prior.state === 'skipped' && prior.reason === legacyContextBlock;
+    const recoverableReviewHold = sameGeneration && prior.state === 'skipped' &&
+      isSelfRecoveringReviewHold(prior.reason);
     const metadataDone = sameGeneration && prior.autopilotVersion === SEO_AUTOPILOT_VERSION &&
-      prior.state !== 'retry' && !legacyContextSkip;
-    const thumbnailDone = sameGeneration && ['applied', 'skipped'].includes(prior.thumbnailState);
+      prior.state !== 'retry' && !legacyContextSkip && !recoverableReviewHold;
+    const thumbnailDone = sameGeneration && ['applied', 'skipped'].includes(prior.thumbnailState) &&
+      !(recoverableReviewHold && /all automatic seo edits are blocked while metadata is in owner review/i
+        .test(String(prior.thumbnailReason || '')));
     if (metadataDone && thumbnailDone) return prior;
 
     const ownerReviewReason = metadataOwnerReviewReason(item);
@@ -533,12 +556,13 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
     return recordFailure(videoId, generation, metadata, thumbnail, prior, quotaFailure);
   }
 
-  async function publishPending(limit = 20, currentPublicMetadata = null) {
+  async function publishPending(limit = 20, currentPublicMetadata = null,
+    catalogComplete = Array.isArray(currentPublicMetadata)) {
     const candidates = await store.listSeoAutoCandidates(limit, SEO_AUTOPILOT_VERSION);
     logger.info?.('SEO metadata and thumbnail candidates: ' + candidates.length);
     let processed = 0;
     for (const candidate of candidates) {
-      const result = await publishVideo(candidate.videoId, currentPublicMetadata);
+      const result = await publishVideo(candidate.videoId, currentPublicMetadata, { catalogComplete });
       processed += 1;
       if (result?.quotaBlocked) {
         return { processed, quotaBlocked: true, quotaRetryAt: result.quotaRetryAt };
@@ -570,4 +594,4 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
 }
 
 module.exports = { problem, auditVideo, assertVideoMatchesCatalog, automaticVideoEdit,
-  channelSuggestions, channelEdit, retryablePublishError, createSeoPublisher };
+  channelSuggestions, channelEdit, isSelfRecoveringReviewHold, retryablePublishError, createSeoPublisher };

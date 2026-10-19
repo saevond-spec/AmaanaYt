@@ -326,9 +326,37 @@ async function saveSeoMarketBudget(budget) {
 
 async function upsertSeoVideo(videoId, source) {
   await init();
-  // Catalog rescans refresh metadata, while preserving any owner context or completed package.
+  // Catalog rescans refresh metadata. External title/description/tag/visibility changes
+  // invalidate stale packages; metadata matching our last applied edit stays idempotent.
+  const metadataChanged = `(
+    (amaana_seo_packages.source->>'title') IS DISTINCT FROM (EXCLUDED.source->>'title')
+    OR (amaana_seo_packages.source->>'description') IS DISTINCT FROM (EXCLUDED.source->>'description')
+    OR (amaana_seo_packages.source->'tags') IS DISTINCT FROM (EXCLUDED.source->'tags')
+    OR (amaana_seo_packages.source->>'privacyStatus') IS DISTINCT FROM (EXCLUDED.source->>'privacyStatus')
+    OR (amaana_seo_packages.source->>'channelId') IS DISTINCT FROM (EXCLUDED.source->>'channelId')
+    OR (amaana_seo_packages.source->>'durationSeconds') IS DISTINCT FROM (EXCLUDED.source->>'durationSeconds')
+  )`;
+  const matchesApplied = `COALESCE((
+    amaana_seo_packages.applied IS NOT NULL
+    AND (amaana_seo_packages.applied->>'title') IS NOT DISTINCT FROM (EXCLUDED.source->>'title')
+    AND (amaana_seo_packages.applied->>'description') IS NOT DISTINCT FROM (EXCLUDED.source->>'description')
+    AND (amaana_seo_packages.applied->'tags') IS NOT DISTINCT FROM (EXCLUDED.source->'tags')
+    AND (amaana_seo_packages.applied->>'privacyStatus') IS NOT DISTINCT FROM (EXCLUDED.source->>'privacyStatus')
+  ), false)`;
+  const requiresRegeneration = `(${metadataChanged} AND NOT ${matchesApplied})`;
   await pool.query(`INSERT INTO amaana_seo_packages (video_id, source) VALUES ($1, $2::jsonb)
-    ON CONFLICT (video_id) DO UPDATE SET source = EXCLUDED.source, updated_at = NOW()`,
+    ON CONFLICT (video_id) DO UPDATE SET
+      source = EXCLUDED.source,
+      package = CASE WHEN ${requiresRegeneration} THEN NULL ELSE amaana_seo_packages.package END,
+      status = CASE WHEN ${requiresRegeneration} THEN 'queued' ELSE amaana_seo_packages.status END,
+      attempts = CASE WHEN ${requiresRegeneration} THEN 0 ELSE amaana_seo_packages.attempts END,
+      error = CASE WHEN ${requiresRegeneration} THEN NULL ELSE amaana_seo_packages.error END,
+      next_attempt_at = CASE WHEN ${requiresRegeneration} THEN NULL ELSE amaana_seo_packages.next_attempt_at END,
+      generated_at = CASE WHEN ${requiresRegeneration} THEN NULL ELSE amaana_seo_packages.generated_at END,
+      auto_result = CASE WHEN ${requiresRegeneration} THEN NULL ELSE amaana_seo_packages.auto_result END,
+      claim_token = CASE WHEN ${requiresRegeneration} THEN NULL ELSE amaana_seo_packages.claim_token END,
+      claimed_at = CASE WHEN ${requiresRegeneration} THEN NULL ELSE amaana_seo_packages.claimed_at END,
+      updated_at = NOW()`,
   [videoId, JSON.stringify(source)]);
 }
 
@@ -771,6 +799,9 @@ async function listSeoAutoCandidates(limit = 20, autopilotVersion = SEO_AUTOPILO
         OR auto_result->>'autopilotVersion' IS DISTINCT FROM $1
         OR (auto_result->>'packageGeneratedAt')::timestamptz IS DISTINCT FROM generated_at
         OR (auto_result->>'state' = 'retry' AND (auto_result->>'at')::timestamptz < NOW() - INTERVAL '1 hour')
+        OR (auto_result->>'state' = 'skipped'
+          AND COALESCE(auto_result->>'reason', '') ~* '(closely matches existing channel metadata|metadata catalog is incomplete)'
+          AND (auto_result->>'at')::timestamptz < NOW() - INTERVAL '24 hours')
         OR auto_result->>'reason' = 'Video analysis or owner supplied video context is required for automatic publishing'
         OR ((auto_result->>'packageGeneratedAt')::timestamptz = generated_at
           AND auto_result->>'thumbnailState' IS NULL)

@@ -227,6 +227,53 @@ test('publisher rechecks a pending package against current channel metadata', as
   assert.match(result.reason, /owner review is required/);
 });
 
+test('autopilot rechecks a duplicate held for owner review and resumes after the conflict clears', async () => {
+  const base = item();
+  const generatedAt = base.generatedAt;
+  const row = item({
+    autoResult: {
+      state: 'skipped',
+      reason: 'Generated title or description closely matches existing channel metadata; owner review is required',
+      at: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+      packageGeneratedAt: generatedAt,
+      autopilotVersion: SEO_AUTOPILOT_VERSION,
+      thumbnailState: 'skipped',
+      thumbnailReason: 'All automatic SEO edits are blocked while metadata is in owner review'
+    },
+    package: { ...base.package,
+      metadataConflicts: [{ kind: 'title', videoId: 'older-video' }],
+      missingEvidence: [...base.package.missingEvidence,
+        'Generated title closely matches another public video; owner review is required'] }
+  });
+  let outcome;
+  let metadataWrites = 0;
+  const publisher = createSeoPublisher({
+    store: {
+      getSeoVideo: async () => row,
+      getSeoSyncState: async () => ({ channelId: 'channel-1' }),
+      seoUpdatesToday: async () => 0,
+      markSeoApplied: async () => {},
+      upsertSeoVideo: async () => {},
+      markSeoAutoResult: async (_id, result) => { outcome = result; }
+    },
+    youtube: {
+      ownedChannel: async () => ({ id: 'channel-1' }),
+      assertTargetChannel: async () => {},
+      getVideo: async () => ({ snippet: { ...row.source, categoryId: '20' },
+        status: { privacyStatus: 'public' } }),
+      updateVideoSeo: async () => { metadataWrites += 1; }
+    },
+    logger: { info() {}, warn() {} }
+  });
+
+  const result = await publisher.publishVideo(row.videoId, [], { catalogComplete: true });
+
+  assert.equal(metadataWrites, 1);
+  assert.equal(result.state, 'applied');
+  assert.equal(outcome.state, 'applied');
+  assert.deepEqual(row.package.metadataConflicts, [{ kind: 'title', videoId: 'older-video' }]);
+});
+
 test('publisher skips when live visibility differs from the scanned visibility', async () => {
   let updates = 0;
   let result;
@@ -314,7 +361,7 @@ test('publisher rejects a wrong channel, changed metadata, and exhausted daily b
     { channelId: 'another-channel', title: row.source.title, budget: 0,
       reason: /not on the connected channel/, state: 'skipped' },
     { channelId: 'channel-1', title: 'Owner edited this video', budget: 0,
-      reason: /metadata changed/, state: 'skipped' },
+      reason: /metadata changed/, state: 'retry' },
     { channelId: 'channel-1', title: row.source.title, budget: 50,
       reason: /budget reached/, state: 'deferred' }
   ];
@@ -775,6 +822,10 @@ test('permanent permission errors are skipped but quota and transient errors ret
   assert.equal(retryablePublishError({ status: 503, message: 'Temporary YouTube outage' }), true);
   assert.equal(retryablePublishError({ code: 'ECONNRESET' }), true);
   assert.equal(retryablePublishError({ status: 409, message: 'Metadata changed' }), false);
+  assert.equal(retryablePublishError({ status: 409,
+    message: 'YouTube metadata changed since the package was generated' }), true);
+  assert.equal(retryablePublishError({ status: 409,
+    message: 'Video visibility changed since the catalog scan' }), false);
 });
 
 test('730-day review queue simulation settles safe packages, retries transient errors, and preserves visibility', async (t) => {

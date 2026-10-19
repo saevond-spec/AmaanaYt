@@ -58,6 +58,8 @@ test('database queues put fresh uploads first and keep automatic publishing publ
   t.after(() => { store.pool.query = originalQuery; });
 
   await store.listSeoVideos();
+  await store.upsertSeoVideo('video-1', { title: 'Updated title', description: 'Updated description',
+    tags: ['ARC Raiders'], privacyStatus: 'public', channelId: 'channel-1', durationSeconds: 180 });
   await store.claimSeoVideo();
   await store.listSeoAutoCandidates();
   await store.listSeoNeedsAnalysis();
@@ -69,6 +71,7 @@ test('database queues put fresh uploads first and keep automatic publishing publ
   const autoPublish = sql.find((query) => query.includes('SELECT video_id AS "videoId", status'));
   const analysis = sql.find((query) =>
     query.includes('SELECT p.video_id AS "videoId", p.context'));
+  const upsert = sql.find((query) => query.includes('INSERT INTO amaana_seo_packages (video_id, source)'));
 
   assert.ok(dashboard?.includes("p.source->>'privacyStatus' = 'public' THEN 0 ELSE 1 END"));
   assert.ok(dashboard?.includes("INTERVAL '14 days'"));
@@ -79,5 +82,10 @@ test('database queues put fresh uploads first and keep automatic publishing publ
   assert.ok(generation?.includes("THEN (source->>'viewCount')::numeric"));
   assert.ok(autoPublish?.includes('AS "viewCount"'));
   assert.ok(autoPublish?.includes('AS "publishedAt"'));
+  assert.ok(autoPublish?.includes("INTERVAL '24 hours'"));
+  assert.ok(autoPublish?.includes('metadata catalog is incomplete'));
+  assert.ok(upsert?.includes('IS DISTINCT FROM (EXCLUDED.source->>'));
+  assert.ok(upsert?.includes("THEN 'queued' ELSE amaana_seo_packages.status END"));
+  assert.ok(upsert?.includes('amaana_seo_packages.applied->>'));
   assert.ok(analysis?.includes("THEN (p.source->>'viewCount')::numeric"));
 });
