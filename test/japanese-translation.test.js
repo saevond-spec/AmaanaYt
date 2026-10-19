@@ -4,7 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   normalizeJapaneseVideoLocalization,
-  draftJapaneseVideoLocalizations
+  translateJapaneseVideoLocalizations
 } = require('../src/japanese-translation');
 
 const source = {
@@ -31,11 +31,13 @@ test('Japanese localization validates YouTube title and description limits', () 
   assert.throws(() => normalizeJapaneseVideoLocalization({ title: '日本語', description: '日'.repeat(5001) }, { title: '', description: '' }), /5,000/);
   assert.equal(normalizeJapaneseVideoLocalization({ title: '日'.repeat(120), description: '' },
     { title: 'Long English playlist', description: '' }, { titleLimit: 150 }).title.length, 120);
+  assert.throws(() => normalizeJapaneseVideoLocalization({ title: '日本語', description: '日'.repeat(1001) },
+    { title: 'Channel', description: '' }, { descriptionLimit: 1000 }), /1,000/);
 });
 
-test('draft translator sends bounded inputs and maps reviewed output to the exact video IDs', async () => {
+test('translator sends bounded inputs and maps output to the exact video IDs', async () => {
   let request;
-  const result = await draftJapaneseVideoLocalizations([source], {
+  const result = await translateJapaneseVideoLocalizations([source], {
     apiKey: 'test-key', model: 'test-model', baseUrl: 'https://api.example.test/v1',
     fetchImpl: async (url, options) => {
       request = { url: String(url), options, body: JSON.parse(options.body) };
@@ -52,12 +54,13 @@ test('draft translator sends bounded inputs and maps reviewed output to the exac
     description: 'ここで見てください: https://example.com/vod\n00:01:23 - 最後の戦い\n@Saevondをフォロー' }]);
 });
 
-test('draft translator rejects incomplete and oversized batches before provider use', async () => {
+test('translator rejects incomplete and oversized batches before provider use', async () => {
   let called = false;
   const fetchImpl = async () => { called = true; throw new Error('should not be called'); };
-  await assert.rejects(draftJapaneseVideoLocalizations([], { apiKey: 'x', model: 'y', fetchImpl }), /between 1 and 5/);
-  await assert.rejects(draftJapaneseVideoLocalizations(Array.from({ length: 6 }, (_, index) => ({
+  await assert.rejects(translateJapaneseVideoLocalizations([], { apiKey: 'x', model: 'y', fetchImpl }), /between 1 and 5/);
+  await assert.rejects(translateJapaneseVideoLocalizations(Array.from({ length: 6 }, (_, index) => ({
     id: `abcdefghij${index}`, title: 'Title', description: ''
   })), { apiKey: 'x', model: 'y', fetchImpl }), /between 1 and 5/);
   assert.equal(called, false);
 });
+

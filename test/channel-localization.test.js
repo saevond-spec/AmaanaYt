@@ -2,21 +2,21 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   MAX_CHANNEL_DESCRIPTION_LENGTH,
-  draftJapaneseChannelLocalization,
+  suggestJapaneseChannelLocalization,
   normalizeJapaneseChannelLocalization
 } = require('../src/channel-localization');
 
-test('Japanese channel draft keeps the creator name and preserves source links', () => {
-  const draft = draftJapaneseChannelLocalization({
+test('Japanese channel suggestion keeps the creator name and preserves source links', () => {
+  const suggestion = suggestJapaneseChannelLocalization({
     title: 'Saevond',
     description: 'English profile\nTwitch: https://twitch.tv/saevond\nTwitch: https://twitch.tv/saevond'
   });
 
-  assert.equal(draft.title, 'Saevond');
-  assert.match(draft.description, /NARAKA: BLADEPOINTのパートナー/);
-  assert.match(draft.description, /実況なしのゲームプレイ動画/);
-  assert.equal((draft.description.match(/https:\/\/twitch\.tv\/saevond/g) || []).length, 1);
-  assert.deepEqual(draft.preservedLinks, ['Twitch: https://twitch.tv/saevond']);
+  assert.equal(suggestion.title, 'Saevond');
+  assert.match(suggestion.description, /NARAKA: BLADEPOINTのパートナー/);
+  assert.match(suggestion.description, /実況なしのゲームプレイ動画/);
+  assert.equal((suggestion.description.match(/https:\/\/twitch\.tv\/saevond/g) || []).length, 1);
+  assert.deepEqual(suggestion.preservedLinks, ['Twitch: https://twitch.tv/saevond']);
 });
 
 test('Japanese channel localization trims text and accepts a brand name in Latin characters', () => {
@@ -34,3 +34,4 @@ test('Japanese channel localization rejects empty, non-Japanese, and over-limit 
     title: 'Saevond', description: '日'.repeat(MAX_CHANNEL_DESCRIPTION_LENGTH + 1)
   }), /description must be/);
 });
+

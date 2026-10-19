@@ -30,7 +30,7 @@ function normalizeJapaneseChannelLocalization(value) {
   return { title, description };
 }
 
-function draftJapaneseChannelLocalization({ title = '', description = '' } = {}) {
+function suggestJapaneseChannelLocalization({ title = '', description = '' } = {}) {
   const localizedTitle = String(title).trim() || 'Saevond';
   const core = [
     'NARAKA: BLADEPOINTのパートナー、Saevondです。',
@@ -55,5 +55,6 @@ module.exports = {
   MAX_CHANNEL_TITLE_LENGTH,
   MAX_CHANNEL_DESCRIPTION_LENGTH,
   normalizeJapaneseChannelLocalization,
-  draftJapaneseChannelLocalization
+  suggestJapaneseChannelLocalization
 };
+

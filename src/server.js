@@ -17,8 +17,8 @@ const { createChannelTagWorker } = require('./channel-tag-worker');
 const { createMonetizationWorker } = require('./monetization-worker');
 const { createSeoMarket, detectGame } = require('./seo-market');
 const { normalizeContext } = require('./seo-package');
-const { normalizeJapaneseChannelLocalization, draftJapaneseChannelLocalization } = require('./channel-localization');
-const { draftJapaneseVideoLocalizations } = require('./japanese-translation');
+const { normalizeJapaneseChannelLocalization, suggestJapaneseChannelLocalization } = require('./channel-localization');
+const { createJapaneseLocalizationWorker } = require('./japanese-localization-worker');
 const { hasVerifiedGameplayHighlight } = require('./highlight-validation');
 const { buildHighlightTimeline, buildHighlightDescription } = require('./highlight-metadata');
 const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
@@ -105,6 +105,11 @@ const market = createSeoMarket({ store, youtube });
 const playlistAuto = createPlaylistAutoAssigner({ store, youtube });
 const channelTagWorker = createChannelTagWorker({ store, youtube });
 setInterval(() => channelTagWorker.schedule(), 5 * 60 * 1000).unref?.();
+const japaneseLocalizationWorker = createJapaneseLocalizationWorker({ store, youtube });
+setInterval(() => japaneseLocalizationWorker.schedule(), 15 * 60 * 1000).unref?.();
+japaneseLocalizationWorker.getState().then((state) => {
+  if (state.enabled) japaneseLocalizationWorker.schedule(true);
+}).catch((error) => console.error('Japanese localization autopilot startup check failed:', error.message));
 const seo = createSeoWorker({ store, youtube, market, playlistAuto });
 const monetization = createMonetizationWorker({ youtube });
 const configuredHighlightAttempts = Number(process.env.HIGHLIGHT_MAX_AUTO_ATTEMPTS);
@@ -616,7 +621,7 @@ app.get('/api/seo/channel', admin, async (_req, res, next) => {
       id: channel.id, etag: channel.etag, title: channel.title, description: channel.description,
       keywords: channel.keywords, defaultLanguage: channel.defaultLanguage,
       localizations: channel.localizations,
-      japaneseDraft: draftJapaneseChannelLocalization({ title: channel.title, description: channel.description }),
+      japaneseSuggestion: suggestJapaneseChannelLocalization({ title: channel.title, description: channel.description }),
       suggestions: channelSuggestions(videos.filter((video) => video.source?.channelId === channel.id)),
       audit: [
         ...(!channel.description.trim() ? ['Channel description is empty.'] :
@@ -647,6 +652,55 @@ app.put('/api/seo/channel/localization/ja', admin, async (req, res, next) => {
   }
 });
 
+
+app.get('/api/seo/localization/ja/autopilot', admin, async (_req, res, next) => {
+  try {
+    const state = await japaneseLocalizationWorker.getState();
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      enabled: state.enabled, status: state.status,
+      dailyLimit: japaneseLocalizationWorker.dailyLimit,
+      perRunLimit: japaneseLocalizationWorker.perRunLimit,
+      updatesToday: state.updatesToday, totalUpdated: state.totalUpdated,
+      lastRunStartedAt: state.lastRunStartedAt, lastRunFinishedAt: state.lastRunFinishedAt,
+      lastRun: state.lastRun, lastError: state.lastError
+    });
+  } catch (error) { next(error); }
+});
+
+app.put('/api/seo/localization/ja/autopilot', admin, async (req, res, next) => {
+  try {
+    if (typeof req.body?.enabled !== 'boolean') {
+      return res.status(400).json({ error: 'enabled must be true or false' });
+    }
+    if (req.body.enabled) {
+      if (!process.env.SEO_AI_API_KEY || !process.env.SEO_AI_MODEL) {
+        return res.status(503).json({ error: 'Configure SEO_AI_API_KEY and SEO_AI_MODEL before enabling Japanese autopilot' });
+      }
+      if (!await youtube.isConnected()) {
+        return res.status(409).json({ error: 'Connect the YouTube owner account before enabling Japanese autopilot' });
+      }
+    }
+    const state = await japaneseLocalizationWorker.getState();
+    const updated = {
+      ...state, enabled: req.body.enabled,
+      status: req.body.enabled ? 'queued' : 'paused',
+      lastError: null, retryAfter: null
+    };
+    await store.saveJapaneseLocalizationAutopilotState(updated);
+    if (updated.enabled) japaneseLocalizationWorker.schedule(true);
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      enabled: updated.enabled, status: updated.status,
+      dailyLimit: japaneseLocalizationWorker.dailyLimit,
+      perRunLimit: japaneseLocalizationWorker.perRunLimit,
+      updatesToday: updated.updatesToday, totalUpdated: updated.totalUpdated,
+      lastRunStartedAt: updated.lastRunStartedAt, lastRunFinishedAt: updated.lastRunFinishedAt,
+      lastRun: updated.lastRun, lastError: updated.lastError
+    });
+  } catch (error) { next(error); }
+});
+
 app.get('/api/seo/localization/ja/videos', admin, async (req, res, next) => {
   try {
     const offset = Math.max(0, Number.parseInt(req.query.offset, 10) || 0);
@@ -666,42 +720,6 @@ app.get('/api/seo/localization/ja/videos', admin, async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post('/api/seo/localization/ja/videos/draft', admin, async (req, res, next) => {
-  try {
-    const videoIds = req.body?.videoIds;
-    if (!Array.isArray(videoIds) || videoIds.length < 1 || videoIds.length > 5 ||
-        videoIds.some((id) => typeof id !== 'string' || !/^[A-Za-z0-9_-]{11}$/.test(id)) ||
-        new Set(videoIds).size !== videoIds.length) {
-      return res.status(400).json({ error: 'Select 1–5 unique videos with valid YouTube IDs' });
-    }
-    const [channel, videos] = await Promise.all([
-      youtube.ownedChannel(), youtube.videoMetadata(videoIds)
-    ]);
-    const byId = new Map(videos.map((video) => [video.id, video]));
-    const source = videoIds.map((id) => {
-      const video = byId.get(id);
-      if (!video || video.snippet?.channelId !== channel.id) {
-        const error = new Error('A selected video was not found on the connected channel');
-        error.status = 404;
-        throw error;
-      }
-      return { id, title: video.snippet?.title || '', description: video.snippet?.description || '' };
-    });
-    const drafts = await draftJapaneseVideoLocalizations(source, {
-      apiKey: process.env.SEO_AI_API_KEY, model: process.env.SEO_AI_MODEL,
-      baseUrl: process.env.SEO_AI_BASE_URL || 'https://api.openai.com/v1',
-      timeoutMs: process.env.SEO_AI_TIMEOUT_MS
-    });
-    res.set('Cache-Control', 'no-store');
-    res.json({ drafts });
-  } catch (error) {
-    if (error.status === 400 || error.status === 404 || error.status === 403 || error.status === 409) {
-      return res.status(error.status).json({ error: error.message });
-    }
-    next(error);
-  }
-});
-
 app.put('/api/seo/videos/:id/localization/ja', admin, async (req, res, next) => {
   try {
     if (!/^[A-Za-z0-9_-]{11}$/.test(req.params.id)) {
@@ -717,38 +735,6 @@ app.put('/api/seo/videos/:id/localization/ja', admin, async (req, res, next) => 
     res.json(result);
   } catch (error) {
     if ([400, 403, 404, 409].includes(error.status)) return res.status(error.status).json({ error: error.message });
-    next(error);
-  }
-});
-
-app.post('/api/seo/localization/ja/playlists/draft', admin, async (req, res, next) => {
-  try {
-    const playlistIds = req.body?.playlistIds;
-    if (!Array.isArray(playlistIds) || playlistIds.length < 1 || playlistIds.length > 5 ||
-        playlistIds.some((id) => typeof id !== 'string' || !id.trim() || id.length > 255) ||
-        new Set(playlistIds).size !== playlistIds.length) {
-      return res.status(400).json({ error: 'Select 1–5 unique playlists' });
-    }
-    const playlists = await youtube.listOwnedPlaylists();
-    const byId = new Map(playlists.map((playlist) => [playlist.id, playlist]));
-    const source = playlistIds.map((id) => {
-      const playlist = byId.get(id);
-      if (!playlist) {
-        const error = new Error('A selected playlist is not owned by the connected YouTube channel');
-        error.status = 404;
-        throw error;
-      }
-      return { id, title: playlist.title || '', description: playlist.description || '', titleLimit: 150 };
-    });
-    const drafts = await draftJapaneseVideoLocalizations(source, {
-      apiKey: process.env.SEO_AI_API_KEY, model: process.env.SEO_AI_MODEL,
-      baseUrl: process.env.SEO_AI_BASE_URL || 'https://api.openai.com/v1',
-      timeoutMs: process.env.SEO_AI_TIMEOUT_MS
-    });
-    res.set('Cache-Control', 'no-store');
-    res.json({ drafts });
-  } catch (error) {
-    if ([400, 404].includes(error.status)) return res.status(error.status).json({ error: error.message });
     next(error);
   }
 });
@@ -852,6 +838,7 @@ app.get('/oauth2/callback', async (req, res, next) => {
     if (!req.query.code) return res.status(400).send('Google did not return an authorization code.');
     await youtube.exchangeCode(req.query.code);
     market.resetBackoff();
+    await japaneseLocalizationWorker.resumeAfterYouTubeReconnect();
     await seo.resumeAfterYouTubeReconnect();
     channelTagWorker.resumeAfterYouTubeReconnect();
     monetization.resumeAfterYouTubeReconnect();
