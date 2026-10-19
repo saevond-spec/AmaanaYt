@@ -343,8 +343,25 @@ test('flushes leftover verified live captures into a private Short draft when th
   await h.discovery.runLive();
   assert.equal(h.drafts.length, 0);
 
+  const restarted = createTwitchHighlightDiscovery({
+    twitch: h.twitch,
+    store: h.store,
+    video: {
+      async inspectMedia() { return { durationSeconds: 60, width: 1280, height: 720 }; },
+      async verifyGameplay() {
+        return { verified: true, totalFrames: 5, activeGameplayFrames: 5,
+          confidence: 0.95, gameName: 'Test Game', model: 'fixture' };
+      }
+    },
+    enqueueBatch: (id) => h.enqueued.push(id),
+    enqueueClip: (id) => h.enqueuedClips.push(id),
+    logger: { info() {}, error() {} },
+    now: () => clock,
+    targetDurationSeconds: 900,
+    visualGameplayVerificationAvailable: () => true
+  });
   isLive = false;
-  const result = await h.discovery.runLive();
+  const result = await restarted.runLive();
 
   assert.equal(result.status, 'not_live');
   assert.equal(result.liveShortsQueued, 1);
