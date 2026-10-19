@@ -156,6 +156,29 @@ function communityClipTitle({ clipTitle, gameName, streamTitle }) {
   return clean(withSuffix, CLIP_TITLE_LIMIT) || 'Gaming highlight #Shorts';
 }
 
+function isVerifiedGameplayResult(value) {
+  const totalFrames = Number(value && value.totalFrames);
+  const activeFrames = Number(value && value.activeGameplayFrames);
+  const confidence = Number(value && value.confidence);
+  const evidence = Array.isArray(value && value.evidence) ? value.evidence : [];
+  return Boolean(value && value.verified === true) &&
+    Number.isInteger(totalFrames) && totalFrames >= 5 &&
+    Number.isInteger(activeFrames) && activeFrames >= Math.ceil(totalFrames * 0.8) &&
+    activeFrames <= totalFrames &&
+    Number.isFinite(confidence) && confidence >= 0.8 && confidence <= 1 &&
+    evidence.length >= Math.ceil(totalFrames * 0.8);
+}
+
+async function reuseOrVerifyGameplay(existing, verify) {
+  if (isVerifiedGameplayResult(existing)) return { gameplay: existing, reused: true };
+  if (typeof verify !== 'function') throw new Error('Visual gameplay verification is unavailable');
+  const gameplay = await verify();
+  if (!isVerifiedGameplayResult(gameplay)) {
+    throw new Error('Community Twitch clip failed visual gameplay verification');
+  }
+  return { gameplay, reused: false };
+}
+
 function clipRetryDelayMs(attempt, jobId = '') {
   const count = Math.max(1, Math.min(12, Math.floor(Number(attempt) || 1)));
   const exponential = Math.min(6 * 60 * 60 * 1000, 15 * 1000 * (2 ** (count - 1)));
@@ -183,5 +206,7 @@ module.exports = {
   communityClipScore,
   buildCommunityClipDrafts,
   clipRetryDelayMs,
-  isRetryableCommunityClipError
+  isRetryableCommunityClipError,
+  isVerifiedGameplayResult,
+  reuseOrVerifyGameplay
 };
