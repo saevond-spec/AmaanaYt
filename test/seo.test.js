@@ -160,6 +160,30 @@ test('live market evidence reaches the prompt as observations without replacing 
   assert.match(prompt, /Opening, first round, final fight/);
 });
 
+test('SEO prompt context is compact while duplicate checks still use the full catalog', async () => {
+  const baseline = validatePackage(generated, source, context);
+  const peers = Array.from({ length: 30 }, (_value, index) => ({
+    videoId: 'channel-video-' + index, title: 'Distinct channel upload ' + index,
+    description: 'A distinct channel description for video ' + index + '.'
+  }));
+  peers[29] = { videoId: 'older-duplicate', title: baseline.titles.hybrid[0],
+    description: baseline.description };
+  let requestPayload;
+  const result = await generatePackage(source, context, {
+    apiKey: 'unit-test-key', model: 'compact-prompt-test', metadataPeers: peers,
+    fetchImpl: async (_url, options) => {
+      const prompt = JSON.parse(options.body).messages[1].content;
+      requestPayload = JSON.parse(prompt.slice(prompt.lastIndexOf('DATA: ') + 6));
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) };
+    }
+  });
+
+  assert.equal(requestPayload.existingChannelVideos.length, 24);
+  assert.ok(requestPayload.existingChannelVideos.every((item) => item.descriptionOpening.length <= 120));
+  assert.ok(result.metadataConflicts.some((conflict) => conflict.kind === 'title'));
+  assert.ok(result.metadataConflicts.some((conflict) => conflict.kind === 'description'));
+});
+
 test('missing footage evidence creates review flags and no invented timestamps', () => {
   const pkg = validatePackage({ ...generated, clipHooks: [] }, source, normalizeContext({}, 190));
   assert.deepEqual(pkg.chapters, []);
@@ -588,10 +612,46 @@ test('worker can process more than five jobs in one run with default budget 200'
     json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) });
   try {
     const worker = createSeoWorker({ store, youtube,
-      env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'batch-worker' }, logger: { info() {}, error() {} } });
+      env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'batch-worker', SEO_AI_MIN_INTERVAL_MS: '0' }, logger: { info() {}, error() {} } });
     assert.equal((await worker.status()).dailyLimit, 200);
     await worker.run();
     assert.equal(finished, 6);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('worker paces each Gemini package request at the configured interval', async () => {
+  let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
+    completed: true, viewPriorityScanVersion: 1, enabled: true };
+  let claims = 0;
+  let finished = 0;
+  const pauses = [];
+  const fakeStore = {
+    getSeoSyncState: async () => state,
+    saveSeoSyncState: async (next) => { state = next; },
+    seoCounts: async () => ({ attemptedToday: 0 }),
+    claimSeoVideo: async () => claims++ < 2
+      ? { videoId: 'paced-' + claims, claimToken: 'claim-' + claims, source, context: {}, attempts: 1 }
+      : null,
+    finishSeoVideo: async () => { finished += 1; }
+  };
+  const youtube = { isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner' }) };
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: true,
+    json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) });
+  try {
+    const worker = createSeoWorker({ store: fakeStore, youtube,
+      env: { SEO_AI_API_KEY: 'test-key', SEO_AI_MODEL: 'paced-worker',
+        SEO_DAILY_LIMIT: '2', SEO_AI_MIN_INTERVAL_MS: '5000' },
+      sleep: async (ms) => pauses.push(ms),
+      logger: { info() {}, error() {}, warn() {} } });
+    await worker.run();
+    assert.equal(finished, 2);
+    assert.equal(pauses.length, 1);
+    assert.ok(pauses[0] >= 4500 && pauses[0] <= 5000);
+    assert.equal((await worker.status()).aiRequestIntervalMs, 5000);
   } finally {
     global.fetch = originalFetch;
   }

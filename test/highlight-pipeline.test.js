@@ -188,8 +188,9 @@ async function harness(t, options = {}) {
         throw error;
       }
       const end = Number(String(clipId).slice('clip-'.length));
+      const duration = Number(options.clipDuration) || 30;
       return { id: clipId, video_id: options.wrongVodId ? '9876543210' : '1234567890',
-        vod_offset: end - 30 + (options.timestampDrift || 0), duration: 30 };
+        vod_offset: end - duration + (options.timestampDrift || 0), duration };
     },
     async downloadClip(_url, destination) { await fs.writeFile(destination, 'fixture media'); }
   };
@@ -206,10 +207,10 @@ async function harness(t, options = {}) {
       }
       await fs.writeFile(destination, 'fixture thumbnail');
     },
-    async assembleHighlights(sources, destination, _segmentDir, _expectedDurations, targetDurationSeconds) {
+    async assembleHighlights(sources, destination, _segmentDir, expectedDurations, targetDurationSeconds) {
       counters.assemblyTarget = targetDurationSeconds;
       await fs.writeFile(destination, 'fixture montage');
-      return options.invalidDuration ? sources.map(() => 0) : sources.map(() => 30);
+      return options.invalidDuration ? sources.map(() => 0) : expectedDurations.map(Number);
     },
     async verifyGameplay() {
       counters.gameplayVerifications += 1;
@@ -344,20 +345,25 @@ test('legacy Twitch-discovered batches without a target duration cannot create u
   assert.equal(h.counters.publications.length, 0);
 });
 
-test('15-minute batches enforce the exact target and create Shorts only from the two selected moments', async (t) => {
-  const h = await harness(t, { autoPublish: false });
-  h.batch.targetHighlightDurationSeconds = 90;
-  h.batch.shortCandidateIndexes = [0, 2];
+test('15-minute batches assemble exactly 900 seconds across verified 60-second sources', async (t) => {
+  const h = await harness(t, { autoPublish: false, clipDuration: 60 });
+  h.batch.highlights = Array.from({ length: 15 }, (_value, index) => ({
+    startSeconds: index * 120, endSeconds: index * 120 + 60, duration: 60,
+    title: 'Gameplay moment ' + (index + 1), reason: 'Verified gameplay exchange', score: 95 - index
+  }));
+  h.batch.targetHighlightDurationSeconds = 15 * 60;
+  h.batch.shortCandidateIndexes = [0, 14];
   h.drafts.set(h.batch.id, h.batch);
   await h.processor(h.batch.id);
 
+  const parent = h.drafts.get(h.batch.id);
   const shorts = [...h.drafts.values()].filter((draft) => draft.sourceType === 'twitch_highlight_short');
-  assert.equal(h.counters.assemblyTarget, 90);
-  assert.deepEqual(h.counters.validationTarget, { expectedDuration: 90, exactDuration: true });
-  assert.equal(h.drafts.get(h.batch.id).duration, 90);
-  assert.deepEqual(shorts.map((draft) => draft.highlightIndex), [0, 2]);
-  assert.equal(h.counters.gameplayVerifications, 3);
-  assert.equal(h.drafts.get(h.batch.id).status, 'awaiting_owner_approval');
+  assert.equal(h.counters.assemblyTarget, 900);
+  assert.deepEqual(h.counters.validationTarget, { expectedDuration: 900, exactDuration: true });
+  assert.equal(parent.duration, 900);
+  assert.deepEqual(shorts.map((draft) => draft.highlightIndex), [0, 14]);
+  assert.equal(h.counters.gameplayVerifications, 15);
+  assert.equal(parent.status, 'awaiting_owner_approval');
   assert.equal(h.counters.publications.length, 0);
 });
 

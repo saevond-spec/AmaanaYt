@@ -1,4 +1,5 @@
 const { makeDistinctTitle } = require('./metadata-uniqueness');
+const { MAX_HIGHLIGHT_SEGMENTS } = require('./highlight-selection');
 
 function formatTimestamp(seconds) {
   const value = Number(seconds);
@@ -18,7 +19,7 @@ function cleanMomentTitle(value, index) {
 
 function buildHighlightTimeline(highlights, segmentDurations) {
   if (!Array.isArray(highlights) || !highlights.length || !Array.isArray(segmentDurations) ||
-      highlights.length !== segmentDurations.length || highlights.length > 10) {
+      highlights.length !== segmentDurations.length || highlights.length > MAX_HIGHLIGHT_SEGMENTS) {
     throw new Error('Highlight timestamps need matching clip and duration lists');
   }
   let offset = 0;

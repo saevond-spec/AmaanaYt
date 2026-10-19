@@ -123,7 +123,8 @@ async function analyzeGameplayFrames(frames, {
 async function analyzeVideo(videoUrl, { apiKey, model = 'gemini-3.8-flash', fallbackModels = [],
   durationSeconds = null, timeoutMs = process.env.VIDEO_ANALYSIS_TIMEOUT_MS,
   circuitBreaker = defaultCircuitBreaker, random = Math.random,
-  fetchImpl = fetch, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
+  fetchImpl = fetch, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  beforeRequest = async () => {} } = {}) {
   videoIdFromUrl(videoUrl);
   if (!apiKey) throw new Error('Configure a Gemini API key for video analysis');
   const models = [...new Set([model, ...fallbackModels])]
@@ -140,7 +141,9 @@ entities (array), keywords (array of phrases actually supported), visualContext,
 primaryKeyword, secondaryKeywords (array), category, tags (array).
 Do not invent a transcript, quotes, gameplay outcomes, or things outside the video. Indicate uncertainty in the summary.
 Moment times are approximate suggestions for human review, never verified chapter or clip timestamps. JSON only.`;
-  const send = (requestedModel) => fetchImpl(
+  const send = async (requestedModel) => {
+    await beforeRequest();
+    return fetchImpl(
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(requestedModel)}:generateContent`, {
       method: 'POST', headers: { 'x-goog-api-key': apiKey, 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -149,6 +152,7 @@ Moment times are approximate suggestions for human review, never verified chapte
       }),
       signal: AbortSignal.timeout(requestTimeout)
     });
+  };
   let lastResponse;
   for (const [index, requestedModel] of models.entries()) {
     const remaining = circuitBreaker.remaining(requestedModel);

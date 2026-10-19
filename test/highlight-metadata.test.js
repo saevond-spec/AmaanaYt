@@ -8,6 +8,7 @@ const {
   buildShortTitle,
   buildShortDescription
 } = require('../src/highlight-metadata');
+const { MAX_HIGHLIGHT_SEGMENTS } = require('../src/highlight-selection');
 const { thumbnailHeadline, thumbnailOverlay, createThumbnail } = require('../src/video');
 const fs = require('node:fs/promises');
 const os = require('node:os');
@@ -26,6 +27,20 @@ test('measured segment lengths produce verified chapter timestamps from zero', (
   assert.equal(formatTimestamp(3661), '1:01:01');
   assert.deepEqual(timeline.chapters.map((item) => item.time), ['0:00', '0:12', '0:31']);
   assert.match(buildHighlightDescription('123456', timeline), /Chapters\n0:00 - Opening duel/);
+});
+
+test('15-minute highlight timeline accepts the optimizer segment budget', () => {
+  const highlights = Array.from({ length: 15 }, (_value, index) => ({ title: 'Gameplay moment ' + (index + 1) }));
+  const timeline = buildHighlightTimeline(highlights, Array(15).fill(60));
+
+  assert.equal(MAX_HIGHLIGHT_SEGMENTS, 20);
+  assert.equal(timeline.durationSeconds, 15 * 60);
+  assert.equal(timeline.timestamps.length, 15);
+  assert.equal(timeline.timestamps[14].time, '14:00');
+  assert.match(buildHighlightDescription('123456', timeline), /14:00 - Gameplay moment 15/);
+  assert.throws(() => buildHighlightTimeline(
+    Array.from({ length: 21 }, (_value, index) => ({ title: 'Moment ' + index })), Array(21).fill(60)),
+  /matching clip and duration lists/);
 });
 
 test('highlight and Short titles and descriptions use their specific moment details', () => {

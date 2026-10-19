@@ -1,4 +1,6 @@
 const MAX_DESCRIPTION = 5000;
+const PROMPT_METADATA_PEER_LIMIT = 24;
+const PROMPT_METADATA_DESCRIPTION_LIMIT = 120;
 const { rateThumbnailBriefs } = require('./thumbnail-rating');
 const { ensureCreatorTag } = require('./channel-tags');
 const { canonicalText, descriptionCore, findMetadataConflicts } = require('./metadata-uniqueness');
@@ -262,7 +264,8 @@ async function generatePackage(source, context, { apiKey, model, baseUrl, fallba
   secondaryNativeModel, finalNativeModel, onFallback, onNativeFallback, onSecondNativeFallback,
   onFinalNativeFallback, analysis = null, marketEvidence = null, metadataPeers = [], timeoutMs = process.env.SEO_AI_TIMEOUT_MS,
   circuitBreaker = defaultCircuitBreaker, random = Math.random,
-  fetchImpl = fetch, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
+  fetchImpl = fetch, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  beforeRequest = async () => {} }) {
   if (!apiKey || !model) throw new Error('Configure SEO_AI_API_KEY and SEO_AI_MODEL to generate packages');
   const evidence = evidenceFor(source, context);
   const payload = {
@@ -277,9 +280,9 @@ async function generatePackage(source, context, { apiKey, model, baseUrl, fallba
       terms: marketEvidence.terms?.slice(0, 8) || [],
       samples: marketEvidence.samples?.slice(0, 5)
     } : null,
-    existingChannelVideos: (Array.isArray(metadataPeers) ? metadataPeers : []).slice(0, 80).map((item) => ({
+    existingChannelVideos: (Array.isArray(metadataPeers) ? metadataPeers : []).slice(0, PROMPT_METADATA_PEER_LIMIT).map((item) => ({
       videoId: String(item.videoId || '').slice(0, 32), title: String(item.title || '').slice(0, 100),
-      descriptionOpening: descriptionCore(item.description).slice(0, 240)
+      descriptionOpening: descriptionCore(item.description).slice(0, PROMPT_METADATA_DESCRIPTION_LIMIT)
     })),
     groundedChapters: evidence.chapters.map((item) => ({ time: clock(item.startSeconds), title: item.title })),
     groundedClips: evidence.clips.map((item) => ({ start: clock(item.startSeconds), end: clock(item.endSeconds), title: item.title }))
@@ -304,7 +307,9 @@ DATA: ${JSON.stringify(payload)}`;
   const configuredTimeout = Number(timeoutMs);
   const requestTimeout = Number.isSafeInteger(configuredTimeout) && configuredTimeout >= 1000
     ? configuredTimeout : 120000;
-  const request = (requestedModel) => fetchImpl(new URL('chat/completions', `${providerBase}/`), {
+  const request = async (requestedModel) => {
+    await beforeRequest();
+    return fetchImpl(new URL('chat/completions', `${providerBase}/`), {
     method: 'POST',
     headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
     body: JSON.stringify({ model: requestedModel, response_format: { type: 'json_object' }, messages: [
@@ -312,8 +317,11 @@ DATA: ${JSON.stringify(payload)}`;
       { role: 'user', content: prompt }
     ] }),
     signal: AbortSignal.timeout(requestTimeout)
-  });
-  const requestNative = (requestedModel) => fetchImpl(
+    });
+  };
+  const requestNative = async (requestedModel) => {
+    await beforeRequest();
+    return fetchImpl(
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(requestedModel)}:generateContent`, {
       method: 'POST',
       headers: { 'x-goog-api-key': apiKey, 'content-type': 'application/json' },
@@ -324,6 +332,7 @@ DATA: ${JSON.stringify(payload)}`;
       }),
       signal: AbortSignal.timeout(requestTimeout)
     });
+  };
   const checkedRequest = async (requestedModel, nativeRoute = false) => {
     const remaining = circuitBreaker.remaining(requestedModel);
     if (remaining) return { ok: false, status: 503, circuitOpen: true, retryAfterMs: remaining };

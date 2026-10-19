@@ -30,6 +30,20 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     ? Math.min(60, configuredScanMinutes) : 15) * 60 * 1000;
   const circuitBreaker = createModelCircuitBreaker();
   const analysisCircuitBreaker = createModelCircuitBreaker();
+  const configuredAiIntervalMs = Number(env.SEO_AI_MIN_INTERVAL_MS);
+  // Gemini limits vary by model and project; default to a cautious 5 requests per minute.
+  const aiRequestIntervalMs = Number.isSafeInteger(configuredAiIntervalMs) && configuredAiIntervalMs >= 0
+    ? Math.min(60 * 1000, configuredAiIntervalMs) : 12 * 1000;
+  let lastAiRequestStartedAt = 0;
+  async function beforeAiRequest() {
+    const now = Date.now();
+    const remaining = aiRequestIntervalMs - (now - lastAiRequestStartedAt);
+    if (lastAiRequestStartedAt && remaining > 0) {
+      if (sleep) await sleep(remaining);
+      else await new Promise((resolve) => setTimeout(resolve, remaining));
+    }
+    lastAiRequestStartedAt = Date.now();
+  }
   const analysisEnabled = env.ENABLE_VIDEO_ANALYSIS === 'true';
   const autoPublishEnabled = env.SEO_AUTO_PUBLISH === 'true' &&
     typeof store.listSeoAutoCandidates === 'function' && typeof youtube.updateVideoSeo === 'function';
@@ -66,6 +80,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           env.SEO_AI_SECONDARY_MODEL || 'gemini-3.1-flash-lite',
           env.SEO_AI_FINAL_MODEL || 'gemini-3.8-flash'],
         timeoutMs: env.VIDEO_ANALYSIS_TIMEOUT_MS, circuitBreaker: analysisCircuitBreaker,
+        beforeRequest: beforeAiRequest,
         ...(sleep ? { sleep } : {})
       });
       await store.saveVideoAnalysis(id, analysis, analysis.model);
@@ -381,6 +396,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
             baseUrl, fallbackModel, secondaryNativeModel, finalNativeModel,
             analysis, marketEvidence, metadataPeers: comparisonPeers,
             timeoutMs: env.SEO_AI_TIMEOUT_MS, circuitBreaker,
+            beforeRequest: beforeAiRequest,
             ...(sleep ? { sleep } : {}),
             onFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying fallback model ${fallback}`),
             onNativeFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying native route with ${fallback}`),
@@ -524,7 +540,8 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       store.getSeoSyncState(), store.seoCounts(),
       typeof youtube.hasAnalyticsReadAccess === 'function' ? youtube.hasAnalyticsReadAccess() : false
     ]);
-    return { ...state, ...counts, dailyLimit, analysisBatchSize, videoAnalysisEnabled: analysisEnabled,
+    return { ...state, ...counts, dailyLimit, analysisBatchSize, aiRequestIntervalMs,
+      videoAnalysisEnabled: analysisEnabled,
       providerConfigured: Boolean(env.SEO_AI_API_KEY && env.SEO_AI_MODEL), autoPublishEnabled,
       youtubeAnalyticsAuthorized, catalogPagesPerRun, recentScanIntervalMs, running };
   }
