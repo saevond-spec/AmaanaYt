@@ -650,33 +650,19 @@ app.put('/api/seo/channel/localization/ja', admin, async (req, res, next) => {
 app.get('/api/seo/localization/ja/videos', admin, async (req, res, next) => {
   try {
     const offset = Math.max(0, Number.parseInt(req.query.offset, 10) || 0);
-    if (!Number.isSafeInteger(offset)) return res.status(400).json({ error: 'Invalid offset' });
-    const [channel, state, counts] = await Promise.all([
-      youtube.ownedChannel(), store.getSeoSyncState(), store.seoCounts()
-    ]);
-    if (state.channelId && state.channelId !== channel.id) {
-      return res.status(409).json({ error: 'Connected channel differs from the SEO catalog. Rescan before translating.' });
+    if (!Number.isSafeInteger(offset) || offset > 100000) {
+      return res.status(400).json({ error: 'Invalid video page offset' });
     }
-    if (!state.completed) {
-      return res.status(409).json({ error: 'The full channel catalog is still scanning. Refresh after the scan completes to translate every video.' });
-    }
-    const rows = await store.listSeoVideos(10, offset);
-    const videos = await youtube.videoMetadata(rows.map((row) => row.videoId));
-    const byId = new Map(videos.map((video) => [video.id, video]));
-    const items = rows.map((row) => {
-      const video = byId.get(row.videoId);
-      if (!video || video.snippet?.channelId !== channel.id) return null;
-      return {
-        id: video.id, etag: video.etag || null,
-        title: video.snippet?.title || '', description: video.snippet?.description || '',
-        privacyStatus: video.status?.privacyStatus || 'unknown',
-        defaultLanguage: video.snippet?.defaultLanguage || null,
-        localization: video.localizations?.ja || null
-      };
-    }).filter(Boolean);
-    const total = Object.values(counts.statuses || {}).reduce((sum, count) => sum + Number(count || 0), 0);
+    const page = await youtube.ownedVideosPage(offset, 10);
+    const items = page.items.filter((video) => video.snippet?.channelId === page.channelId).map((video) => ({
+      id: video.id, etag: video.etag || null,
+      title: video.snippet?.title || '', description: video.snippet?.description || '',
+      privacyStatus: video.status?.privacyStatus || 'unknown',
+      defaultLanguage: video.snippet?.defaultLanguage || null,
+      localization: video.localizations?.ja || null
+    }));
     res.set('Cache-Control', 'no-store');
-    res.json({ offset, total, pageSize: 10, catalogComplete: true, items });
+    res.json({ offset, total: page.total, pageSize: 10, catalogComplete: true, items });
   } catch (error) { next(error); }
 });
 
@@ -688,18 +674,9 @@ app.post('/api/seo/localization/ja/videos/draft', admin, async (req, res, next) 
         new Set(videoIds).size !== videoIds.length) {
       return res.status(400).json({ error: 'Select 1–5 unique videos with valid YouTube IDs' });
     }
-    const [channel, state, rows] = await Promise.all([
-      youtube.ownedChannel(), store.getSeoSyncState(),
-      Promise.all(videoIds.map((id) => store.getSeoVideo(id)))
+    const [channel, videos] = await Promise.all([
+      youtube.ownedChannel(), youtube.videoMetadata(videoIds)
     ]);
-    if (state.channelId && state.channelId !== channel.id) {
-      return res.status(409).json({ error: 'Connected channel differs from the SEO catalog. Rescan before translating.' });
-    }
-    if (rows.some((row) => !row)) return res.status(404).json({ error: 'A selected video is missing from the channel catalog' });
-    if (rows.some((row) => row.source?.channelId !== channel.id)) {
-      return res.status(403).json({ error: 'Only videos from the connected channel can be translated' });
-    }
-    const videos = await youtube.videoMetadata(videoIds);
     const byId = new Map(videos.map((video) => [video.id, video]));
     const source = videoIds.map((id) => {
       const video = byId.get(id);
@@ -729,12 +706,6 @@ app.put('/api/seo/videos/:id/localization/ja', admin, async (req, res, next) => 
   try {
     if (!/^[A-Za-z0-9_-]{11}$/.test(req.params.id)) {
       return res.status(400).json({ error: 'Invalid video ID' });
-    }
-    const row = await store.getSeoVideo(req.params.id);
-    if (!row) return res.status(404).json({ error: 'Video not found in the channel catalog' });
-    const state = await store.getSeoSyncState();
-    if (state.channelId && state.channelId !== row.source?.channelId) {
-      return res.status(409).json({ error: 'Connected channel differs from the SEO catalog. Rescan before saving.' });
     }
     if (typeof req.body?.etag !== 'string' || !req.body.etag) {
       return res.status(400).json({ error: 'Refresh the video before saving its Japanese localization' });
