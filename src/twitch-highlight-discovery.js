@@ -8,7 +8,7 @@ const { select15MinuteGameplayHighlights, TARGET_HIGHLIGHT_DURATION_SECONDS,
   MAX_HIGHLIGHT_SEGMENTS } = require('./highlight-selection');
 const { parseTwitchDuration } = require('./highlight-validation');
 const { buildCommunityClipDrafts } = require('./twitch-community-clips');
-const { isPlaceholderTestTitle } = require('./gameplay-intake-guard');
+const { isPlaceholderTestTitle, isNonGameplayTestClip } = require('./gameplay-intake-guard');
 
 const DEFAULT_SCAN_INTERVAL_MS = 15 * 60 * 1000;
 const DEFAULT_LIVE_SCAN_INTERVAL_MS = 60 * 1000;
@@ -30,7 +30,13 @@ function clean(value, limit) {
 
 function selectCommunityHighlights(clips, vod, { limit = MAX_AUTO_HIGHLIGHTS,
   targetDurationSeconds = TARGET_HIGHLIGHT_DURATION_SECONDS } = {}) {
-  return select15MinuteGameplayHighlights(clips, vod, {
+  const eligibleClips = Array.isArray(clips)
+    ? clips.filter((clip) => !isNonGameplayTestClip({
+      clipTitle: clip?.title,
+      streamTitle: vod?.title
+    }))
+    : [];
+  return select15MinuteGameplayHighlights(eligibleClips, vod, {
     targetDurationSeconds,
     maxSegments: limit
   });
