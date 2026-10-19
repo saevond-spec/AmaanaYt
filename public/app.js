@@ -128,7 +128,7 @@ async function refreshTwitchConnection() {
     twitchConnectionHelp.textContent = status.connected && highlightStatus && !highlightStatus.visualGameplayVerificationConfigured
       ? 'Visual gameplay screening is off. Amaana holds edits until ENABLE_GAMEPLAY_SCREENING and VIDEO_ANALYSIS_API_KEY are configured.'
       : status.connected
-        ? 'Amaana requires 15 minutes of non-overlapping game footage, landscape clip sources, and visual gameplay checks before it builds a highlight.'
+        ? 'While you are live, Amaana captures a 60-second segment every 3 minutes and checks for real gameplay. Every five verified captures (about 15 minutes of stream), it uploads a private Short for review. After collecting 15 minutes of verified gameplay footage, it also uploads the 15-minute highlight. Approve each video before it goes public.'
         : (status.error || 'Connect the Twitch account that owns the Saevond channel.');
     twitchConnectButton.disabled = false;
     twitchConnectButton.textContent = status.connected ? 'Reconnect Twitch' : 'Connect Twitch';
@@ -1169,3 +1169,4 @@ document.querySelector('#logoutButton').addEventListener('click', async () => {
     showNotice(error.message, true);
   }
 })();
+

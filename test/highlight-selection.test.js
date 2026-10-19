@@ -34,6 +34,16 @@ test('selects a non-overlapping set that fills the target duration exactly', () 
   assert.equal(result.highlights.at(-1).duration >= 15, true);
 });
 
+test('fifteen 60-second live clips can fill the exact 15-minute highlight target', () => {
+  const result = select15MinuteGameplayHighlights(Array.from({ length: 15 }, (_, index) =>
+    clip('live-' + index, index * 180, 60, 0)), vod);
+
+  assert.equal(result.rejectionReason, null);
+  assert.equal(result.highlights.length, 15);
+  assert.equal(result.highlights.reduce((sum, moment) => sum + moment.duration, 0), 900);
+  assert.ok(result.highlights.every((moment) => moment.duration === 60));
+});
+
 test('prefers a sparse five-minute window when otherwise equal candidates are clustered', () => {
   const result = select15MinuteGameplayHighlights([
     clip('dense-a', 0, 45, 10),
@@ -66,7 +76,7 @@ test('reports when the VOD has less than fifteen minutes of eligible material', 
 
   assert.deepEqual(result.highlights, []);
   assert.equal(result.rejectionReason, 'insufficient_non_overlapping_gameplay_duration');
-  assert.equal(result.availableGameplaySeconds, 104.8);
+  assert.equal(result.availableGameplaySeconds, 105);
   assert.equal(result.targetDurationSeconds, 900);
 });
 

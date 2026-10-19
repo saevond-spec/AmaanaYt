@@ -3,7 +3,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { parseTwitchDuration, validateHighlightMoments, verifyCreatedClip,
-  verifyClipCreationRequest, hasVerifiedGameplayHighlight, VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS } = require('../src/highlight-validation');
+  verifyClipCreationRequest, hasVerifiedGameplayHighlight, hasVerifiedLiveGameplayClip,
+  VERIFIED_GAMEPLAY_HIGHLIGHT_SECONDS } = require('../src/highlight-validation');
 
 test('parses Twitch archive duration strings', () => {
   assert.equal(parseTwitchDuration('6h26m14s'), 23174);
@@ -88,7 +89,6 @@ test('checks that each created Twitch clip points back to the requested VOD mome
     { video_id: '123', vod_offset: 36, duration: 30 }, '123'), { status: 422 });
 });
 
-
 test('only an exact 15-minute render with complete visual gameplay checks qualifies for publishing', () => {
   const valid = {
     sourceType: 'twitch_highlight_batch',
@@ -113,3 +113,23 @@ test('only an exact 15-minute render with complete visual gameplay checks qualif
     verified: true, totalFrames: 5, activeGameplayFrames: 4, confidence: 0.79
   } }] }), false);
 });
+
+test('live-captured Shorts require strong gameplay verification evidence', () => {
+  const valid = {
+    sourceType: 'twitch_vod',
+    discoverySource: 'twitch_live_capture',
+    liveCapture: true,
+    visualGameplayVerification: {
+      verified: true, totalFrames: 5, activeGameplayFrames: 4, confidence: 0.8
+    }
+  };
+  assert.equal(hasVerifiedLiveGameplayClip(valid), true);
+  assert.equal(hasVerifiedLiveGameplayClip({ ...valid, liveCapture: false }), false);
+  assert.equal(hasVerifiedLiveGameplayClip({ ...valid, visualGameplayVerification: {
+    ...valid.visualGameplayVerification, activeGameplayFrames: 3
+  } }), false);
+  assert.equal(hasVerifiedLiveGameplayClip({ ...valid, visualGameplayVerification: {
+    ...valid.visualGameplayVerification, confidence: 0.79
+  } }), false);
+});
+

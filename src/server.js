@@ -19,7 +19,7 @@ const { createSeoMarket, detectGame } = require('./seo-market');
 const { normalizeContext } = require('./seo-package');
 const { normalizeJapaneseChannelLocalization, suggestJapaneseChannelLocalization } = require('./channel-localization');
 const { createJapaneseLocalizationWorker } = require('./japanese-localization-worker');
-const { hasVerifiedGameplayHighlight } = require('./highlight-validation');
+const { hasVerifiedGameplayHighlight, hasVerifiedLiveGameplayClip } = require('./highlight-validation');
 const { buildHighlightTimeline, buildHighlightDescription } = require('./highlight-metadata');
 const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
   shouldPullForwardTwitchMetadataRetry, shouldRequeueUnexpectedTwitchDownloadHost,
@@ -286,6 +286,9 @@ async function processTwitchClipDraft(id) {
   try {
     let draft = await store.getDraft(id);
     if (!draft || draft.sourceType !== 'twitch_vod' || draft.status === 'awaiting_owner_approval') return;
+    if (draft.discoverySource === 'twitch_live_capture' && !hasVerifiedLiveGameplayClip(draft)) {
+      throw new Error('Live Twitch clip did not pass gameplay verification; no YouTube upload was made');
+    }
     if (!await twitch.isConnected()) throw new Error('Connect Twitch in Amaana before processing VOD highlights');
 
     if (!draft.twitchClipId) {
@@ -324,6 +327,10 @@ async function processTwitchClipDraft(id) {
     await twitch.downloadClip(landscapeUrl, sourcePath);
     await store.updateDraft(id, { status: 'formatting_vertical_short' });
     await video.convertLandscapeToShort(sourcePath, shortPath);
+    if (typeof video.validateShort !== 'function') {
+      throw new Error('Rendered Twitch Short cannot be validated; no YouTube upload was made');
+    }
+    await video.validateShort(shortPath, draft.duration);
 
     await store.updateDraft(id, { status: 'uploading_private_to_youtube' });
     const sourceUrl = `https://www.twitch.tv/videos/${draft.vodId}?t=${Math.floor(draft.startSeconds)}s`;
@@ -406,7 +413,7 @@ function enqueueHighlightBatch(id) {
   return highlightBatchQueue.enqueue(id);
 }
 const twitchHighlightDiscovery = createTwitchHighlightDiscovery({
-  twitch, store, enqueueBatch: enqueueHighlightBatch,
+  twitch, store, video, enqueueBatch: enqueueHighlightBatch, enqueueClip: enqueueClipProcessing,
   visualGameplayVerificationAvailable: () => process.env.ENABLE_GAMEPLAY_SCREENING === 'true' &&
     Boolean(process.env.VIDEO_ANALYSIS_API_KEY)
 });
@@ -1158,6 +1165,11 @@ app.post('/api/drafts/:id/approve', admin, async (req, res, next) => {
     const draft = await store.getDraft(req.params.id);
     if (!draft) return res.status(404).json({ error: 'Draft not found' });
     if (draft.status !== 'awaiting_owner_approval') return res.status(409).json({ error: 'Draft was already handled' });
+    if (draft.sourceType === 'twitch_vod' &&
+        draft.discoverySource === 'twitch_live_capture' &&
+        !hasVerifiedLiveGameplayClip(draft)) {
+      return res.status(409).json({ error: 'This live clip did not pass gameplay verification and cannot be published.' });
+    }
     if (draft.sourceType === 'twitch_highlight_batch' && !hasVerifiedGameplayHighlight(draft)) {
       return res.status(409).json({ error: 'This legacy highlight is not a verified 15-minute gameplay edit and cannot be published. Keep it private and create a new verified edit.' });
     }
@@ -1257,3 +1269,4 @@ store.init()
     console.error('Database initialization failed:', error.message);
     process.exit(1);
   });
+
