@@ -287,7 +287,8 @@ async function processTwitchClipDraft(id) {
   let shortPath;
   try {
     let draft = await store.getDraft(id);
-    if (!draft || draft.sourceType !== 'twitch_vod' || draft.status === 'awaiting_owner_approval') return;
+    if (!draft || draft.sourceType !== 'twitch_vod' || draft.status === 'awaiting_owner_approval' ||
+        draft.status === 'excluded_by_owner') return;
     if (draft.discoverySource === 'twitch_community_clip' && draft.youtubeVideoId) {
       await store.updateDraft(id, { status: 'awaiting_owner_approval', error: null });
       return;
