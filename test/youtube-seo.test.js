@@ -395,10 +395,10 @@ test('market search keeps only recently published public videos and their observ
     process.env.BASE_URL = oldBaseUrl; });
   process.env.BASE_URL = 'https://amaana.example.test';
   store.getTokens = async () => ({ access_token: 'unit-test', expiry_date: Date.now() + 3600000 });
-  let query;
+  const queries = [];
   google.youtube = () => ({
     search: { list: async (params) => {
-      query = params;
+      queries.push(params);
       return { data: { items: [{ id: { videoId: 'public-1' } },
         { id: { videoId: 'private-1' } }, { id: { videoId: 'public-2' } }] } };
     } },
@@ -412,10 +412,12 @@ test('market search keeps only recently published public videos and their observ
     ] } }) }
   });
   const items = await youtube.recentGameVideos('ARC Raiders', { now: Date.parse('2026-10-02T12:00:00Z') });
-  assert.equal(query.q, 'ARC Raiders gameplay');
-  assert.equal(query.type, 'video');
-  assert.equal(query.maxResults, 50);
-  assert.equal(query.publishedAfter, '2026-09-25T12:00:00.000Z');
+  assert.equal(queries.length, 2);
+  assert.deepEqual(queries.map((query) => query.order), ['date', 'viewCount']);
+  assert.ok(queries.every((query) => query.q === 'ARC Raiders gameplay'));
+  assert.ok(queries.every((query) => query.type === 'video'));
+  assert.ok(queries.every((query) => query.maxResults === 25));
+  assert.ok(queries.every((query) => query.publishedAfter === '2026-09-25T12:00:00.000Z'));
   assert.deepEqual(items.map((item) => item.id), ['public-2', 'public-1']);
   assert.deepEqual(items.map((item) => item.estimatedViewsPerDay), [333, 67]);
 });

@@ -343,8 +343,14 @@ function simulateFiveYears(input = {}) {
   const playlistListUnits = positiveInteger(input.playlistListUnits ?? process.env.SIM_PLAYLIST_LIST_UNITS, 1);
   const playlistListMaxPages = Math.min(20, positiveInteger(input.playlistListMaxPages ?? process.env.SIM_PLAYLIST_LIST_MAX_PAGES, 20));
   const videoListUnits = positiveInteger(input.videoListUnits ?? process.env.SIM_VIDEO_LIST_UNITS, 1, 0);
-  const marketSearchCallsPerDay = positiveInteger(input.marketSearchCallsPerDay ?? process.env.SIM_MARKET_SEARCH_CALLS_PER_DAY, 3, 0);
-  const marketSearchDailyLimit = positiveInteger(input.marketSearchDailyLimit ?? process.env.SIM_YOUTUBE_SEARCH_DAILY_LIMIT, 100);
+  // Three market snapshots per Pacific day, each based on two search.list orders.
+  const marketResearchSnapshotsPerDay = positiveInteger(input.marketResearchSnapshotsPerDay ??
+    process.env.SIM_MARKET_RESEARCH_SNAPSHOTS_PER_DAY, 3, 0);
+  const marketQueriesPerSnapshot = 2;
+  const marketSearchCallsPerDay = positiveInteger(input.marketSearchCallsPerDay ??
+    process.env.SIM_MARKET_SEARCH_CALLS_PER_DAY, marketResearchSnapshotsPerDay * marketQueriesPerSnapshot, 0);
+  const marketSearchDailyLimit = positiveInteger(input.marketSearchDailyLimit ??
+    process.env.SIM_YOUTUBE_SEARCH_DAILY_LIMIT, 100, 0);
   const videoInsertDailyLimit = positiveInteger(input.videoInsertDailyLimit ?? process.env.SIM_YOUTUBE_VIDEO_INSERT_DAILY_LIMIT, 100);
   const autoPublish = input.autoPublish !== false && String(process.env.SIM_AUTO_PUBLISH || 'true').toLowerCase() !== 'false';
   const playlistStreamsPerWeek = positiveInteger(input.playlistStreamsPerWeek ?? process.env.SIM_PLAYLIST_STREAMS_PER_WEEK, 2, 0);
@@ -421,8 +427,14 @@ function simulateFiveYears(input = {}) {
     youtubeApiQuota: { defaultDailyUnits: defaultQuota, videoUpdateUnits: updateUnits,
       videoListUnits, videoInsertCallsPerDay, videoInsertDailyLimit,
       videoInsertQuotaFits: videoInsertCallsPerDay <= videoInsertDailyLimit,
+      marketResearchSnapshotsPerDay, marketQueriesPerSnapshot,
+      scheduledMarketSearchCallsPerDay: 2 * marketQueriesPerSnapshot,
       marketSearchCallsPerDay, marketSearchDailyLimit,
       marketSearchQuotaFits: marketSearchCallsPerDay <= marketSearchDailyLimit,
+      scheduledMarketSearchCallsAcrossFiveYears: 2 * marketQueriesPerSnapshot * window.days,
+      maximumMarketSearchCallsAcrossFiveYears: marketSearchCallsPerDay * window.days,
+      maximumDailyMarketSearchBucketUtilizationPercent: marketSearchDailyLimit > 0
+        ? Number((100 * marketSearchCallsPerDay / marketSearchDailyLimit).toFixed(2)) : null,
       automaticPublicationEnabled: autoPublish, publicationVideoUpdatesPerDay: videoPublicationCallsPerDay,
       publicationDailyQuotaUnits: publicationDailyUnits, playlistItemInsertUnits: playlistInsertUnits,
       playlistItemCheckUnits: playlistCheckUnits, ownedPlaylistListMaxPages: playlistListMaxPages,

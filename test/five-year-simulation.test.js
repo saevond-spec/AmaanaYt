@@ -21,8 +21,14 @@ test('five-year simulation reports draft volume, queue throughput, and quota hea
   assert.equal(result.youtubeApiQuota.automaticPlaylistDailyUnits, 3262);
   assert.equal(result.youtubeApiQuota.videoInsertCallsPerDay, 4);
   assert.equal(result.youtubeApiQuota.videoInsertQuotaFits, true);
-  assert.equal(result.youtubeApiQuota.marketSearchCallsPerDay, 3);
+  assert.equal(result.youtubeApiQuota.marketResearchSnapshotsPerDay, 3);
+  assert.equal(result.youtubeApiQuota.marketQueriesPerSnapshot, 2);
+  assert.equal(result.youtubeApiQuota.scheduledMarketSearchCallsPerDay, 4);
+  assert.equal(result.youtubeApiQuota.marketSearchCallsPerDay, 6);
   assert.equal(result.youtubeApiQuota.marketSearchQuotaFits, true);
+  assert.equal(result.youtubeApiQuota.scheduledMarketSearchCallsAcrossFiveYears, 7304);
+  assert.equal(result.youtubeApiQuota.maximumMarketSearchCallsAcrossFiveYears, 10956);
+  assert.equal(result.youtubeApiQuota.maximumDailyMarketSearchBucketUtilizationPercent, 6);
   assert.equal(result.youtubeApiQuota.publicationDailyQuotaUnits, 204);
   assert.equal(result.youtubeApiQuota.currentPipelineDailyQuotaUnits, 6016);
   assert.equal(result.youtubeApiQuota.combinedDailyQuotaUnitsWith50PerDayThumbnailBackfill, 8516);
@@ -83,4 +89,10 @@ test('five-year lifecycle simulation exercises baseline and deterministic recove
   assert.equal(stress.visibilityInvariant, true);
   assert.equal(stress.parentPrivateUploads, 1825);
   assert.equal(stress.shortPrivateUploads, 5475);
+});
+
+test('five-year market quota edge case handles a disabled search bucket without invalid math', () => {
+  const result = simulateFiveYears({ marketSearchCallsPerDay: 0, marketSearchDailyLimit: 0 });
+  assert.equal(result.youtubeApiQuota.marketSearchQuotaFits, true);
+  assert.equal(result.youtubeApiQuota.maximumDailyMarketSearchBucketUtilizationPercent, null);
 });
