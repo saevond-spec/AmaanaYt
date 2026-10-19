@@ -385,6 +385,13 @@ async function ownedVideosPage(offset = 0, pageSize = 10) {
   return { channelId: channel.id, offset, pageSize, total, items };
 }
 
+async function ownedVideosCursorPage(pageToken = null) {
+  const channel = await ownedChannel();
+  const page = await uploadsPage(channel.uploads, pageToken);
+  const items = await videoMetadata(page.ids);
+  return { channelId: channel.id, items, nextPageToken: page.nextPageToken, total: page.totalResults };
+}
+
 async function getVideoViews(videoIds) {
   if (!Array.isArray(videoIds) || !videoIds.length || videoIds.length > 50) {
     throw new Error('Request views for 1–50 YouTube videos at a time');
@@ -515,7 +522,7 @@ async function enablePublicBroadcastAds(broadcast) {
 
 module.exports = { isConnected, canApprove, hasAnalyticsReadAccess, authorizationUrl, exchangeCode, uploadPrivate, setThumbnail, publish,
   getVideo, updateVideoSeo, updateJapaneseVideoLocalization, updateVideoTags, channelSeo, updateChannelSeo, updateJapaneseChannelLocalization, assertTargetChannel,
-  getVideoViews, googleSearchTraffic, ownedChannel, uploadsPage, videoMetadata, ownedVideosPage,
+  getVideoViews, googleSearchTraffic, ownedChannel, uploadsPage, videoMetadata, ownedVideosPage, ownedVideosCursorPage,
   listOwnedBroadcasts, enablePublicBroadcastAds, recentGameVideos,
   listOwnedPlaylists: playlistClient.listOwnedPlaylists,
   listPlaylistVideoIds: playlistClient.listPlaylistVideoIds,
