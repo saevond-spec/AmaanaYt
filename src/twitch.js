@@ -198,6 +198,43 @@ async function getLiveBroadcast() {
   return { user, stream, vod: vod || null };
 }
 
+async function listRecentLiveClips({ startedAt, endedAt = new Date().toISOString(), maxPages = 10 } = {}) {
+  const user = await currentUser();
+  const now = Date.now();
+  const parsedStart = Date.parse(startedAt || '');
+  const parsedEnd = Date.parse(endedAt || '');
+  const start = Math.max(Number.isFinite(parsedStart) ? parsedStart : now - 60 * 60 * 1000,
+    now - 7 * 24 * 60 * 60 * 1000);
+  const end = Math.min(Number.isFinite(parsedEnd) ? parsedEnd : now, now);
+  if (start >= end) return [];
+  const pageLimitValue = Math.floor(Number(maxPages));
+  const pageLimit = Number.isFinite(pageLimitValue) && pageLimitValue > 0
+    ? Math.min(10, pageLimitValue) : 10;
+  const clips = [];
+  const seenCursors = new Set();
+  let after;
+  for (let page = 0; page < pageLimit; page += 1) {
+    const payload = await helix('/clips', {
+      query: {
+        broadcaster_id: user.id,
+        started_at: new Date(start).toISOString(),
+        ended_at: new Date(end).toISOString(),
+        first: 100,
+        after
+      }
+    });
+    clips.push(...(payload.data || []).filter((clip) =>
+      String(clip.broadcaster_id || '') === String(user.id)));
+    const cursor = payload.pagination && payload.pagination.cursor;
+    if (!cursor || seenCursors.has(cursor)) break;
+    seenCursors.add(cursor);
+    after = cursor;
+  }
+  const unique = new Map();
+  for (const clip of clips) if (clip && clip.id) unique.set(String(clip.id), clip);
+  return [...unique.values()];
+}
+
 async function listClipsForVod(vod, { maxPages = 10 } = {}) {
   const user = await currentUser();
   const archive = requireArchivedTwitchVod(vod, vod && vod.id, user.id);
@@ -343,6 +380,7 @@ module.exports = {
   getVod,
   listRecentArchivedVods,
   getLiveBroadcast,
+  listRecentLiveClips,
   listClipsForVod,
   getClip,
   waitForClipDownload,
