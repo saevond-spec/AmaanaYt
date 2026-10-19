@@ -8,6 +8,7 @@ const { select15MinuteGameplayHighlights, TARGET_HIGHLIGHT_DURATION_SECONDS,
   MAX_HIGHLIGHT_SEGMENTS } = require('./highlight-selection');
 const { parseTwitchDuration } = require('./highlight-validation');
 const { buildCommunityClipDrafts } = require('./twitch-community-clips');
+const { isPlaceholderTestTitle } = require('./gameplay-intake-guard');
 
 const DEFAULT_SCAN_INTERVAL_MS = 15 * 60 * 1000;
 const DEFAULT_LIVE_SCAN_INTERVAL_MS = 60 * 1000;
@@ -147,6 +148,11 @@ function createTwitchHighlightDiscovery({
       const vod = typeof vodOrId === 'object' && vodOrId ? vodOrId : await twitch.getVod(requestedId);
       if (String(vod.id || '') !== requestedId || vod.type !== 'archive') {
         throw new Error('Twitch returned a different video or a non-archive VOD');
+      }
+      if (isPlaceholderTestTitle(vod.title)) {
+        await markScanned(requestedId);
+        return { status: 'test_stream_skipped', vodId: requestedId,
+          streamTitle: clean(vod.title, 100), communityClipsQueued: 0, targetDurationSeconds };
       }
       const drafts = knownDrafts || await store.listDrafts();
       const existing = drafts.find((draft) => draft && draft.sourceType === 'twitch_highlight_batch' &&
@@ -434,6 +440,11 @@ function createTwitchHighlightDiscovery({
       result.status = 'invalid_live_broadcast';
       return result;
     }
+    if (isPlaceholderTestTitle(stream.title)) {
+      result.status = 'test_stream_skipped';
+      result.streamTitle = clean(stream.title, 100);
+      return result;
+    }
     const timestamp = now();
     if (typeof twitch.listRecentLiveClips === 'function') {
       try {
@@ -686,7 +697,7 @@ function createTwitchHighlightDiscovery({
     if (running) return { skipped: 'already_running' };
     running = true;
     const result = {
-      vodsSeen: 0, scanned: 0, queued: 0, noCandidates: 0, insufficientGameplayDuration: 0,
+      vodsSeen: 0, scanned: 0, queued: 0, testStreamsSkipped: 0, noCandidates: 0, insufficientGameplayDuration: 0,
       qualityFloorRejected: 0, visualScreeningUnavailable: 0,
       alreadyExists: 0, throttled: 0, errors: 0
     };
@@ -706,6 +717,12 @@ function createTwitchHighlightDiscovery({
       for (const vod of Array.isArray(vods) ? vods : []) {
         const vodId = String(vod && vod.id || '');
         if (!/^\d+$/.test(vodId) || vod.type !== 'archive') continue;
+        if (isPlaceholderTestTitle(vod.title)) {
+          result.scanned += 1;
+          result.testStreamsSkipped += 1;
+          await markScanned(vodId);
+          continue;
+        }
         const existing = drafts.find((draft) => draft && draft.sourceType === 'twitch_highlight_batch' &&
           String(draft.vodId) === vodId &&
           Number(draft.targetHighlightDurationSeconds) === Number(targetDurationSeconds));
