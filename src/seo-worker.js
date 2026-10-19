@@ -282,7 +282,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       if (coverageAudit?.requeuedCount) await assignCatalogPlaylists(state);
       if (publisher && state.enabled !== false) {
         if (metadataPeerCatalogComplete) {
-          const publication = await publisher.publishPending(20, metadataPeers)
+          const publication = await publisher.publishPending(20, metadataPeers, metadataPeerCatalogComplete)
             .catch((error) => { logger.warn?.('SEO auto publish scan failed:', error.message); return null; });
           if (publication?.quotaBlocked) {
             await markYouTubeQuotaBlocked(state, publication.quotaRetryAt);
@@ -383,7 +383,8 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           await store.finishSeoVideo(job.videoId, job.claimToken, generated, null);
           logger.info?.(`SEO package ${job.videoId} generated: ${generated.missingEvidence.length ? 'needs_review' : 'ready'}`);
           if (publisher && !(Date.parse(state.youtubeDataApiBlockedUntil) > Date.now())) {
-            const outcome = await publisher.publishVideo(job.videoId, metadataPeers)
+            const outcome = await publisher.publishVideo(job.videoId, metadataPeers,
+              { catalogComplete: metadataPeerCatalogComplete })
               .catch((error) => { logger.warn?.(`SEO auto publish ${job.videoId} failed:`, error.message); });
             if (outcome?.quotaBlocked) {
               await markYouTubeQuotaBlocked(state, outcome.quotaRetryAt);

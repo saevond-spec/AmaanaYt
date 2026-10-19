@@ -17,6 +17,9 @@ test('candidate scan requeues results written by an older autopilot version', as
     assert.ok(candidateQuery, 'candidate SQL should execute');
     assert.match(candidateQuery[0],
       /auto_result->>'autopilotVersion'\s+IS DISTINCT FROM \$1/);
+    assert.match(candidateQuery[0],
+      /auto_result->>'state' = 'skipped'[\s\S]*INTERVAL '24 hours'/);
+    assert.match(candidateQuery[0], /metadata catalog is incomplete/i);
     assert.deepEqual(candidateQuery[1], ['public-seo-metadata-test-v2']);
   } finally {
     store.pool.query = originalQuery;
