@@ -976,9 +976,9 @@ async function loadJapaneseVideoLocalizations() {
     japaneseVideoDrafts.clear();
     japaneseVideoLoaded = true;
     renderJapaneseVideoPage();
-    jaVideoStatus.textContent = japaneseVideoPageData.catalogComplete
-      ? 'Catalog complete. Drafts stay on this page until you save reviewed translations.'
-      : 'The channel catalog is still scanning.';
+    jaVideoStatus.textContent = japaneseVideoPageData.uploadsRead
+      ? 'Uploads page loaded. Drafts stay on this page until you save reviewed translations.'
+      : 'The uploads page could not be verified.';
   } catch (error) {
     japaneseVideoLoaded = false;
     japaneseVideoItems = [];
