@@ -116,6 +116,114 @@ test('channel update retains supported branding fields and rejects a stale chann
   assert.equal(request.options.headers['If-Match'], '"channel-etag"');
 });
 
+test('Japanese channel localization preserves other languages and uses the channel ETag', async (t) => {
+  const oldYoutube = google.youtube;
+  const oldTokens = store.getTokens;
+  const oldBaseUrl = process.env.BASE_URL;
+  t.after(() => {
+    google.youtube = oldYoutube;
+    store.getTokens = oldTokens;
+    process.env.BASE_URL = oldBaseUrl;
+  });
+  process.env.BASE_URL = 'https://amaana.example.test';
+  store.getTokens = async () => ({ access_token: 'unit-test', expiry_date: Date.now() + 3600000 });
+  let request;
+  let failPrecondition = false;
+  const existingLocalizations = {
+    es: { title: 'Saevond ES', description: 'Perfil existente' },
+    ja: { title: 'Old title', description: '古い紹介文です。' }
+  };
+  google.youtube = () => ({
+    channels: {
+      list: async (params) => ({ data: { items: [{
+        id: 'channel-1', etag: '"channel-etag"',
+        snippet: { title: 'Saevond', description: 'Existing English channel identity' },
+        brandingSettings: { channel: {
+          title: 'Saevond', description: 'Existing English channel identity', keywords: 'gaming',
+          country: 'US', defaultLanguage: 'en'
+        } },
+        localizations: existingLocalizations,
+        contentDetails: { relatedPlaylists: { uploads: 'uploads-1' } }
+      }] } }),
+      update: async (params, options) => {
+        request = { params, options };
+        if (failPrecondition) {
+          const error = new Error('Precondition failed');
+          error.code = 412;
+          throw error;
+        }
+        return { data: {} };
+      }
+    }
+  });
+
+  const current = await youtube.channelSeo();
+  assert.ok(current.localizations.es);
+  await assert.rejects(youtube.updateJapaneseChannelLocalization({ id: current.id, etag: 'stale' }, {
+    title: 'Saevond', description: '日本語のチャンネル紹介です。'
+  }), /settings changed/);
+  assert.equal(request, undefined);
+
+  failPrecondition = true;
+  await assert.rejects(youtube.updateJapaneseChannelLocalization(current, {
+    title: 'Saevond', description: '実況なしのゲームプレイ動画を投稿しています。'
+  }), (error) => error.status === 409 && /refresh before trying again/.test(error.message));
+  failPrecondition = false;
+
+  await youtube.updateJapaneseChannelLocalization(current, {
+    title: 'Saevond', description: '実況なしのゲームプレイ動画を投稿しています。'
+  });
+  assert.deepEqual(request.params.part, ['localizations']);
+  assert.equal(request.params.requestBody.id, 'channel-1');
+  assert.deepEqual(request.params.requestBody.localizations.es, existingLocalizations.es);
+  assert.deepEqual(request.params.requestBody.localizations.ja, {
+    title: 'Saevond', description: '実況なしのゲームプレイ動画を投稿しています。'
+  });
+  assert.equal(Object.hasOwn(request.params.requestBody, 'brandingSettings'), false);
+  assert.equal(request.options.headers['If-Match'], '"channel-etag"');
+  assert.equal(current.description, 'Existing English channel identity');
+});
+
+test('Japanese channel localization sets the required English source language without replacing its description', async (t) => {
+  const oldYoutube = google.youtube;
+  const oldTokens = store.getTokens;
+  const oldBaseUrl = process.env.BASE_URL;
+  t.after(() => {
+    google.youtube = oldYoutube;
+    store.getTokens = oldTokens;
+    process.env.BASE_URL = oldBaseUrl;
+  });
+  process.env.BASE_URL = 'https://amaana.example.test';
+  store.getTokens = async () => ({ access_token: 'unit-test', expiry_date: Date.now() + 3600000 });
+  let request;
+  google.youtube = () => ({
+    channels: {
+      list: async () => ({ data: { items: [{
+        id: 'channel-1', etag: '"channel-etag"',
+        snippet: { title: 'Saevond', description: 'Existing English channel identity' },
+        brandingSettings: { channel: {
+          title: 'Saevond', description: 'Existing English channel identity', keywords: 'gaming',
+          country: 'US', unsubscribedTrailer: 'abcdefghijk'
+        } },
+        localizations: { es: { title: 'Saevond ES', description: 'Perfil existente' } }
+      }] } }),
+      update: async (params, options) => { request = { params, options }; return { data: {} }; }
+    }
+  });
+
+  const current = await youtube.channelSeo();
+  await youtube.updateJapaneseChannelLocalization(current, {
+    title: 'Saevond', description: '日本語のチャンネル紹介です。'
+  });
+  assert.deepEqual(request.params.part, ['brandingSettings', 'localizations']);
+  assert.deepEqual(request.params.requestBody.brandingSettings.channel, {
+    title: 'Saevond', description: 'Existing English channel identity', keywords: 'gaming',
+    country: 'US', unsubscribedTrailer: 'abcdefghijk', defaultLanguage: 'en'
+  });
+  assert.equal(request.params.requestBody.localizations.es.description, 'Perfil existente');
+  assert.equal(request.options.headers['If-Match'], '"channel-etag"');
+});
+
 test('public broadcast ads update preserves existing metadata and schedule with the current version', async (t) => {
   const oldYoutube = google.youtube;
   const oldTokens = store.getTokens;

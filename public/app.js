@@ -29,6 +29,10 @@ const seoPlaylistAudit = document.querySelector('#seoPlaylistAudit');
 const seoPlaylistAuditStatus = document.querySelector('#seoPlaylistAuditStatus');
 const seoPage = document.querySelector('#seoPage');
 const seoChannel = document.querySelector('#seoChannel');
+const channelJaForm = document.querySelector('#channelJaForm');
+const channelJaTitle = document.querySelector('#channelJaTitle');
+const channelJaDescription = document.querySelector('#channelJaDescription');
+const channelJaStatus = document.querySelector('#channelJaStatus');
 const googleSearchImportForm = document.querySelector('#googleSearchImportForm');
 const googleSearchImportStatus = document.querySelector('#googleSearchImportStatus');
 let seoOffset = 0;
@@ -36,6 +40,7 @@ let seoEnabled = true;
 let draftPoll = null;
 let tiktokConnected = false;
 let youtubePlaylists = [];
+let channelLocalizationSnapshot = null;
 
 function showNotice(message, isError = false) {
   notice.textContent = message;
@@ -842,6 +847,8 @@ async function loadSeo() {
 async function loadChannelSeo() {
   try {
     const channel = await api('/api/seo/channel');
+    const japanese = channel.localizations?.ja;
+    channelLocalizationSnapshot = { id: channel.id, etag: channel.etag };
     seoChannel.replaceChildren(
       element('p', 'draft-meta', `${channel.title} · ${channel.id}`),
       element('p', '', `Description: ${channel.description || '(empty)'}`),
@@ -850,8 +857,18 @@ async function loadChannelSeo() {
         ? `Findings: ${channel.audit.join(' ')}`
         : 'Channel description and keywords are present.')
     );
+    channelJaTitle.value = japanese?.title || channel.japaneseDraft?.title || channel.title;
+    channelJaDescription.value = japanese?.description || channel.japaneseDraft?.description || '';
+    channelJaStatus.textContent = japanese
+      ? 'Existing Japanese localization loaded. Saving will update only Japanese channel metadata.'
+      : 'Editable Japanese draft ready. Review it before saving; the original description and links stay in place.';
+    const sourceLanguage = channel.defaultLanguage || 'en';
+    channelJaStatus.textContent += ` Default channel language stays ${sourceLanguage}.`;
+    channelJaForm.hidden = false;
   } catch (error) {
     if (error.status === 401) return showLogin();
+    channelJaForm.hidden = true;
+    channelLocalizationSnapshot = null;
     seoChannel.textContent = error.message;
   }
 }
@@ -996,6 +1013,30 @@ tiktokConnectButton.addEventListener('click', () => window.location.assign('/aut
 document.querySelector('#refreshButton').addEventListener('click', refreshDashboard);
 document.querySelector('#seoRefresh').addEventListener('click', () => {
   loadSeo(); loadChannelSeo();
+});
+channelJaForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const submitButton = channelJaForm.querySelector('button[type="submit"]');
+  if (!channelLocalizationSnapshot?.id || !channelLocalizationSnapshot?.etag) {
+    channelJaStatus.textContent = 'Refresh channel details before saving this translation.';
+    return;
+  }
+  submitButton.disabled = true;
+  channelJaStatus.textContent = 'Saving Japanese channel localization…';
+  try {
+    const result = await api('/api/seo/channel/localization/ja', {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...channelLocalizationSnapshot,
+        title: channelJaTitle.value, description: channelJaDescription.value })
+    });
+    await loadChannelSeo();
+    showNotice(`Japanese channel localization saved. ${result.defaultLanguage || 'Existing'} remains the default channel language.`);
+  } catch (error) {
+    channelJaStatus.textContent = error.message;
+    if (error.status === 401) showLogin();
+  } finally {
+    submitButton.disabled = false;
+  }
 });
 seoToggle.addEventListener('click', async () => {
   seoToggle.disabled = true;

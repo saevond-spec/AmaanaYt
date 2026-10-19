@@ -17,6 +17,7 @@ const { createChannelTagWorker } = require('./channel-tag-worker');
 const { createMonetizationWorker } = require('./monetization-worker');
 const { createSeoMarket, detectGame } = require('./seo-market');
 const { normalizeContext } = require('./seo-package');
+const { normalizeJapaneseChannelLocalization, draftJapaneseChannelLocalization } = require('./channel-localization');
 const { hasVerifiedGameplayHighlight } = require('./highlight-validation');
 const { buildHighlightTimeline, buildHighlightDescription } = require('./highlight-metadata');
 const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
@@ -611,8 +612,10 @@ app.get('/api/seo/channel', admin, async (_req, res, next) => {
     }
     res.set('Cache-Control', 'no-store');
     res.json({
-      id: channel.id, title: channel.title, description: channel.description,
-      keywords: channel.keywords,
+      id: channel.id, etag: channel.etag, title: channel.title, description: channel.description,
+      keywords: channel.keywords, defaultLanguage: channel.defaultLanguage,
+      localizations: channel.localizations,
+      japaneseDraft: draftJapaneseChannelLocalization({ title: channel.title, description: channel.description }),
       suggestions: channelSuggestions(videos.filter((video) => video.source?.channelId === channel.id)),
       audit: [
         ...(!channel.description.trim() ? ['Channel description is empty.'] :
@@ -621,6 +624,26 @@ app.get('/api/seo/channel', admin, async (_req, res, next) => {
       ]
     });
   } catch (error) { next(error); }
+});
+
+app.put('/api/seo/channel/localization/ja', admin, async (req, res, next) => {
+  try {
+    const localization = normalizeJapaneseChannelLocalization(req.body);
+    const { id, etag } = req.body || {};
+    if (typeof id !== 'string' || typeof etag !== 'string') {
+      return res.status(400).json({ error: 'Refresh the channel before saving its Japanese localization' });
+    }
+    const state = await store.getSeoSyncState();
+    if (state.channelId && state.channelId !== id) {
+      throw problem('Connected channel differs from the SEO catalog. Rescan before editing.', 409);
+    }
+    const result = await youtube.updateJapaneseChannelLocalization({ id, etag }, localization);
+    res.set('Cache-Control', 'no-store');
+    res.json(result);
+  } catch (error) {
+    if (error.status === 400 || error.status === 409) return res.status(error.status).json({ error: error.message });
+    next(error);
+  }
 });
 
 app.post('/api/seo/playlist-coverage/reconcile', admin, async (_req, res, next) => {
