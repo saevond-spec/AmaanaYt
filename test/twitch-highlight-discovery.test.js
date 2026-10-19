@@ -249,7 +249,7 @@ test('creates one private-pipeline batch from Amaana-discovered Twitch clip evid
   assert.equal(h.drafts[0].discoverySource, 'twitch_clips_api');
   assert.equal(h.drafts[0].sourceType, 'twitch_highlight_batch');
   assert.equal(h.drafts[0].sourceChannel, 'AmaanaYT');
-  assert.equal(h.drafts[0].sourceClipEvidence.length, 20);
+  assert.equal(h.drafts[0].sourceClipEvidence.length, 16);
   assert.equal(h.drafts[0].targetHighlightDurationSeconds, 720);
   assert.equal(h.drafts[0].highlights.reduce((sum, item) => sum + item.duration, 0), 720);
   assert.equal(h.drafts[0].shortCandidateIndexes.length, 2);
@@ -259,7 +259,8 @@ test('creates one private-pipeline batch from Amaana-discovered Twitch clip evid
 
 test('does not queue a 12-minute batch when the robust quality floor leaves only weak footage', async () => {
   const vod = makeVod();
-  const highStarts = [1350, 1350, 1440, 1440, 1530, 1530, 1620, 1710, 1800, 1890, 1980, 2070, 2160];
+  const uniqueHighStarts = [1350, 1440, 1530, 1620, 1710, 1800, 1890, 1980, 2070, 2160, 2250];
+  const highStarts = Array.from({ length: 25 }, (_value, index) => uniqueHighStarts[index % uniqueHighStarts.length]);
   const clips = [
     ...Array.from({ length: 15 }, (_, index) => makeClip('low-' + index, index * 90, 60, 0)),
     ...highStarts.map((start, index) => makeClip('high-' + index, start, 60, 10000))

@@ -107,7 +107,7 @@ test('uses the ten prior qualifying highlights to score the current channel band
   });
   const legacy = publishedHighlight({ id: 'legacy-15', targetHighlightDurationSeconds: 900,
     duration: 900, youtubeQualityAssessment: { assessedViews: 500, averageViewPercentage: 90,
-      relativeRetentionScore: 0.7 } });
+      relativeRetentionScore: 0.7 }, youtubeQualityLastCheckedAt: '2026-10-09T12:00:00Z' });
   const drafts = [...older, legacy, current];
   const store = memoryStore(drafts);
   let calls = 0;

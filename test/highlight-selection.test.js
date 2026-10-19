@@ -88,7 +88,8 @@ test('the median floor selects above-baseline clips and the robust ceiling caps 
 });
 
 test('weak candidates cannot be used as filler when the floor leaves less than 12 minutes', () => {
-  const highStarts = [1350, 1350, 1440, 1440, 1530, 1530, 1620, 1710, 1800, 1890, 1980, 2070, 2160];
+  const uniqueHighStarts = [1350, 1440, 1530, 1620, 1710, 1800, 1890, 1980, 2070, 2160, 2250];
+  const highStarts = Array.from({ length: 25 }, (_value, index) => uniqueHighStarts[index % uniqueHighStarts.length]);
   const clips = [
     ...Array.from({ length: 15 }, (_, index) => clip('low-' + index, index * 90, 60, 0)),
     ...highStarts.map((start, index) => clip('high-' + index, start, 60, 10000))
