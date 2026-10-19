@@ -5,6 +5,7 @@ const { createYouTubePlaylistClient } = require('./youtube-playlists');
 const { ensureCreatorTag, buildCreatorTagUpdate } = require('./channel-tags');
 const { mergeYouTubeOAuthTokens } = require('./youtube-oauth');
 const { summarizeYoutubeSearchPerformance, hasYoutubeAnalyticsReadScopes, youtubeSearchReportQueries } = require('./youtube-search-performance');
+const { normalizeJapaneseChannelLocalization } = require('./channel-localization');
 
 const SCOPES = [
   'https://www.googleapis.com/auth/youtube.upload',
@@ -153,7 +154,7 @@ async function updateVideoTags(video, channelId) {
 async function channelSeo() {
   const youtube = await service();
   const response = await youtube.channels.list({
-    part: ['snippet', 'brandingSettings', 'contentDetails'], mine: true
+    part: ['snippet', 'brandingSettings', 'contentDetails', 'localizations'], mine: true
   });
   const channel = response.data.items?.[0];
   if (!channel?.id) throw new Error('The connected YouTube account has no channel');
@@ -161,6 +162,8 @@ async function channelSeo() {
     id: channel.id, etag: channel.etag, title: channel.snippet?.title || '',
     description: channel.brandingSettings?.channel?.description ?? channel.snippet?.description ?? '',
     keywords: channel.brandingSettings?.channel?.keywords || '',
+    defaultLanguage: channel.brandingSettings?.channel?.defaultLanguage || channel.snippet?.defaultLanguage || '',
+    localizations: channel.localizations || {},
     uploads: channel.contentDetails?.relatedPlaylists?.uploads || null,
     brandingChannel: channel.brandingSettings?.channel || {}
   };
@@ -205,6 +208,55 @@ async function updateChannelSeo(expected, edit) {
     requestBody: { id: current.id, brandingSettings: { channel } }
   }, { headers: { 'If-Match': current.etag } });
   return { id: current.id, title: current.title, ...edit };
+}
+
+async function updateJapaneseChannelLocalization(expected, edit) {
+  const localization = normalizeJapaneseChannelLocalization(edit);
+  const current = await channelSeo();
+  if (!expected?.id || !expected?.etag || current.id !== expected.id || current.etag !== expected.etag) {
+    const error = new Error('Channel settings changed; refresh before saving the Japanese localization');
+    error.status = 409;
+    throw error;
+  }
+
+  const localizations = {
+    ...current.localizations,
+    ja: { title: localization.title, description: localization.description }
+  };
+  const requestBody = { id: current.id, localizations };
+  const part = ['localizations'];
+  if (!current.defaultLanguage) {
+    // YouTube requires a default language before it accepts channel localizations.
+    // The existing English copy stays unchanged and remains the source language.
+    const allowed = ['title', 'description', 'keywords', 'trackingAnalyticsAccountId',
+      'unsubscribedTrailer', 'country'];
+    const channel = Object.fromEntries(allowed.filter((name) => current.brandingChannel[name] !== undefined)
+      .map((name) => [name, current.brandingChannel[name]]));
+    channel.title = current.title;
+    channel.description = current.description;
+    channel.keywords = current.keywords;
+    channel.defaultLanguage = 'en';
+    requestBody.brandingSettings = { channel };
+    part.unshift('brandingSettings');
+  }
+
+  const youtube = await service();
+  try {
+    await youtube.channels.update({ part, requestBody }, { headers: { 'If-Match': current.etag } });
+  } catch (error) {
+    if (Number(error.status || error.code) === 412) {
+      error.status = 409;
+      error.message = 'Channel settings changed while saving; refresh before trying again';
+    }
+    throw error;
+  }
+  return {
+    id: current.id,
+    title: current.title,
+    language: 'ja',
+    localization,
+    defaultLanguage: current.defaultLanguage || 'en'
+  };
 }
 
 async function ownedChannel() {
@@ -367,7 +419,7 @@ async function enablePublicBroadcastAds(broadcast) {
 }
 
 module.exports = { isConnected, canApprove, hasAnalyticsReadAccess, authorizationUrl, exchangeCode, uploadPrivate, setThumbnail, publish,
-  getVideo, updateVideoSeo, updateVideoTags, channelSeo, updateChannelSeo, assertTargetChannel,
+  getVideo, updateVideoSeo, updateVideoTags, channelSeo, updateChannelSeo, updateJapaneseChannelLocalization, assertTargetChannel,
   getVideoViews, googleSearchTraffic, ownedChannel, uploadsPage, videoMetadata,
   listOwnedBroadcasts, enablePublicBroadcastAds, recentGameVideos,
   listOwnedPlaylists: playlistClient.listOwnedPlaylists,
