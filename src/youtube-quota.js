@@ -6,6 +6,8 @@ const dateFormatter = new Intl.DateTimeFormat('en-US', {
   hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
 });
 const quotaBlockCache = new WeakMap();
+const quotaBlockCheckedAt = new WeakMap();
+const EMPTY_CACHE_TTL_MS = 1000;
 
 function dateParts(timestamp) {
   const value = Object.fromEntries(dateFormatter.formatToParts(new Date(timestamp))
@@ -93,7 +95,11 @@ async function getYouTubeDataApiQuotaBlock(store, timestamp = Date.now()) {
   const cached = normalizedQuotaBlock(quotaBlockCache.get(store), timestamp);
   if (cached) return cached;
   quotaBlockCache.delete(store);
+  const checkedAt = quotaBlockCheckedAt.get(store);
+  if (Number.isFinite(checkedAt) && timestamp >= checkedAt &&
+      timestamp - checkedAt < EMPTY_CACHE_TTL_MS) return null;
   const persisted = normalizedQuotaBlock(await readStoredQuotaBlock(store), timestamp);
+  quotaBlockCheckedAt.set(store, timestamp);
   if (persisted) quotaBlockCache.set(store, persisted);
   return persisted;
 }
@@ -128,6 +134,7 @@ async function recordYouTubeDataApiQuotaBlock(store, errorOrRetryAt, timestamp =
   if (store && (typeof store === 'object' || typeof store === 'function')) {
     // Publish the in-process pause before awaiting storage so sibling workers stop too.
     quotaBlockCache.set(store, block);
+    quotaBlockCheckedAt.set(store, timestamp);
   }
 
   let persisted = false;
@@ -154,6 +161,7 @@ async function recordYouTubeDataApiQuotaBlock(store, errorOrRetryAt, timestamp =
   }
   if (store && (typeof store === 'object' || typeof store === 'function')) {
     quotaBlockCache.set(store, block);
+    quotaBlockCheckedAt.set(store, timestamp);
   }
   return { ...block, persisted, ...(persistenceError ? { persistenceError } : {}) };
 }
