@@ -309,6 +309,35 @@ async function saveSeoSyncState(value) {
     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`, [JSON.stringify(value)]);
 }
 
+async function getYoutubeDataApiQuotaBlock() {
+  await init();
+  const result = await pool.query("SELECT value FROM amaana_state WHERE key = 'youtube_data_api_quota'");
+  return result.rows[0]?.value || null;
+}
+
+async function saveYoutubeDataApiQuotaBlock(block) {
+  const blockedUntil = Date.parse(block?.blockedUntil || '');
+  if (!Number.isFinite(blockedUntil)) throw new Error('A valid YouTube Data API cooldown deadline is required');
+  await init();
+  const value = {
+    blockedUntil: new Date(blockedUntil).toISOString(),
+    reason: String(block.reason || 'YouTube Data API quota or rate limit reached').slice(0, 180)
+  };
+  const result = await pool.query(`
+    INSERT INTO amaana_state (key, value, updated_at)
+    VALUES ('youtube_data_api_quota', $1::jsonb, NOW())
+    ON CONFLICT (key) DO UPDATE SET
+      value = CASE
+        WHEN COALESCE(NULLIF(amaana_state.value->>'blockedUntil', '')::timestamptz,
+          '-infinity'::timestamptz) > (EXCLUDED.value->>'blockedUntil')::timestamptz
+        THEN amaana_state.value
+        ELSE EXCLUDED.value
+      END,
+      updated_at = NOW()
+    RETURNING value`, [JSON.stringify(value)]);
+  return result.rows[0]?.value || value;
+}
+
 async function getSeoSyncState() {
   await init();
   const result = await pool.query("SELECT value FROM amaana_state WHERE key = 'seo_sync'");
@@ -919,6 +948,8 @@ module.exports = {
   claimTikTokDelivery,
   saveSeoSyncState,
   getSeoSyncState,
+  getYoutubeDataApiQuotaBlock,
+  saveYoutubeDataApiQuotaBlock,
   getSeoMarketSnapshot,
   saveSeoMarketSnapshot,
   getSeoMarketBudget,
