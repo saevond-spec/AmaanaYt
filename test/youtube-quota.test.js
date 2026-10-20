@@ -86,3 +86,15 @@ test('after a quota response, subsequent Data API calls pause before invoking Yo
   }, now + 1000), /paused until/);
   assert.equal(calls, 1);
 });
+
+
+test('unblocked workers share a short negative cache instead of querying storage for every API call', async () => {
+  let reads = 0;
+  const store = { async getYoutubeDataApiQuotaBlock() { reads += 1; return null; } };
+  const now = Date.parse('2026-10-19T06:00:00Z');
+  assert.equal(await getYouTubeDataApiQuotaBlock(store, now), null);
+  assert.equal(await getYouTubeDataApiQuotaBlock(store, now + 500), null);
+  assert.equal(reads, 1);
+  assert.equal(await getYouTubeDataApiQuotaBlock(store, now + 1000), null);
+  assert.equal(reads, 2);
+});
