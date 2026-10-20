@@ -4,7 +4,8 @@ const { createSeoPublisher } = require('./seo-publish');
 const { isYouTubeAuthorizationError } = require('./channel-tags');
 const { runYoutubeSearchAutopilot, isYoutubeAnalyticsApiDisabledError } = require('./youtube-search-autopilot');
 const { runYoutubeQualityAutopilot } = require('./youtube-quality-autopilot');
-const { isYouTubeQuotaError, youtubeQuotaRetryAt } = require('./youtube-quota');
+const { isYouTubeQuotaError, youtubeQuotaRetryAt, getYouTubeDataApiQuotaBlock,
+  recordYouTubeDataApiQuotaBlock, callYouTubeDataApi } = require('./youtube-quota');
 
 function createSeoWorker({ store, youtube, env = process.env, logger = console, sleep,
   generate = generatePackage, analyze = analyzeVideo, market = null, playlistAuto = null }) {
@@ -106,8 +107,8 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   }
 
   async function catalogPage(channel, cursor) {
-    const page = await youtube.uploadsPage(channel.uploads, cursor);
-    const videos = await youtube.videoMetadata(page.ids);
+    const page = await callYouTubeDataApi(store, () => youtube.uploadsPage(channel.uploads, cursor));
+    const videos = await callYouTubeDataApi(store, () => youtube.videoMetadata(page.ids));
     for (const item of videos) {
       if (item.snippet?.channelId === channel.id) await store.upsertSeoVideo(item.id, normalizeSource(item));
     }
@@ -115,13 +116,13 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   }
 
   async function markYouTubeQuotaBlocked(state, errorOrRetryAt) {
-    const retryAt = typeof errorOrRetryAt === 'number'
-      ? errorOrRetryAt : youtubeQuotaRetryAt(errorOrRetryAt);
+    const recorded = await recordYouTubeDataApiQuotaBlock(store, errorOrRetryAt);
+    const retryAt = recorded?.blockedUntil || (typeof errorOrRetryAt === 'number'
+      ? errorOrRetryAt : youtubeQuotaRetryAt(errorOrRetryAt));
     if (!Number.isFinite(retryAt) || retryAt <= Date.now()) return false;
     state.youtubeDataApiBlockedUntil = new Date(retryAt).toISOString();
-    state.youtubeDataApiBlockReason = typeof errorOrRetryAt === 'number' ||
-      isYouTubeQuotaError(errorOrRetryAt)
-      ? 'YouTube Data API quota or rate limit reached' : 'YouTube Data API temporarily unavailable';
+    state.youtubeDataApiBlockReason = recorded?.reason ||
+      'YouTube Data API quota or rate limit reached';
     await store.saveSeoSyncState(state);
     logger.warn?.('YouTube Data API work paused until ' + state.youtubeDataApiBlockedUntil +
       ': ' + state.youtubeDataApiBlockReason);
@@ -196,15 +197,20 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
         return;
       }
       stateForQuota = await store.getSeoSyncState();
-      if (Date.parse(stateForQuota.youtubeDataApiBlockedUntil) > Date.now()) {
+      const globalQuotaBlock = await getYouTubeDataApiQuotaBlock(store);
+      const legacyBlockUntil = Date.parse(stateForQuota.youtubeDataApiBlockedUntil || '');
+      const blockedUntil = Math.max(globalQuotaBlock?.blockedUntil || 0,
+        Number.isFinite(legacyBlockUntil) ? legacyBlockUntil : 0);
+      if (blockedUntil > Date.now()) {
+        const blockedUntilIso = new Date(blockedUntil).toISOString();
         if (lastDiagnostic !== 'youtube_data_quota_blocked') {
           logger.info?.('SEO worker paused until the YouTube Data API quota window resets at ' +
-            stateForQuota.youtubeDataApiBlockedUntil);
+            blockedUntilIso);
           lastDiagnostic = 'youtube_data_quota_blocked';
         }
         return;
       }
-      const channel = await youtube.ownedChannel();
+      const channel = await callYouTubeDataApi(store, () => youtube.ownedChannel());
       let state = stateForQuota;
       if (state.channelId && state.channelId !== channel.id) {
         throw new Error('YouTube channel changed; SEO backfill is paused to avoid mixing channels');
@@ -514,7 +520,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
 
   async function registerUpload(videoId, fields) {
     // Record the video immediately; YouTube's read API may not expose an upload while it processes.
-    const video = await youtube.getVideo(videoId).catch(() => null);
+    const video = await callYouTubeDataApi(store, () => youtube.getVideo(videoId)).catch(() => null);
     const source = video ? normalizeSource(video) : {
       title: fields.title, description: fields.description || '', tags: fields.tags || [],
       channelId: null, publishedAt: new Date().toISOString(),

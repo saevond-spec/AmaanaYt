@@ -113,7 +113,7 @@ japaneseLocalizationWorker.getState().then((state) => {
   if (state.enabled) japaneseLocalizationWorker.schedule(true);
 }).catch((error) => console.error('Japanese localization autopilot startup check failed:', error.message));
 const seo = createSeoWorker({ store, youtube, market, playlistAuto });
-const monetization = createMonetizationWorker({ youtube });
+const monetization = createMonetizationWorker({ store, youtube });
 const configuredHighlightAttempts = Number(process.env.HIGHLIGHT_MAX_AUTO_ATTEMPTS);
 const highlightMaxAutoAttempts = Number.isSafeInteger(configuredHighlightAttempts) && configuredHighlightAttempts > 0
   ? Math.min(configuredHighlightAttempts, 24) : 12;

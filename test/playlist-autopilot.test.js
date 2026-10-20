@@ -147,13 +147,22 @@ test('playlist autopilot retries transient quota errors and holds permanent perm
   let transient = true;
   let permanent = true;
   let inserted = 0;
+  let attempts = 0;
+  let currentTime = Date.parse('2026-10-19T06:00:00Z');
+  let quotaBlock = null;
   const assigner = createPlaylistAutoAssigner({
-    store: { reservePlaylistAutoSlot: async () => ({ allowed: true }) },
+    store: {
+      reservePlaylistAutoSlot: async () => ({ allowed: true }),
+      getYoutubeDataApiQuotaBlock: async () => quotaBlock,
+      saveYoutubeDataApiQuotaBlock: async (next) => { quotaBlock = next; return next; }
+    },
+    now: () => currentTime,
     youtube: {
       listOwnedPlaylists: async () => [
         { id: 'PL-arc', title: 'ARC Raiders', privacyStatus: 'private' }
       ],
       addVideoToPlaylist: async () => {
+        attempts += 1;
         if (transient) { transient = false; throw apiError(403, 'rateLimitExceeded'); }
         if (permanent) { permanent = false; throw apiError(403, 'playlistContainsMaximumNumberOfVideos'); }
         inserted += 1;
@@ -167,6 +176,13 @@ test('playlist autopilot retries transient quota errors and holds permanent perm
     tags: ['ARC Raiders'], privacyStatus: 'private' });
   assert.equal(retry.state, 'retry');
   assert.ok(retry.at);
+  const paused = await assigner.assign({ id: 'abcdefghijk', title: 'ARC Raiders extraction',
+    tags: ['ARC Raiders'], privacyStatus: 'private' });
+  assert.equal(paused.state, 'retry');
+  assert.equal(paused.quotaBlockedUntil, new Date(currentTime + 5 * 60 * 1000).toISOString());
+  assert.equal(attempts, 1);
+
+  currentTime += 5 * 60 * 1000;
   const ownerReview = await assigner.assign({ id: 'abcdefghijk', title: 'ARC Raiders extraction',
     tags: ['ARC Raiders'], privacyStatus: 'private' });
   assert.equal(ownerReview.state, 'manual_review');
@@ -174,6 +190,7 @@ test('playlist autopilot retries transient quota errors and holds permanent perm
     tags: ['ARC Raiders'], privacyStatus: 'private' });
   assert.equal(success.state, 'added');
   assert.equal(inserted, 1);
+  assert.equal(attempts, 3);
 });
 
 test('successful upload assignment is persisted before backlog autopilot can repeat it', async () => {

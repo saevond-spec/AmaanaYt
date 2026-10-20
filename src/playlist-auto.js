@@ -2,7 +2,7 @@
 
 const { chooseAutoPlaylist } = require('./youtube-playlists');
 const { isYouTubeAuthorizationError } = require('./channel-tags');
-const { youtubeQuotaDate } = require('./youtube-quota');
+const { youtubeQuotaDate, callYouTubeDataApi, getYouTubeDataApiQuotaBlock, isYouTubeQuotaError } = require('./youtube-quota');
 
 function setting(value, fallback, cap) {
   const number = Number(value);
@@ -19,7 +19,7 @@ function playlistErrorState(error) {
       /playlistitemsnotaccessible|playlistforbidden|insufficientpermissions|insufficient.?scope/.test(detail)) {
     return 'authorization_required';
   }
-  if (/quotaexceeded|ratelimitexceeded|userratelimitexceeded|backenderror|internalerror|serviceunavailable|resourceexhausted/.test(detail)) {
+  if (isYouTubeQuotaError(error) || /backenderror|internalerror|serviceunavailable/.test(detail)) {
     return 'retry';
   }
   if (/playlistnotfound|videonotfound/.test(detail)) return 'retry';
@@ -42,7 +42,7 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
 
   async function getOwnedPlaylists() {
     if (playlistsCache && now() - playlistsCacheAt < 5 * 60 * 1000) return playlistsCache;
-    playlistsCache = await youtube.listOwnedPlaylists();
+    playlistsCache = await callYouTubeDataApi(store, () => youtube.listOwnedPlaylists(), now());
     playlistsCacheAt = now();
     return playlistsCache;
   }
@@ -69,7 +69,8 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
       const slot = await store.reservePlaylistAutoSlot(quotaBucket, dailyLimit, youtubeQuotaDate(now()));
       if (!slot?.allowed) return { state: 'daily_limit', privacyStatus: quotaBucket, limit: dailyLimit };
 
-      const result = await youtube.addVideoToPlaylist({ playlistId: playlist.id, videoId });
+      const result = await callYouTubeDataApi(store,
+        () => youtube.addVideoToPlaylist({ playlistId: playlist.id, videoId }), now());
       return {
         state: result.alreadyAdded ? 'already_added' : 'added',
         playlistId: playlist.id,
@@ -79,6 +80,7 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
       };
     } catch (error) {
       const state = playlistErrorState(error);
+      const quotaBlock = error?.youtubeDataApiQuotaBlock || null;
       if (state === 'authorization_required') {
         authorizationBlocked = true;
         playlistsCache = null;
@@ -91,7 +93,8 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
       return {
         state,
         reason: String(error.message || 'YouTube request failed').slice(0, 300),
-        ...(state === 'retry' ? { at: new Date(now()).toISOString() } : {})
+        ...(state === 'retry' ? { at: new Date(now()).toISOString() } : {}),
+        ...(quotaBlock ? { quotaBlockedUntil: new Date(quotaBlock.blockedUntil).toISOString() } : {})
       };
     }
   }
@@ -102,7 +105,7 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
       throw new Error('YouTube playlist coverage audit is unavailable');
     }
     const [channel, syncState] = await Promise.all([
-      youtube.ownedChannel(),
+      callYouTubeDataApi(store, () => youtube.ownedChannel(), now()),
       typeof store.getSeoSyncState === 'function' ? store.getSeoSyncState() : Promise.resolve({})
     ]);
     if (syncState.channelId && syncState.channelId !== channel.id) {
@@ -115,7 +118,7 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
     let pageToken = null;
     let catalogPages = 0;
     do {
-      const page = await youtube.uploadsPage(channel.uploads, pageToken);
+      const page = await callYouTubeDataApi(store, () => youtube.uploadsPage(channel.uploads, pageToken), now());
       catalogPages += 1;
       for (const videoId of page.ids || []) {
         if (/^[A-Za-z0-9_-]{11}$/.test(videoId)) catalogIds.add(videoId);
@@ -136,7 +139,7 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
     let membershipCount = 0;
     for (const playlist of playlists) {
       try {
-        const ids = await youtube.listPlaylistVideoIds(playlist.id);
+        const ids = await callYouTubeDataApi(store, () => youtube.listPlaylistVideoIds(playlist.id), now());
         const videoIds = Array.isArray(ids) ? ids : [];
         membershipCount += videoIds.length;
         for (const videoId of videoIds) {
@@ -154,6 +157,7 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
           title: playlist.title,
           error: String(error.message || 'Playlist could not be read').slice(0, 200)
         });
+        if (error?.youtubeDataApiQuotaBlock) break;
       }
     }
     const missingVideoIds = [...catalogIds].filter((videoId) => !playlistVideoIds.has(videoId));
@@ -189,6 +193,9 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
   }
 
   async function assignCatalogBacklog() {
+    const quotaBlock = await getYouTubeDataApiQuotaBlock(store, now());
+    if (quotaBlock) return { attempted: 0, assigned: 0,
+      quotaBlockedUntil: new Date(quotaBlock.blockedUntil).toISOString() };
     if (!enabled || typeof store.listSeoNeedsPlaylist !== 'function' ||
         typeof store.markSeoPlaylistResult !== 'function') return { attempted: 0, assigned: 0 };
     if (authorizationBlocked) return { attempted: 0, assigned: 0, blocked: 'authorization_required' };
@@ -223,7 +230,7 @@ function createPlaylistAutoAssigner({ store, youtube, env = process.env, logger 
       attempted += 1;
       if (['added', 'already_added'].includes(result.state)) assigned += 1;
       await store.markSeoPlaylistResult(candidate.videoId, result);
-      if (result.state === 'authorization_required') break;
+      if (result.state === 'authorization_required' || result.quotaBlockedUntil) break;
     }
     return { attempted, assigned };
   }

@@ -1,5 +1,6 @@
 const { isYouTubeAuthorizationError } = require('./channel-tags');
-const { youtubeQuotaDate, nextYoutubeQuotaReset, isYouTubeDailyQuotaError } = require('./youtube-quota');
+const { youtubeQuotaDate, callYouTubeDataApi, getYouTubeDataApiQuotaBlock,
+  isYouTubeQuotaError, recordYouTubeDataApiQuotaBlock } = require('./youtube-quota');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const VELOCITY_PRIOR_DAYS = 2;
@@ -125,15 +126,17 @@ function createSeoMarket({ store, youtube, env = process.env, logger = console, 
   const authCooldownMs = 6 * 60 * 60 * 1000;
 
   async function applyCooldown(error) {
-    if (isYouTubeDailyQuotaError(error)) {
-      dailyQuotaBlockedUntil = nextYoutubeQuotaReset(now());
-      retryAfter = dailyQuotaBlockedUntil;
+    const quotaBlock = error?.youtubeDataApiQuotaBlock ||
+      (isYouTubeQuotaError(error) ? await recordYouTubeDataApiQuotaBlock(store, error, now()) : null);
+    if (quotaBlock) {
+      dailyQuotaBlockedUntil = quotaBlock.blockedUntil;
+      retryAfter = quotaBlock.blockedUntil;
       if (typeof store.getSeoSyncState === 'function' && typeof store.saveSeoSyncState === 'function') {
         try {
           const state = await store.getSeoSyncState();
           await store.saveSeoSyncState({ ...state,
             youtubeDataApiBlockedUntil: new Date(dailyQuotaBlockedUntil).toISOString(),
-            youtubeDataApiBlockReason: 'YouTube Data API daily quota exceeded' });
+            youtubeDataApiBlockReason: quotaBlock.reason });
         } catch (saveError) {
           logger.warn?.(`SEO market quota cooldown could not be persisted: ${saveError.message}`);
         }
@@ -148,6 +151,12 @@ function createSeoMarket({ store, youtube, env = process.env, logger = console, 
         typeof youtube.recentGameVideos !== 'function' || now() < retryAfter) return null;
     const game = detectGame(source);
     if (!game) return null;
+    const quotaBlock = await getYouTubeDataApiQuotaBlock(store, now());
+    if (quotaBlock) {
+      dailyQuotaBlockedUntil = quotaBlock.blockedUntil;
+      retryAfter = quotaBlock.blockedUntil;
+      return null;
+    }
     const cached = await store.getSeoMarketSnapshot(game);
     if (cached && now() - Date.parse(cached.observedAt) < 24 * 60 * 60 * 1000) {
       return cached.samples?.length ? cached : null;
@@ -158,7 +167,7 @@ function createSeoMarket({ store, youtube, env = process.env, logger = console, 
     if (used >= 3) return null;
     await store.saveSeoMarketBudget({ date: today, used: used + 1 });
     try {
-      const examples = await youtube.recentGameVideos(game);
+      const examples = await callYouTubeDataApi(store, () => youtube.recentGameVideos(game), now());
       const cohort = examples.filter((item) => item.channelId !== source.channelId);
       const summary = summarizeMarketSamples(cohort, { now: now(), game });
       const snapshot = { game, query: `${game} gameplay`, observedAt: new Date(now()).toISOString(),
@@ -183,6 +192,12 @@ function createSeoMarket({ store, youtube, env = process.env, logger = console, 
     setImmediate(async () => {
       try {
         if (typeof store.getSeoSyncState === 'function') {
+          const sharedBlock = await getYouTubeDataApiQuotaBlock(store, now());
+          if (sharedBlock) {
+            dailyQuotaBlockedUntil = sharedBlock.blockedUntil;
+            retryAfter = sharedBlock.blockedUntil;
+            return;
+          }
           const state = await store.getSeoSyncState();
           const blockedUntil = Date.parse(state?.youtubeDataApiBlockedUntil || '');
           if (Number.isFinite(blockedUntil) && blockedUntil > now()) {
@@ -192,8 +207,8 @@ function createSeoMarket({ store, youtube, env = process.env, logger = console, 
           }
         }
         if (!await youtube.isConnected()) return;
-        const channel = await youtube.ownedChannel();
-        await youtube.assertTargetChannel(channel.id);
+        const channel = await callYouTubeDataApi(store, () => youtube.ownedChannel(), now());
+        await callYouTubeDataApi(store, () => youtube.assertTargetChannel(channel.id), now());
         for (const game of ['ARC Raiders', 'NARAKA: BLADEPOINT']) {
           if (now() < retryAfter) break;
           await research({ title: game, privacyStatus: 'public', channelId: channel.id });

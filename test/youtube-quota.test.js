@@ -3,7 +3,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { youtubeQuotaDate, nextYoutubeQuotaReset, isYouTubeDailyQuotaError,
-  isYouTubeQuotaError, youtubeQuotaRetryAt } = require('../src/youtube-quota');
+  isYouTubeQuotaError, youtubeQuotaRetryAt, getYouTubeDataApiQuotaBlock,
+  isYouTubeDataApiBlocked, recordYouTubeDataApiQuotaBlock, callYouTubeDataApi } = require('../src/youtube-quota');
 
 test('YouTube quota day and reset use Pacific midnight through daylight-saving changes', () => {
   assert.equal(youtubeQuotaDate(Date.parse('2026-10-19T06:59:00Z')), '2026-10-18');
@@ -26,4 +27,74 @@ test('YouTube quota errors are distinguished from short rate limits', () => {
   assert.equal(isYouTubeQuotaError(rate), true);
   assert.equal(youtubeQuotaRetryAt(rate, now), now + 5 * 60 * 1000);
   assert.equal(isYouTubeQuotaError(new Error('Video is private')), false);
+});
+
+
+test('linked YouTube quota message is detected as daily quota exhaustion', () => {
+  const error = new Error('The request cannot be completed because you have exceeded ' +
+    '<a href="/youtube/data/getting-started#quota">quota</a>.');
+  const now = Date.parse('2026-10-19T06:00:00Z');
+  assert.equal(isYouTubeDailyQuotaError(error), true);
+  assert.equal(isYouTubeQuotaError(error), true);
+  assert.equal(youtubeQuotaRetryAt(error, now), Date.parse('2026-10-19T07:00:00Z'));
+});
+
+test('daily quota pause persists across worker instances, does not shorten, and expires at Pacific reset', async () => {
+  let saved = null;
+  const store = {
+    async getYoutubeDataApiQuotaBlock() { return saved && structuredClone(saved); },
+    async saveYoutubeDataApiQuotaBlock(next) {
+      if (!saved || Date.parse(saved.blockedUntil) < Date.parse(next.blockedUntil)) saved = structuredClone(next);
+      return structuredClone(saved);
+    }
+  };
+  const now = Date.parse('2026-10-19T06:00:00Z');
+  const error = new Error('The request cannot be completed because you have exceeded <a>quota</a>.');
+  const block = await recordYouTubeDataApiQuotaBlock(store, error, now);
+  assert.equal(block.persisted, true);
+  assert.equal(block.blockedUntil, Date.parse('2026-10-19T07:00:00Z'));
+  assert.equal(await isYouTubeDataApiBlocked(store, now + 1000), true);
+
+  const rateLimited = { response: { status: 403,
+    data: { error: { errors: [{ reason: 'userRateLimitExceeded' }] } } } };
+  const shorter = await recordYouTubeDataApiQuotaBlock(store, rateLimited, now + 1000);
+  assert.equal(shorter.blockedUntil, block.blockedUntil);
+
+  const restartedWorkerStore = {
+    async getYoutubeDataApiQuotaBlock() { return structuredClone(saved); }
+  };
+  const restored = await getYouTubeDataApiQuotaBlock(restartedWorkerStore, now + 1000);
+  assert.equal(restored.blockedUntil, block.blockedUntil);
+  assert.equal(await getYouTubeDataApiQuotaBlock(restartedWorkerStore, block.blockedUntil), null);
+});
+
+test('after a quota response, subsequent Data API calls pause before invoking YouTube again', async () => {
+  let saved = null;
+  const store = {
+    async getYoutubeDataApiQuotaBlock() { return saved && structuredClone(saved); },
+    async saveYoutubeDataApiQuotaBlock(next) { saved = structuredClone(next); return structuredClone(saved); }
+  };
+  const now = Date.parse('2026-10-19T06:00:00Z');
+  let calls = 0;
+  const quotaError = new Error('The request cannot be completed because you have exceeded quota.');
+  await assert.rejects(callYouTubeDataApi(store, async () => {
+    calls += 1;
+    throw quotaError;
+  }, now), /exceeded quota/);
+  await assert.rejects(callYouTubeDataApi(store, async () => {
+    calls += 1;
+  }, now + 1000), /paused until/);
+  assert.equal(calls, 1);
+});
+
+
+test('unblocked workers share a short negative cache instead of querying storage for every API call', async () => {
+  let reads = 0;
+  const store = { async getYoutubeDataApiQuotaBlock() { reads += 1; return null; } };
+  const now = Date.parse('2026-10-19T06:00:00Z');
+  assert.equal(await getYouTubeDataApiQuotaBlock(store, now), null);
+  assert.equal(await getYouTubeDataApiQuotaBlock(store, now + 500), null);
+  assert.equal(reads, 1);
+  assert.equal(await getYouTubeDataApiQuotaBlock(store, now + 1000), null);
+  assert.equal(reads, 2);
 });
