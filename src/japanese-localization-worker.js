@@ -2,6 +2,7 @@
 
 const { normalizeJapaneseChannelLocalization } = require('./channel-localization');
 const { translateJapaneseVideoLocalizations } = require('./japanese-translation');
+const { youtubeQuotaDate, callYouTubeDataApi, getYouTubeDataApiQuotaBlock } = require('./youtube-quota');
 
 const MAX_TRANSLATION_BATCH = 5;
 const VIDEO_PAGE_SIZE = 50;
@@ -77,7 +78,7 @@ function createJapaneseLocalizationWorker({
   let lastRunAt = 0;
 
   const timestamp = () => new Date(now()).toISOString();
-  const today = () => timestamp().slice(0, 10);
+  const today = () => youtubeQuotaDate(now());
 
   async function readState() {
     return normalizeState(await store.getJapaneseLocalizationAutopilotState());
@@ -113,6 +114,13 @@ function createJapaneseLocalizationWorker({
       state.updatesToday = 0;
     }
     if (state.retryAfter && Date.parse(state.retryAfter) > now()) return state;
+    const globalQuotaBlock = await getYouTubeDataApiQuotaBlock(store, now());
+    if (globalQuotaBlock) {
+      state.status = 'quota_wait';
+      state.retryAfter = new Date(globalQuotaBlock.blockedUntil).toISOString();
+      state.lastError = 'YouTube Data API quota paused until ' + state.retryAfter;
+      return writeState(state);
+    }
     if (state.updatesToday >= dailyLimit) {
       state.status = 'quota_wait';
       state.lastError = null;
@@ -150,13 +158,16 @@ function createJapaneseLocalizationWorker({
       attemptedThisRun += 1;
       try {
         if (kind === 'channel') {
-          await youtube.updateJapaneseChannelLocalization({ id: item.id, etag: item.etag }, localization);
+          await callYouTubeDataApi(store, () => youtube.updateJapaneseChannelLocalization(
+            { id: item.id, etag: item.etag }, localization), now());
           stats.channel += 1;
         } else if (kind === 'video') {
-          await youtube.updateJapaneseVideoLocalization({ id: item.id, etag: item.etag }, localization);
+          await callYouTubeDataApi(store, () => youtube.updateJapaneseVideoLocalization(
+            { id: item.id, etag: item.etag }, localization), now());
           stats.videos += 1;
         } else {
-          await youtube.updateJapanesePlaylistLocalization({ id: item.id, etag: item.etag }, localization);
+          await callYouTubeDataApi(store, () => youtube.updateJapanesePlaylistLocalization(
+            { id: item.id, etag: item.etag }, localization), now());
           stats.playlists += 1;
         }
         state.updatesToday += 1;
@@ -187,7 +198,7 @@ function createJapaneseLocalizationWorker({
       }
 
       if (remaining() > 0 && await stateIsEnabled()) {
-        const channel = await youtube.channelSeo();
+        const channel = await callYouTubeDataApi(store, () => youtube.channelSeo(), now());
         if (channel?.id && channel.title?.trim() && channel.description?.trim() &&
             !hasJapaneseLocalization(channel)) {
           const translated = await makeTranslations([{
@@ -212,7 +223,7 @@ function createJapaneseLocalizationWorker({
         const inputCursor = cursor;
         let page;
         try {
-          page = await youtube.ownedVideosCursorPage(inputCursor);
+          page = await callYouTubeDataApi(store, () => youtube.ownedVideosCursorPage(inputCursor), now());
         } catch (error) {
           if (inputCursor && Number(error?.status || error?.code) === 400) {
             cursor = null;
@@ -281,7 +292,7 @@ function createJapaneseLocalizationWorker({
       }
 
       if (remaining() > 0) {
-        const playlists = await youtube.listOwnedPlaylists();
+        const playlists = await callYouTubeDataApi(store, () => youtube.listOwnedPlaylists(), now());
         const missing = (Array.isArray(playlists) ? playlists : [])
           .filter((item) => item?.id && !hasJapaneseLocalization(item));
         for (let index = 0; index < missing.length;) {
@@ -315,13 +326,22 @@ function createJapaneseLocalizationWorker({
         : 'paused';
       return await writeState(state);
     } catch (error) {
+      const quotaBlock = error?.youtubeDataApiQuotaBlock || null;
+      if (quotaBlock?.persistenceError) {
+        logger.warn?.('Japanese localization quota pause could not be persisted: ' +
+          String(quotaBlock.persistenceError.message || quotaBlock.persistenceError).slice(0, 200));
+      }
       state = await readState();
-      state.status = state.enabled ? 'error' : 'paused';
+      state.status = state.enabled ? quotaBlock ? 'quota_wait' : 'error' : 'paused';
       state.lastRun = { ...stats };
       state.lastRunFinishedAt = timestamp();
       state.lastError = String(error?.message || 'Japanese localization autopilot failed').slice(0, 300);
-      state.retryAfter = state.enabled ? new Date(now() + errorBackoffMs).toISOString() : null;
-      logger.error?.('Japanese localization autopilot failed:', error?.message || error);
+      state.retryAfter = state.enabled ? quotaBlock
+        ? new Date(quotaBlock.blockedUntil).toISOString()
+        : new Date(now() + errorBackoffMs).toISOString() : null;
+      if (quotaBlock) logger.warn?.('Japanese localization autopilot paused until ' + state.retryAfter +
+        ' after YouTube Data API quota limit');
+      else logger.error?.('Japanese localization autopilot failed:', error?.message || error);
       return await writeState(state);
     } finally {
       running = false;
