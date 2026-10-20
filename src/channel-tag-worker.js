@@ -1,7 +1,8 @@
 'use strict';
 
-const { youtubeQuotaDate } = require('./playlist-auto');
 const { ensureCreatorTag, youtubeTagCharacters, isYouTubeAuthorizationError } = require('./channel-tags');
+const { youtubeQuotaDate, callYouTubeDataApi, getYouTubeDataApiQuotaBlock, isYouTubeQuotaError,
+  recordYouTubeDataApiQuotaBlock } = require('./youtube-quota');
 
 function boundedSetting(value, fallback, maximum) {
   const number = Number(value);
@@ -10,7 +11,8 @@ function boundedSetting(value, fallback, maximum) {
 
 function retryable(error) {
   const status = Number(error?.status || error?.response?.status || error?.code);
-  return isYouTubeAuthorizationError(error) || [408, 409, 412, 425, 429, 500, 502, 503, 504].includes(status) ||
+  return isYouTubeAuthorizationError(error) || isYouTubeQuotaError(error) ||
+    Boolean(error?.youtubeDataApiQuotaBlock) || [408, 409, 412, 425, 429, 500, 502, 503, 504].includes(status) ||
     ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED', 'EPIPE'].includes(error?.code);
 }
 
@@ -59,7 +61,17 @@ function createChannelTagWorker({ store, youtube, env = process.env, logger = co
       progress.lastError = { at: new Date(now()).toISOString(), videoId: videoId || null, message: detail };
       progress.failures = [...(progress.failures || []),
         { at: progress.lastError.at, videoId: videoId || null, message: detail }].slice(-100);
-      if (isYouTubeAuthorizationError(error)) {
+      const quotaBlock = error?.youtubeDataApiQuotaBlock ||
+        (isYouTubeQuotaError(error) ? await recordYouTubeDataApiQuotaBlock(store, error, now()) : null);
+      if (quotaBlock?.persistenceError) {
+        logger.warn?.('Creator tag quota pause could not be persisted: ' +
+          String(quotaBlock.persistenceError.message || quotaBlock.persistenceError).slice(0, 200));
+      }
+      if (quotaBlock) {
+        progress.blockedUntil = new Date(quotaBlock.blockedUntil).toISOString();
+        blocked = true;
+        logger.warn?.('Creator tag sync paused until ' + progress.blockedUntil + ' after YouTube Data API quota limit');
+      } else if (isYouTubeAuthorizationError(error)) {
         progress.blockedUntil = new Date(now() + authCooldownMs).toISOString();
         authorizationRequired = true;
         blocked = true;
@@ -75,10 +87,15 @@ function createChannelTagWorker({ store, youtube, env = process.env, logger = co
     };
 
     try {
-      const owner = channel || await youtube.ownedChannel();
+      const quotaBlock = await getYouTubeDataApiQuotaBlock(store, now());
+      if (quotaBlock) {
+        return { state: rootState, blocked: true,
+          quotaBlockedUntil: new Date(quotaBlock.blockedUntil).toISOString() };
+      }
+      const owner = channel || await callYouTubeDataApi(store, () => youtube.ownedChannel(), now());
       if (!owner?.id || !owner?.uploads) throw new Error('YouTube channel uploads playlist is unavailable');
       if (!progress || progress.channelId !== owner.id) progress = freshState(owner.id);
-      await youtube.assertTargetChannel(owner.id);
+      await callYouTubeDataApi(store, () => youtube.assertTargetChannel(owner.id), now());
       if (progress.lastError && isYouTubeAuthorizationError(progress.lastError)) {
         progress.lastError = null;
         progress.blockedUntil = null;
@@ -112,7 +129,7 @@ function createChannelTagWorker({ store, youtube, env = process.env, logger = co
       }
 
       if (!progress.pendingIds?.length) {
-        const page = await youtube.uploadsPage(owner.uploads, progress.cursor || undefined);
+        const page = await callYouTubeDataApi(store, () => youtube.uploadsPage(owner.uploads, progress.cursor || undefined), now());
         progress.pendingIds = (page.ids || []).slice();
         progress.nextPageToken = page.nextPageToken || null;
         if (!progress.pendingIds.length) {
@@ -126,7 +143,7 @@ function createChannelTagWorker({ store, youtube, env = process.env, logger = co
       }
 
       const ids = progress.pendingIds.slice(0, 50);
-      const videos = await youtube.videoMetadata(ids);
+      const videos = await callYouTubeDataApi(store, () => youtube.videoMetadata(ids), now());
       const byId = new Map((videos || []).map((item) => [item.id, item]));
       for (const id of ids) {
         if (writesThisRun >= perRunLimit || progress.writesToday >= dailyLimit) break;
@@ -182,7 +199,7 @@ function createChannelTagWorker({ store, youtube, env = process.env, logger = co
         writesThisRun += 1;
         await persist();
         try {
-          await youtube.updateVideoTags(item, owner.id);
+          await callYouTubeDataApi(store, () => youtube.updateVideoTags(item, owner.id), now());
           progress.pendingIds = progress.pendingIds.filter((pendingId) => pendingId !== id);
           progress.tagged += 1;
           taggedThisRun += 1;
@@ -221,7 +238,7 @@ function createChannelTagWorker({ store, youtube, env = process.env, logger = co
         typeof youtube.listOwnedBroadcasts !== 'function') return;
     let broadcasts;
     try {
-      broadcasts = await youtube.listOwnedBroadcasts();
+      broadcasts = await callYouTubeDataApi(store, () => youtube.listOwnedBroadcasts(), now());
     } catch (error) {
       await fail(null, error);
       return;
@@ -237,7 +254,7 @@ function createChannelTagWorker({ store, youtube, env = process.env, logger = co
       if (getWrites() >= runLimit || progress.writesToday >= dayLimit) break;
       let videos;
       try {
-        videos = await youtube.videoMetadata(activeIds.slice(offset, offset + 50));
+        videos = await callYouTubeDataApi(store, () => youtube.videoMetadata(activeIds.slice(offset, offset + 50)), now());
       } catch (error) {
         await fail(null, error);
         return;
@@ -253,7 +270,7 @@ function createChannelTagWorker({ store, youtube, env = process.env, logger = co
         setWrites(getWrites() + 1);
         await persist();
         try {
-          await youtube.updateVideoTags(video, owner.id);
+          await callYouTubeDataApi(store, () => youtube.updateVideoTags(video, owner.id), now());
           progress.tagged += 1;
           onTagged();
           progress.lastError = null;
@@ -274,8 +291,9 @@ function createChannelTagWorker({ store, youtube, env = process.env, logger = co
       scheduled = false;
       lastRun = now();
       try {
+        if (await getYouTubeDataApiQuotaBlock(store, now())) return;
         if (typeof youtube.isConnected === 'function' && !await youtube.isConnected()) return;
-        const owner = await youtube.ownedChannel();
+        const owner = await callYouTubeDataApi(store, () => youtube.ownedChannel(), now());
         const state = await store.getSeoSyncState();
         const result = await run(owner, state);
         if (result.authorizationRequired) authBlockedUntil = now() + authCooldownMs;
