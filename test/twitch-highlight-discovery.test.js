@@ -254,7 +254,7 @@ test('creates one private-pipeline batch from Amaana-discovered Twitch clip evid
   assert.equal(h.drafts[0].highlights.reduce((sum, item) => sum + item.duration, 0), 720);
   assert.equal(h.drafts[0].shortCandidateIndexes.length, 2);
   assert.deepEqual(h.enqueued, ['batch-1']);
-  assert.equal(h.calls.vodListOptions.first, 20);
+  assert.equal(h.calls.vodListOptions.first, 100);
 });
 
 test('does not queue a 12-minute batch when the robust quality floor leaves only weak footage', async () => {
