@@ -4,7 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { isYouTubeUploadLimitError, isDefiniteYouTubeUploadRejection,
   isRetryableYouTubeUploadRejection, isUploadRetryCoolingDown,
-  isOwnedPrivateYouTubeVideo, buildUploadReconciliationPatch,
+  canRetryTwitchDraft, isOwnedPrivateYouTubeVideo, buildUploadReconciliationPatch,
   findDueTwitchVodRetries, findDueTwitchHighlightRetryParents,
   recoverInterruptedYouTubeUploads } = require('../src/draft-recovery');
 
@@ -147,4 +147,21 @@ test('manual retry cannot bypass a future provider backoff', () => {
     nextClipAttemptAt: '2026-10-21T12:01:00Z' }, now), true);
   assert.equal(isUploadRetryCoolingDown({ status: 'clip_retry_wait',
     nextClipAttemptAt: '2026-10-21T11:59:00Z' }, now), false);
+});
+
+
+test('cannot blindly retry uncertain uploads or bypass a future upload-limit deadline', () => {
+  const now = Date.parse('2026-10-21T12:00:00Z');
+  assert.equal(canRetryTwitchDraft({ sourceType: 'twitch_highlight_batch',
+    status: 'clip_upload_uncertain', error: 'check YouTube' }, now), false);
+  assert.equal(canRetryTwitchDraft({ sourceType: 'twitch_vod',
+    status: 'uploading_private_to_youtube' }, now), false);
+  assert.equal(canRetryTwitchDraft({ sourceType: 'twitch_highlight_batch',
+    status: 'clip_retry_wait', error: 'uploadLimitExceeded',
+    nextClipAttemptAt: '2026-10-22T12:00:00Z' }, now), false);
+  assert.equal(canRetryTwitchDraft({ sourceType: 'twitch_highlight_batch',
+    status: 'clip_retry_wait', error: 'uploadLimitExceeded',
+    nextClipAttemptAt: '2026-10-21T11:59:00Z' }, now), true);
+  assert.equal(canRetryTwitchDraft({ sourceType: 'twitch_vod',
+    status: 'clip_failed' }, now), true);
 });
