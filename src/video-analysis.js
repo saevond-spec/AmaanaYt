@@ -198,7 +198,7 @@ Moment times are approximate suggestions for human review, never verified chapte
     let response = await send(requestedModel);
     if (response.status === 429) {
       let error = await providerError(response);
-      if (!isGeminiDailyQuotaError(error) && error.retryAfterMs <= 60000) {
+      if (!isGeminiDailyQuotaError(error) && error.retryAfterPresent && error.retryAfterMs <= 60000) {
         await sleep(error.retryAfterMs);
         response = await send(requestedModel);
         if (response.status === 429) error = await providerError(response);
