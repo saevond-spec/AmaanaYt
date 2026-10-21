@@ -289,31 +289,52 @@ async function listClipsForVod(vod, { maxPages = 10 } = {}) {
   const now = Date.now();
   const createdAt = Date.parse(archive.created_at || '');
   const weekAgo = now - 7 * 24 * 60 * 60 * 1000;
-  const startedAt = Math.max(Number.isFinite(createdAt) ? createdAt - 24 * 60 * 60 * 1000 : weekAgo, weekAgo);
-  if (startedAt >= now) return [];
+  const durationMatch = /^(?:(\\d+)h)?(?:(\\d+)m)?(?:(\\d+)s)?$/i.exec(String(archive.duration || ''));
+  const durationSeconds = durationMatch
+    ? Number(durationMatch[1] || 0) * 3600 + Number(durationMatch[2] || 0) * 60 + Number(durationMatch[3] || 0)
+    : 0;
+  const windows = [];
+  if (Number.isFinite(createdAt)) {
+    const historicalStart = createdAt - 24 * 60 * 60 * 1000;
+    const historicalEnd = Math.min(now,
+      createdAt + (durationSeconds > 0 ? durationSeconds : 24 * 60 * 60) * 1000 + 24 * 60 * 60 * 1000);
+    if (historicalStart < historicalEnd) windows.push({ start: historicalStart, end: historicalEnd });
+    const recentStart = Math.max(weekAgo, historicalEnd);
+    if (recentStart < now) windows.push({ start: recentStart, end: now });
+  } else if (weekAgo < now) {
+    windows.push({ start: weekAgo, end: now });
+  }
   const pageLimitValue = Math.floor(Number(maxPages));
   const pageLimit = Number.isFinite(pageLimitValue) && pageLimitValue > 0
     ? Math.min(10, pageLimitValue) : 10;
   const clips = [];
-  const seenCursors = new Set();
-  let after;
-  for (let page = 0; page < pageLimit; page += 1) {
-    const payload = await helix('/clips', {
-      query: {
-        broadcaster_id: user.id,
-        started_at: new Date(startedAt).toISOString(),
-        ended_at: new Date(now).toISOString(),
-        first: 100,
-        after
+  let pages = 0;
+  for (const window of windows) {
+    const seenCursors = new Set();
+    let after;
+    for (; pages < pageLimit; pages += 1) {
+      const payload = await helix('/clips', {
+        query: {
+          broadcaster_id: user.id,
+          started_at: new Date(window.start).toISOString(),
+          ended_at: new Date(window.end).toISOString(),
+          first: 100,
+          after
+        }
+      });
+      clips.push(...(payload.data || []).filter((clip) => String(clip.video_id || '') === String(archive.id)));
+      const cursor = payload.pagination && payload.pagination.cursor;
+      if (!cursor || seenCursors.has(cursor)) {
+        pages += 1;
+        break;
       }
-    });
-    clips.push(...(payload.data || []).filter((clip) => String(clip.video_id || '') === String(archive.id)));
-    const cursor = payload.pagination && payload.pagination.cursor;
-    if (!cursor || seenCursors.has(cursor)) break;
-    seenCursors.add(cursor);
-    after = cursor;
+      seenCursors.add(cursor);
+      after = cursor;
+    }
+    if (pages >= pageLimit) break;
   }
-  return clips;
+  return [...new Map(clips.filter((clip) => clip && clip.id)
+    .map((clip) => [String(clip.id), clip])).values()];
 }
 
 async function getClip(clipId) {
