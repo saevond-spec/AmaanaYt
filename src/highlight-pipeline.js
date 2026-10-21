@@ -236,7 +236,12 @@ function createHighlightProcessor(dependencies) {
       const failures = [];
       let hasRetryableFailure = false;
       let hasPermanentFailure = false;
+      let providerRetryAfterMs = 0;
       const noteFailure = (label, error, maxLength = 250) => {
+        const retryAfterMs = Number(error && error.retryAfterMs);
+        if (Number.isFinite(retryAfterMs) && retryAfterMs > providerRetryAfterMs) {
+          providerRetryAfterMs = retryAfterMs;
+        }
         const reason = cleanText(error && error.message || 'Production step failed', maxLength);
         failures.push(label + ': ' + reason);
         if (isTransientError(error)) hasRetryableFailure = true;
@@ -598,7 +603,8 @@ function createHighlightProcessor(dependencies) {
       }
       const productionReady = localProductionReady && youtubeProcessingReady;
       const maxAttemptsAllowed = Number.isSafeInteger(maxAutoAttempts) && maxAutoAttempts > 0 ? maxAutoAttempts : 12;
-      const retryDelay = Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attemptCount - 1)));
+      const retryDelay = Math.max(providerRetryAfterMs,
+        Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attemptCount - 1))));
       if (!productionReady) {
         const canAutoRetry = hasRetryableFailure && !hasPermanentFailure && attemptCount < maxAttemptsAllowed;
         const nextClipAttemptAt = canAutoRetry ? new Date(now() + retryDelay).toISOString() : null;
