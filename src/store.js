@@ -193,6 +193,38 @@ async function addDraft(draft) {
   return draft;
 }
 
+async function addHighlightShortDraft(parentId, claimToken, draft) {
+  await init();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      'SELECT payload FROM amaana_drafts WHERE id = $1 FOR UPDATE', [parentId]);
+    const parent = result.rows[0]?.payload;
+    const leaseUntil = Date.parse(parent?.retryLeaseUntil || '');
+    if (!parent || parent.sourceType !== 'twitch_highlight_batch' ||
+        parent.status !== 'creating_shorts' || !parent.youtubeVideoId ||
+        parent.productionState === 'excluded' || parent.excludedAt ||
+        parent.retryLeaseClaimToken !== String(claimToken || '') ||
+        !Number.isFinite(leaseUntil) || leaseUntil <= Date.now() ||
+        draft?.sourceType !== 'twitch_highlight_short' || draft.parentId !== parentId) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    await client.query(
+      'INSERT INTO amaana_drafts (id, payload) VALUES ($1, $2::jsonb)',
+      [draft.id, JSON.stringify(draft)]
+    );
+    await client.query('COMMIT');
+    return draft;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function updateDraft(id, patch) {
   await init();
   const client = await pool.connect();
@@ -212,6 +244,76 @@ async function updateDraft(id, patch) {
     await client.query(
       'UPDATE amaana_drafts SET payload = $2::jsonb, updated_at = NOW() WHERE id = $1',
       [id, JSON.stringify(updated)]
+    );
+    await client.query('COMMIT');
+    return updated;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function updateDraftWithRetryLease(id, claimToken, patch) {
+  await init();
+  if (!claimToken) return null;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query('SELECT payload FROM amaana_drafts WHERE id = $1 FOR UPDATE', [id]);
+    const current = result.rows[0]?.payload;
+    const leaseUntil = Date.parse(current?.retryLeaseUntil || '');
+    if (!current || current.retryLeaseClaimToken !== String(claimToken) ||
+        !Number.isFinite(leaseUntil) || leaseUntil <= Date.now() ||
+        current.status === 'excluded_by_owner' || current.productionState === 'excluded' ||
+        current.excludedAt) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    const updated = { ...current, ...patch, updatedAt: new Date().toISOString() };
+    await client.query(
+      'UPDATE amaana_drafts SET payload = $2::jsonb, updated_at = NOW() WHERE id = $1',
+      [id, JSON.stringify(updated)]
+    );
+    await client.query('COMMIT');
+    return updated;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function reserveHighlightShortUpload(parentId, claimToken, shortId, patch) {
+  await init();
+  if (!claimToken) return null;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const parentResult = await client.query(
+      'SELECT payload FROM amaana_drafts WHERE id = $1 FOR UPDATE', [parentId]);
+    const parent = parentResult.rows[0]?.payload;
+    const leaseUntil = Date.parse(parent?.retryLeaseUntil || '');
+    const childResult = await client.query(
+      'SELECT payload FROM amaana_drafts WHERE id = $1 FOR UPDATE', [shortId]);
+    const child = childResult.rows[0]?.payload;
+    if (!parent || parent.sourceType !== 'twitch_highlight_batch' ||
+        parent.status !== 'creating_shorts' || !parent.youtubeVideoId ||
+        parent.productionState === 'excluded' || parent.excludedAt ||
+        parent.retryLeaseClaimToken !== String(claimToken) ||
+        !Number.isFinite(leaseUntil) || leaseUntil <= Date.now() ||
+        !child || child.sourceType !== 'twitch_highlight_short' || child.parentId !== parentId ||
+        child.status === 'excluded_by_owner' || child.productionState === 'excluded' || child.excludedAt ||
+        !['clip_queued', 'clip_retry_wait', 'clip_failed'].includes(child.status)) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    const updated = { ...child, ...patch, updatedAt: new Date().toISOString() };
+    await client.query(
+      'UPDATE amaana_drafts SET payload = $2::jsonb, updated_at = NOW() WHERE id = $1',
+      [shortId, JSON.stringify(updated)]
     );
     await client.query('COMMIT');
     return updated;
@@ -416,31 +518,52 @@ async function releaseHighlightRetryLease(id, claimToken) {
   return result.rows[0]?.payload || null;
 }
 
-async function excludeDrafts(ids, reason = 'owner_excluded_non_gameplay_test') {
+async function excludeDrafts(ids, reason = 'owner_excluded_non_gameplay_test', rootId = null) {
   if (!Array.isArray(ids) || ids.some((id) =>
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(id)))) {
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(id))) ||
+      (rootId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i.test(String(rootId)))) {
     throw Object.assign(new Error('Valid draft IDs are required for exclusion'), { status: 400 });
   }
-  const uniqueIds = [...new Set(ids.map(String))];
-  if (!uniqueIds.length) return [];
+  const uniqueIds = new Set(ids.map(String));
+  if (rootId) uniqueIds.add(String(rootId));
+  if (!uniqueIds.size) return [];
   await init();
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    if (rootId) {
+      const root = await client.query(
+        'SELECT id FROM amaana_drafts WHERE id = $1 FOR UPDATE', [rootId]);
+      if (!root.rowCount) {
+        throw Object.assign(new Error('The Twitch VOD no longer exists; refresh and retry.'), { status: 409 });
+      }
+      // Short creation and upload reservation lock the parent before the child. Use
+      // the same order and discover children only after owning the parent lock.
+      const children = await client.query(
+        'SELECT id FROM amaana_drafts WHERE payload->>\'parentId\' = $1 ORDER BY id FOR UPDATE',
+        [String(rootId)]);
+      for (const row of children.rows) uniqueIds.add(String(row.id));
+    }
+    const expandedIds = [...uniqueIds];
     const result = await client.query(
       'SELECT id, payload FROM amaana_drafts WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE',
-      [uniqueIds]
+      [expandedIds]
     );
-    if (result.rows.length !== uniqueIds.length) {
+    if (result.rows.length !== expandedIds.length) {
       throw Object.assign(new Error('One or more related drafts no longer exist; refresh and retry.'), { status: 409 });
+    }
+    if (rootId && result.rows.some((row) => String(row.id) !== String(rootId) &&
+        row.payload.parentId !== String(rootId))) {
+      throw Object.assign(new Error('Exclusion included a draft outside this VOD group.'), { status: 409 });
     }
     const lockedDrafts = result.rows.map((row) => row.payload);
     if (hasProtectedPublication(lockedDrafts)) {
       throw Object.assign(new Error('A related video is published or scheduled; exclusion left the group unchanged.'), { status: 409 });
     }
     if (lockedDrafts.some((draft) =>
-      ['creating_twitch_clip', 'uploading_private_to_youtube'].includes(draft.status))) {
-      throw Object.assign(new Error('A Twitch clip or private YouTube upload is in progress; wait for it to finish before excluding this group.'), { status: 409 });
+      ['creating_twitch_clip', 'creating_twitch_clips', 'uploading_private_to_youtube',
+        'publishing'].includes(draft.status))) {
+      throw Object.assign(new Error('A Twitch clip, YouTube upload, or publication is in progress; wait for it to finish before excluding this group.'), { status: 409 });
     }
     const excludedAt = new Date().toISOString();
     const updated = [];
@@ -1179,7 +1302,10 @@ module.exports = {
   listDrafts,
   getDraft,
   addDraft,
+  addHighlightShortDraft,
   updateDraft,
+  updateDraftWithRetryLease,
+  reserveHighlightShortUpload,
   updateDraftIfUnchanged,
   claimTwitchVodDraft,
   claimHighlightRetryParent,
