@@ -299,7 +299,7 @@ async function listClipsForVod(vod, { maxPages = 10 } = {}) {
     const historicalEnd = Math.min(now,
       createdAt + (durationSeconds > 0 ? durationSeconds : 24 * 60 * 60) * 1000 + 24 * 60 * 60 * 1000);
     if (historicalStart < historicalEnd) windows.push({ start: historicalStart, end: historicalEnd });
-    const recentStart = Math.max(weekAgo, historicalEnd);
+    const recentStart = weekAgo;
     if (recentStart < now) windows.push({ start: recentStart, end: now });
   } else if (weekAgo < now) {
     windows.push({ start: weekAgo, end: now });
