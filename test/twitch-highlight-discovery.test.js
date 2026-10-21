@@ -708,6 +708,43 @@ test('does not call Twitch Helix while the Amaana Twitch connection is disconnec
   assert.equal(h.calls.clipList, 0);
 });
 
+test('ended live capture with a persisted 429 hands off to archived VOD analysis', async () => {
+  let clock = Date.parse('2026-10-19T15:00:00.000Z');
+  const streamStartedAt = clock - 60 * MINUTE;
+  let live = true;
+  const h = harness({
+    vods: [makeVod('9001', { user_id: '1001', stream_id: '7777',
+      created_at: new Date(streamStartedAt).toISOString() })],
+    liveBroadcast: () => live ? makeLiveBroadcast(clock, streamStartedAt) : null,
+    liveCreateError: Object.assign(new Error('Twitch rate limit'), {
+      status: 429, retryAfterMs: 120_000
+    }),
+    video: {
+      async inspectMedia() { return { durationSeconds: 60, width: 1280, height: 720 }; },
+      async verifyGameplay() {
+        return { verified: true, totalFrames: 5, activeGameplayFrames: 5,
+          confidence: 0.95, gameName: 'Test Game', model: 'fixture' };
+      }
+    },
+    startAt: clock, now: () => clock, targetDurationSeconds: 60
+  });
+
+  const failedCapture = await h.discovery.runLive();
+  assert.equal(failedCapture.status, 'capture_failed');
+  assert.ok(Number.isFinite(h.state.liveSessions['7777'].pendingCaptureOffset));
+  live = false;
+  clock += 180_000;
+  h.setNow(clock);
+
+  const ended = await h.discovery.runLive();
+  assert.equal(ended.status, 'not_live');
+  assert.equal(ended.pendingCapturesRecovered, 1);
+  assert.equal(h.calls.vodGet, 1);
+  assert.equal(h.calls.clipList, 1, 'the archived VOD fallback must analyze the ended stream');
+  assert.equal(h.state.liveSessions['7777'].pendingCaptureOffset, null);
+  assert.equal(h.state.liveSessions['7777'].pendingCaptureRecoveryStatus, 'no_gameplay_candidates');
+});
+
 test('five-year daily rescan projection stays bounded for old VODs', async () => {
   const vod = makeVod('1001', { created_at: '2019-12-20T00:00:00.000Z' });
   const startAt = Date.parse('2020-01-01T00:00:00.000Z');
