@@ -49,8 +49,16 @@ function createBatchQueue(processJob, options = {}) {
   }
 
   function enqueue(id, options = null) {
-    if (id === null || id === undefined || queuedIds.has(String(id))) return false;
+    if (id === null || id === undefined) return false;
     const value = String(id);
+    if (queuedIds.has(value)) {
+      const pending = jobs.find((job) => job.id === value);
+      if (pending && options && options.retryLeaseClaimToken) {
+        pending.options = { ...(pending.options || {}), ...options };
+        return true;
+      }
+      return false;
+    }
     queuedIds.add(value);
     jobs.push({ id: value, options });
     requestDrain();
