@@ -14,6 +14,14 @@ function isYouTubeUploadLimitError(error) {
   return /uploadlimitexceeded|daily.?limit.?exceeded.{0,80}upload|upload.{0,80}daily.?limit/.test(detail);
 }
 
+function findDueTwitchVodRetries(drafts, now = Date.now()) {
+  if (!Array.isArray(drafts)) return [];
+  return drafts.filter((draft) => draft?.sourceType === 'twitch_vod' &&
+    draft.status === 'clip_retry_wait' &&
+    Number.isFinite(Date.parse(draft.nextClipAttemptAt || '')) &&
+    Date.parse(draft.nextClipAttemptAt) <= Number(now));
+}
+
 async function recoverInterruptedYouTubeUploads(drafts, updateDraft, onError = () => {}) {
   if (!Array.isArray(drafts) || typeof updateDraft !== 'function') {
     throw new TypeError('Drafts and an update function are required');
@@ -46,4 +54,4 @@ async function recoverInterruptedYouTubeUploads(drafts, updateDraft, onError = (
 }
 
 module.exports = { isYouTubeUploadLimitError, YOUTUBE_UPLOAD_LIMIT_RETRY_MS,
-  recoverInterruptedYouTubeUploads };
+  findDueTwitchVodRetries, recoverInterruptedYouTubeUploads };
