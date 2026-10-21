@@ -46,6 +46,11 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     lastAiRequestStartedAt = Date.now();
   }
   const analysisEnabled = env.ENABLE_VIDEO_ANALYSIS === 'true';
+  const VIDEO_ANALYSIS_FAILURE_RETRY_MS = 24 * 60 * 60 * 1000;
+  const seoUsesGemini = (env.SEO_AI_BASE_URL || '').startsWith('https://generativelanguage.googleapis.com/');
+  const configuredAnalysisApiKey = env.VIDEO_ANALYSIS_API_KEY || (seoUsesGemini ? env.SEO_AI_API_KEY : null);
+  const analysisSharesSeoQuota = Boolean(seoUsesGemini && configuredAnalysisApiKey &&
+    configuredAnalysisApiKey === env.SEO_AI_API_KEY);
   const autoPublishEnabled = env.SEO_AUTO_PUBLISH === 'true' &&
     typeof store.listSeoAutoCandidates === 'function' && typeof youtube.updateVideoSeo === 'function';
   const publisher = autoPublishEnabled ? createSeoPublisher({ store, youtube, logger }) : null;
@@ -93,7 +98,9 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       }
       return analysis;
     } catch (error) {
-      logger.warn?.(`analysis_failed ${id}: ${error.status ? `HTTP ${error.status}` : error.message}`);
+      const providerDetail = [error.providerCode, error.providerMessage].filter(Boolean).join(': ');
+      logger.warn?.(`analysis_failed ${id}: ${error.status ? 'HTTP ' + error.status : error.message}` +
+        (providerDetail ? ` (${providerDetail})` : ''));
       if ([429, 503].includes(error.status)) {
         state.consecutiveAnalysis503s = error.status === 503 ? (state.consecutiveAnalysis503s || 0) + 1 : 0;
         const pauseMs = error.status === 429
@@ -101,6 +108,21 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           : Math.min(120, 15 * 2 ** state.consecutiveAnalysis503s) * 60 * 1000;
         state.videoAnalysisBlockedUntil = new Date(Date.now() + pauseMs).toISOString();
         await store.saveSeoSyncState(state);
+      } else if ([400, 401, 403, 404].includes(Number(error.status)) &&
+          typeof store.markVideoAnalysisFailure === 'function') {
+        const retryAfter = new Date(Date.now() + VIDEO_ANALYSIS_FAILURE_RETRY_MS).toISOString();
+        await store.markVideoAnalysisFailure(id, {
+          status: Number(error.status),
+          providerCode: error.providerCode || '',
+          message: error.providerMessage || error.message,
+          retryAfter
+        }).catch((saveError) => logger.error?.('Failed to persist video-analysis failure for ' + id +
+          ': ' + saveError.message));
+      }
+      if (error.status === 429 && analysisSharesSeoQuota) {
+        // Both calls spend against the same Gemini project/key; don't issue a second request in this run.
+        error.sharedProviderRateLimit = true;
+        throw error;
       }
       return null; // Metadata-only generation still runs after analysis fails.
     }
@@ -453,11 +475,12 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
             error.status ? `route=${error.route || 'unknown'} contentType=${error.contentType || 'unknown'}` : '');
           const balanceBlocked = error.status === 402;
           const transientProviderError = [408, 429, 500, 502, 503, 504].includes(error.status);
+          const sharedProviderBlock = error.sharedProviderRateLimit === true;
           await store.finishSeoVideo(job.videoId, job.claimToken, null, {
             message: String(error.message).slice(0, 300), attempts: job.attempts,
-            retry: balanceBlocked || transientProviderError || job.attempts < 3
+            retry: balanceBlocked || transientProviderError || sharedProviderBlock || job.attempts < 3
           });
-          if (balanceBlocked || transientProviderError) {
+          if (balanceBlocked || transientProviderError || sharedProviderBlock) {
             state.consecutive503s = error.status === 503 ? (state.consecutive503s || 0) + 1 : 0;
             const pauseMs = balanceBlocked ? 120 * 60 * 1000 : error.status === 429
               ? error.retryAfterPresent ? error.retryAfterMs : 60 * 60 * 1000

@@ -362,7 +362,7 @@ test('publisher rejects a wrong channel, changed metadata, and exhausted daily b
     { channelId: 'another-channel', title: row.source.title, budget: 0,
       reason: /not on the connected channel/, state: 'skipped' },
     { channelId: 'channel-1', title: 'Owner edited this video', budget: 0,
-      reason: /metadata changed/, state: 'retry' },
+      reason: /metadata changed.*owner review/i, state: 'skipped' },
     { channelId: 'channel-1', title: row.source.title, budget: 50,
       reason: /budget reached/, state: 'deferred' }
   ];
@@ -396,6 +396,78 @@ test('publisher rejects a wrong channel, changed metadata, and exhausted daily b
     else assert.equal(outcome.state, value.state);
   }
   assert.ok(info.some((message) => /Pacific quota day resets/.test(message)));
+});
+
+test('a stale SEO package is held after owner metadata changes and is not retried', async () => {
+  const row = item();
+  let currentReads = 0;
+  let writes = 0;
+  const store = {
+    getSeoVideo: async () => row,
+    getSeoSyncState: async () => ({ channelId: 'channel-1' }),
+    markSeoAutoResult: async (_id, result) => { row.autoResult = result; }
+  };
+  const youtube = {
+    ownedChannel: async () => ({ id: 'channel-1' }),
+    assertTargetChannel: async () => {},
+    getVideo: async () => {
+      currentReads += 1;
+      return { snippet: { ...row.source, title: 'Owner edited this video', categoryId: '20',
+        liveBroadcastContent: 'none' }, status: { privacyStatus: 'public' } };
+    },
+    updateVideoSeo: async () => { writes += 1; },
+    setThumbnail: async () => { writes += 1; }
+  };
+  const publisher = createSeoPublisher({ store, youtube, logger: { info() {}, warn() {} } });
+
+  const first = await publisher.publishVideo(row.videoId);
+  const second = await publisher.publishVideo(row.videoId);
+
+  assert.equal(first.state, 'skipped');
+  assert.match(first.reason, /owner review is required/i);
+  assert.equal(first.thumbnailState, 'skipped');
+  assert.equal(second.state, 'skipped');
+  assert.equal(currentReads, 1, 'the same stale package should not re-read or retry every scan');
+  assert.equal(writes, 0, 'owner-edited metadata must never be overwritten');
+});
+
+test('publisher retries a missing source thumbnail after the existing one-hour backoff', async () => {
+  const row = item();
+  let savedResult = null;
+  let fetches = 0;
+  let thumbnailWrites = 0;
+  const store = {
+    getSeoVideo: async () => row,
+    getSeoSyncState: async () => ({ channelId: 'channel-1' }),
+    seoUpdatesToday: async () => 0,
+    markSeoApplied: async () => {},
+    upsertSeoVideo: async () => {},
+    markSeoAutoResult: async (_id, result) => { savedResult = result; row.autoResult = result; }
+  };
+  const youtube = {
+    ownedChannel: async () => ({ id: 'channel-1' }),
+    assertTargetChannel: async () => {},
+    getVideo: async () => ({ snippet: { ...row.source, channelId: 'channel-1', categoryId: '20',
+      liveBroadcastContent: 'none', thumbnails: {
+        high: { url: 'https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg', width: 480, height: 360 },
+        standard: { url: 'https://i.ytimg.com/vi/abcdefghijk/sddefault.jpg', width: 640, height: 480 }
+      } }, status: { privacyStatus: 'public' } }),
+    updateVideoSeo: async () => {},
+    setThumbnail: async () => { thumbnailWrites += 1; }
+  };
+  const publisher = createSeoPublisher({
+    store, youtube, logger: { info() {}, warn() {} },
+    fetchImpl: async () => { fetches += 1; return { ok: false, status: 404 }; }
+  });
+
+  const result = await publisher.publishVideo(row.videoId);
+
+  assert.equal(result.state, 'applied');
+  assert.equal(result.thumbnailState, 'retry');
+  assert.match(result.thumbnailReason, /retry in one hour/i);
+  assert.equal(savedResult.thumbnailState, 'retry');
+  assert.equal(fetches, 2);
+  assert.equal(thumbnailWrites, 0);
 });
 
 test('publisher respects an already applied package and retries temporary API failures', async () => {
@@ -825,7 +897,7 @@ test('permanent permission errors are skipped but quota and transient errors ret
   assert.equal(retryablePublishError({ code: 'ECONNRESET' }), true);
   assert.equal(retryablePublishError({ status: 409, message: 'Metadata changed' }), false);
   assert.equal(retryablePublishError({ status: 409,
-    message: 'YouTube metadata changed since the package was generated' }), true);
+    message: 'YouTube metadata changed since the package was generated' }), false);
   assert.equal(retryablePublishError({ status: 409,
     message: 'Video visibility changed since the catalog scan' }), false);
 });

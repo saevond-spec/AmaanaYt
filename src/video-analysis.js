@@ -50,13 +50,21 @@ function validateAnalysis(raw, durationSeconds, model) {
 }
 
 async function providerError(response) {
-  const error = new Error(`Video analysis provider returned HTTP ${response.status}`);
-  error.status = response.status;
-  if (response.status === 429) {
-    Object.assign(error, retryAfterDetails(response));
-    const body = await response.json().catch(() => null);
-    error.code = body?.error?.code;
+  const error = new Error('Video analysis provider returned HTTP ' + response.status);
+  error.status = Number(response.status);
+  if (error.status === 429) Object.assign(error, retryAfterDetails(response));
+  const body = typeof response.json === 'function' ? await response.json().catch(() => null) : null;
+  const apiError = body?.error && typeof body.error === 'object' ? body.error : {};
+  const providerCode = apiError.status || (typeof apiError.code === 'string' ? apiError.code : '');
+  if (providerCode) error.providerCode = String(providerCode).replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 80);
+  if (apiError.message) {
+    error.providerMessage = String(apiError.message)
+      .replace(/AIza[0-9A-Za-z_-]{20,}/g, '[redacted]')
+      .replace(/((?:api[_ -]?)?key\s*[:=]\s*)\S+/ig, '$1[redacted]')
+      .replace(/(Bearer\s+)\S+/ig, '$1[redacted]')
+      .replace(/\s+/g, ' ').trim().slice(0, 240);
   }
+  if (error.status === 429) error.code = apiError.code;
   return error;
 }
 

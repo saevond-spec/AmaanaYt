@@ -69,6 +69,16 @@ function init() {
         model TEXT NOT NULL,
         analyzed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+      CREATE TABLE IF NOT EXISTS amaana_video_analysis_failures (
+        video_id TEXT PRIMARY KEY REFERENCES amaana_seo_packages(video_id) ON DELETE CASCADE,
+        status INTEGER NOT NULL,
+        provider_code TEXT NOT NULL DEFAULT '',
+        message TEXT NOT NULL DEFAULT '',
+        retry_after TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS amaana_video_analysis_failures_retry_idx
+        ON amaana_video_analysis_failures (retry_after);
       CREATE TABLE IF NOT EXISTS amaana_google_search_snapshots (
         video_id TEXT NOT NULL REFERENCES amaana_seo_packages(video_id) ON DELETE CASCADE,
         period_start DATE NOT NULL,
@@ -720,6 +730,21 @@ async function saveVideoAnalysis(videoId, analysis, model) {
   await pool.query(`INSERT INTO amaana_video_analysis (video_id, analysis, model)
     VALUES ($1, $2::jsonb, $3) ON CONFLICT (video_id) DO NOTHING`,
   [videoId, JSON.stringify(analysis), model]);
+  await pool.query('DELETE FROM amaana_video_analysis_failures WHERE video_id = $1', [videoId]);
+}
+
+async function markVideoAnalysisFailure(videoId, failure) {
+  await init();
+  const retryAfter = new Date(failure?.retryAfter);
+  if (!Number.isFinite(retryAfter.getTime())) throw new Error('Video-analysis failure requires a valid retry time');
+  await pool.query(`INSERT INTO amaana_video_analysis_failures
+    (video_id, status, provider_code, message, retry_after)
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (video_id) DO UPDATE SET status = EXCLUDED.status,
+      provider_code = EXCLUDED.provider_code, message = EXCLUDED.message,
+      retry_after = EXCLUDED.retry_after, updated_at = NOW()`,
+  [videoId, Number(failure.status) || 0, String(failure.providerCode || '').slice(0, 80),
+    String(failure.message || '').slice(0, 240), retryAfter.toISOString()]);
 }
 
 async function seoCounts() {
@@ -908,9 +933,11 @@ async function listSeoNeedsAnalysis(limit = 20) {
   const result = await pool.query(`SELECT p.video_id AS "videoId", p.context
     FROM amaana_seo_packages p
     LEFT JOIN amaana_video_analysis a ON a.video_id = p.video_id
+    LEFT JOIN amaana_video_analysis_failures f ON f.video_id = p.video_id
     WHERE p.status IN ('ready', 'needs_review')
       AND p.source->>'privacyStatus' = 'public'
       AND a.video_id IS NULL
+      AND (f.video_id IS NULL OR f.updated_at < p.generated_at OR f.retry_after <= NOW())
       AND COALESCE(p.context->>'takeaways', '') = ''
       AND p.generated_at < NOW() - INTERVAL '6 hours'
     ORDER BY CASE WHEN p.source->>'viewCount' ~ '^[0-9]+$' THEN 0 ELSE 1 END,
@@ -971,6 +998,7 @@ module.exports = {
   requeueSeoPlaylistAuthorizationFailures,
   getVideoAnalysis,
   saveVideoAnalysis,
+  markVideoAnalysisFailure,
   seoCounts,
   requeueLegacySeoTagFailures,
   updateSeoContext,
