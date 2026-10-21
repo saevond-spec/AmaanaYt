@@ -9,7 +9,7 @@ function isYouTubeUploadLimitError(error) {
   return /uploadlimitexceeded|daily.?limit.?exceeded.{0,80}upload|upload.{0,80}daily.?limit/.test(detail);
 }
 
-async function recoverInterruptedYouTubeUploads(drafts, updateDraft) {
+async function recoverInterruptedYouTubeUploads(drafts, updateDraft, onError = () => {}) {
   if (!Array.isArray(drafts) || typeof updateDraft !== 'function') {
     throw new TypeError('Drafts and an update function are required');
   }
@@ -22,7 +22,14 @@ async function recoverInterruptedYouTubeUploads(drafts, updateDraft) {
       : { status: 'clip_upload_uncertain', productionState: 'manual_reconciliation',
           error: 'YouTube upload was interrupted before its video ID was saved. Check the channel for a private upload before retrying.',
           nextClipAttemptAt: null };
-    const updated = await updateDraft(draft.id, patch);
+    let updated;
+    try {
+      updated = await updateDraft(draft.id, patch);
+    } catch (error) {
+      onError(error, draft);
+    }
+    // Exclude the locally normalized row from automatic resume even if persistence
+    // failed; a subsequent boot will safely retry this reconciliation.
     replacements.set(draft.id, updated || { ...draft, ...patch });
   }
   return drafts.map((draft) => replacements.get(draft?.id) || draft);
