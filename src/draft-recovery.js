@@ -1,5 +1,10 @@
 'use strict';
 
+const YOUTUBE_UPLOAD_LIMIT_RETRY_MS = 24 * 60 * 60 * 1000;
+const RECOVERABLE_YOUTUBE_UPLOAD_TYPES = new Set([
+  'twitch_vod', 'twitch_highlight_batch', 'twitch_highlight_short'
+]);
+
 function isYouTubeUploadLimitError(error) {
   const apiError = error?.response?.data?.error;
   const reasons = Array.isArray(apiError?.errors)
@@ -15,10 +20,15 @@ async function recoverInterruptedYouTubeUploads(drafts, updateDraft, onError = (
   }
   const replacements = new Map();
   for (const draft of drafts) {
-    if (draft?.sourceType !== 'twitch_vod' || draft.status !== 'uploading_private_to_youtube') continue;
+    if (!RECOVERABLE_YOUTUBE_UPLOAD_TYPES.has(draft?.sourceType) ||
+        draft.status !== 'uploading_private_to_youtube') continue;
+    const completedState = draft.sourceType === 'twitch_highlight_batch'
+      ? { status: 'creating_shorts', productionState: 'processing' }
+      : draft.sourceType === 'twitch_highlight_short'
+        ? { status: 'clip_partial', productionState: 'processing' }
+        : { status: 'awaiting_owner_approval', productionState: 'ready' };
     const patch = draft.youtubeVideoId
-      ? { status: 'awaiting_owner_approval', productionState: 'ready',
-          error: null, nextClipAttemptAt: null }
+      ? { ...completedState, error: null, nextClipAttemptAt: null }
       : { status: 'clip_upload_uncertain', productionState: 'manual_reconciliation',
           error: 'YouTube upload was interrupted before its video ID was saved. Check the channel for a private upload before retrying.',
           nextClipAttemptAt: null };
@@ -35,4 +45,5 @@ async function recoverInterruptedYouTubeUploads(drafts, updateDraft, onError = (
   return drafts.map((draft) => replacements.get(draft?.id) || draft);
 }
 
-module.exports = { isYouTubeUploadLimitError, recoverInterruptedYouTubeUploads };
+module.exports = { isYouTubeUploadLimitError, YOUTUBE_UPLOAD_LIMIT_RETRY_MS,
+  recoverInterruptedYouTubeUploads };
