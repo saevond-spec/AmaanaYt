@@ -881,8 +881,8 @@ function createHighlightProcessor(dependencies) {
           Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attemptCount - 1))),
         Number(error.retryAfterMs) > 0 ? Number(error.retryAfterMs) : 0
       );
-      const canAutoRetry = !uploadingWithoutId &&
-        (uploadLimitRejected || isTransientError(error)) && attemptCount < maxAttemptsAllowed;
+      const canAutoRetry = (uploadLimitRejected ||
+        !uploadingWithoutId && isTransientError(error)) && attemptCount < maxAttemptsAllowed;
       if (uploadLimitRejected) {
         message = 'YouTube rejected the upload because the channel upload limit was reached. Retry is queued after a conservative 24-hour wait.';
       }
