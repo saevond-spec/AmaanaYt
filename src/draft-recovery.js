@@ -8,6 +8,26 @@ const RECOVERABLE_YOUTUBE_UPLOAD_TYPES = new Set([
   'twitch_vod', 'twitch_highlight_batch', 'twitch_highlight_short'
 ]);
 
+function computeRetryDelayMs({ attempt = 1, baseDelayMs = 60000, maxDelayMs = 30 * 60 * 1000,
+  minimumDelayMs = 1000, providerRetryAfterMs = 0, seed = '' } = {}) {
+  const attemptNumber = Number.isFinite(Number(attempt)) ? Math.max(1, Math.floor(Number(attempt))) : 1;
+  const base = Number.isFinite(Number(baseDelayMs)) ? Math.max(0, Number(baseDelayMs)) : 60000;
+  const maximum = Number.isFinite(Number(maxDelayMs)) ? Math.max(0, Number(maxDelayMs)) : 30 * 60 * 1000;
+  const exponent = Math.min(30, attemptNumber - 1);
+  const cap = Math.min(maximum, base * (2 ** exponent));
+  let hash = 2166136261;
+  for (const character of String(seed) + ':' + attemptNumber) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  const unit = (hash >>> 0) / 0xffffffff;
+  const jittered = Math.floor(cap / 2 + unit * cap / 2);
+  const minimum = Number.isFinite(Number(minimumDelayMs)) ? Math.max(0, Number(minimumDelayMs)) : 1000;
+  const providerDelay = Number.isFinite(Number(providerRetryAfterMs))
+    ? Math.max(0, Number(providerRetryAfterMs)) : 0;
+  return Math.max(minimum, jittered, providerDelay);
+}
+
 function isYouTubeUploadLimitError(error) {
   const apiError = error?.response?.data?.error;
   const reasons = Array.isArray(apiError?.errors)
@@ -200,5 +220,6 @@ module.exports = { isYouTubeUploadLimitError, isDefiniteYouTubeUploadRejection,
   findDueTwitchVodRetries, findDueTwitchHighlightRetryParents,
   claimDueTwitchHighlightRetryParents, isDueRetryableHighlightShort,
   recoverInterruptedYouTubeUploads, YOUTUBE_UPLOAD_LIMIT_RETRY_MS,
+  computeRetryDelayMs,
   DEFAULT_TWITCH_VOD_MAX_ATTEMPTS, DEFAULT_HIGHLIGHT_MAX_ATTEMPTS,
   DEFAULT_HIGHLIGHT_RETRY_LEASE_MS };
