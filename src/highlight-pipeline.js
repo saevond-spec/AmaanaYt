@@ -1074,7 +1074,7 @@ function createHighlightProcessor(dependencies) {
         batch = { ...batch, ...clearedIntent };
       }
       let message = cleanText(error.message || 'Highlight production failed', 500);
-      const attemptCount = (Number(batch && batch.clipAttemptCount) || 0) + 1;
+      const attemptCount = Math.max(Number(batch && batch.clipAttemptCount) || 0, 1);
       const uploadLimitRejected = isYouTubeUploadLimitError(error);
       const definiteUploadRejection = isDefiniteYouTubeUploadRejection(error);
       const retryableUploadRejection = isRetryableYouTubeUploadRejection(error);
