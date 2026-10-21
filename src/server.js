@@ -553,6 +553,16 @@ async function scheduleDueHighlightRetries() {
         onError: (error, parent) => console.error(
           'Failed to persist retry lease for highlight batch ' + parent.id + ': ' + error.message) }
     );
+    for (const parent of claimedShortRetryParents) {
+      const claimToken = parent.retryLeaseClaimToken;
+      const accepted = enqueueHighlightBatch(parent.id, {
+        retryLeaseClaimToken: claimToken
+      });
+      if (!accepted && typeof store.releaseHighlightRetryLease === 'function') {
+        await store.releaseHighlightRetryLease(parent.id, claimToken);
+        console.warn('Released highlight retry lease after an active queue duplicate: ' + parent.id);
+      }
+    }
     for (const draft of drafts) {
       if (draft.sourceType === 'twitch_highlight_batch' &&
           Number(draft.clipAttemptCount || 0) >= highlightMaxAutoAttempts) continue;
@@ -600,16 +610,6 @@ async function scheduleDueHighlightRetries() {
       const nextClipAttemptAt = new Date(timestamp + 60 * 1000).toISOString();
       await store.updateDraft(draft.id, { nextClipAttemptAt });
       console.info('Moved Twitch metadata retry for batch ' + draft.id + ' forward to ' + nextClipAttemptAt);
-    }
-    for (const parent of claimedShortRetryParents) {
-      const claimToken = parent.retryLeaseClaimToken;
-      const accepted = enqueueHighlightBatch(parent.id, {
-        retryLeaseClaimToken: claimToken
-      });
-      if (!accepted && typeof store.releaseHighlightRetryLease === 'function') {
-        await store.releaseHighlightRetryLease(parent.id, claimToken);
-        console.warn('Released highlight retry lease after an active queue duplicate: ' + parent.id);
-      }
     }
   } catch (error) {
     console.error('Failed to scan scheduled highlight retries:', error.message);
@@ -1359,7 +1359,10 @@ app.post('/api/drafts/:id/reconcile-upload', admin, async (req, res, next) => {
     const patch = buildUploadReconciliationPatch(draft, {
       youtubeVideoId: youtubeVideoId || undefined, confirmNoUpload
     });
-    const updated = await store.updateDraft(draft.id, patch);
+    const updated = await store.updateDraftIfUnchanged(draft.id, draft, patch);
+    if (!updated) {
+      return res.status(409).json({ error: 'Draft changed during reconciliation; refresh it and verify the upload again.' });
+    }
     if (draft.sourceType === 'twitch_highlight_batch') {
       if (youtubeVideoId || confirmNoUpload) enqueueHighlightBatch(draft.id);
     } else if (draft.sourceType === 'twitch_highlight_short') {
@@ -1386,11 +1389,15 @@ app.post('/api/drafts/:id/retry', admin, async (req, res, next) => {
     if (!canRetryTwitchDraft(draft)) {
       return res.status(409).json({ error: 'Only failed Twitch clip jobs outside their retry window can be retried' });
     }
-    const updated = await store.updateDraft(draft.id, {
+    const updated = await store.updateDraftIfUnchanged(draft.id, draft, {
       status: 'clip_queued', productionState: 'queued', productionFailures: [],
       clipAttemptCount: 0, nextClipAttemptAt: null, error: null,
-      uploadRejectionStatus: null
+      uploadRejectionStatus: null,
+      retryLeaseUntil: null, retryLeaseClaimedAt: null, retryLeaseClaimToken: null
     });
+    if (!updated) {
+      return res.status(409).json({ error: 'Draft changed while retrying; refresh it before trying again.' });
+    }
     if (draft.sourceType === 'twitch_highlight_batch') enqueueHighlightBatch(draft.id);
     else enqueueClipProcessing(draft.id);
     res.json(updated);
