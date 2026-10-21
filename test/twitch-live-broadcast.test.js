@@ -81,9 +81,11 @@ test('finds only the connected broadcaster’s active archive VOD', async (t) =>
   });
 
   const broadcast = await twitch.getLiveBroadcast();
+  const liveStartedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const liveEndedAt = new Date().toISOString();
   const clips = await twitch.listRecentLiveClips({
-    startedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
-    endedAt: new Date().toISOString()
+    startedAt: liveStartedAt,
+    endedAt: liveEndedAt
   });
   const archivedVods = await twitch.listRecentArchivedVods({ first: 2, maxPages: 2 });
   const vodClips = await twitch.listClipsForVod(archivedVods[0], { maxPages: 2 });
@@ -92,8 +94,13 @@ test('finds only the connected broadcaster’s active archive VOD', async (t) =>
   assert.deepEqual(clips.map((clip) => clip.id), ['live-clip-1']);
   assert.deepEqual(archivedVods.map((vod) => vod.id), ['8001', '6001']);
   assert.deepEqual(vodClips.map((clip) => clip.id), ['historical-vod-clip']);
-  const vodClipWindowCalls = calls.filter((call) =>
-    call.startsWith('/helix/clips?') && call.includes('first=100') && call.includes('started_at='));
+  const vodClipWindowCalls = calls.filter((call) => {
+    if (!call.startsWith('/helix/clips?')) return false;
+    const url = new URL(call, 'https://api.twitch.test');
+    return url.searchParams.get('first') === '100' &&
+      url.searchParams.get('started_at') &&
+      url.searchParams.get('started_at') !== liveStartedAt;
+  });
   assert.equal(vodClipWindowCalls.length, 2);
   assert.ok(vodClipWindowCalls.some((call) => call.includes('started_at=2024-12-31T00%3A00%3A00.000Z') &&
     call.includes('ended_at=2025-01-02T02%3A00%3A00.000Z')));
