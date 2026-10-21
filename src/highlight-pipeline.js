@@ -722,9 +722,12 @@ function createHighlightProcessor(dependencies) {
       const attemptCount = (Number(batch && batch.clipAttemptCount) || 0) + 1;
       const canAutoRetry = isTransientError(error) && attemptCount <
         (Number.isSafeInteger(maxAutoAttempts) && maxAutoAttempts > 0 ? maxAutoAttempts : 12);
-      const retryDelay = error.code === 'TWITCH_CLIP_METADATA_PENDING'
+      const exponentialRetryDelay = error.code === 'TWITCH_CLIP_METADATA_PENDING'
         ? 2 * 60 * 1000
         : Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attemptCount - 1)));
+      const providerRetryAfterMs = Number(error.retryAfterMs);
+      const retryDelay = Math.max(exponentialRetryDelay,
+        Number.isFinite(providerRetryAfterMs) && providerRetryAfterMs > 0 ? providerRetryAfterMs : 0);
       logError(id, error);
       await store.updateDraft(id, {
         status: canAutoRetry ? 'clip_retry_wait' : 'clip_failed',
