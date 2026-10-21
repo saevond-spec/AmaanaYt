@@ -263,15 +263,19 @@ function nextPacificMidnight(timestamp = Date.now()) {
 }
 
 function isGeminiDailyQuotaError(error) {
-  const detail = [error?.providerReason, error?.providerCode, error?.providerMessage, error?.message]
-    .filter(Boolean).join(' ').toLowerCase();
-  return /\\bquota[_ -]*exceeded\\b|\\bdaily\\s+quota\\b|\\bquota\\b.{0,100}\\bper[- ]day\\b|\\brequests?\\s+per\\s+day\\b/.test(detail);
+  const detail = [error?.providerReason, error?.providerCode, error?.providerMessage,
+    error?.code, error?.message].filter(Boolean).join(' ').toLowerCase();
+  return /\bquota[_ -]*exceeded\b|\bdaily\s+quota\b|\bquota\b.{0,100}\bper[- ]day\b|\brequests?\s+per\s+day\b/.test(detail);
 }
 
 function geminiRetryAfterMs(error, timestamp = Date.now()) {
   const provided = Number(error?.retryAfterMs);
-  if (error?.retryAfterPresent && Number.isFinite(provided) && provided >= 0) return Math.ceil(provided);
-  if (isGeminiDailyQuotaError(error)) return Math.max(0, nextPacificMidnight(timestamp) - timestamp);
+  const hasProviderDelay = error?.retryAfterPresent && Number.isFinite(provided) && provided >= 0;
+  if (isGeminiDailyQuotaError(error)) {
+    const untilReset = Math.max(0, nextPacificMidnight(timestamp) - timestamp);
+    return Math.max(untilReset, hasProviderDelay ? Math.ceil(provided) : 0);
+  }
+  if (hasProviderDelay) return Math.ceil(provided);
   return Number.isFinite(provided) && provided >= 0 ? Math.ceil(provided) : 60000;
 }
 
@@ -383,15 +387,11 @@ DATA: ${JSON.stringify(payload)}`;
     if (remaining) return { ok: false, status: 503, circuitOpen: true, retryAfterMs: remaining };
     const send = nativeRoute ? requestNative : request;
     let result = await send(requestedModel);
-    if (result.status === 429) {
-      const { retryAfterMs } = retryAfterDetails(result);
-      // Long Retry-After periods belong to the worker queue, not an in-flight request.
-      if (retryAfterMs <= 60000) {
-        await sleep(retryAfterMs);
-        result = await send(requestedModel);
-      }
-    }
-    circuitBreaker.record(requestedModel, result.status);
+    const retry = retryAfterDetails(result);
+    // Let the durable worker queue schedule 429/503 retries; avoid burning request
+    // budget with an in-flight retry while provider limits are active.
+    circuitBreaker.record(requestedModel, result.status,
+      retry.retryAfterPresent ? retry.retryAfterMs : undefined);
     return result;
   };
   let response = await checkedRequest(model);
@@ -436,7 +436,14 @@ DATA: ${JSON.stringify(payload)}`;
     if (response.status === 429) {
       Object.assign(error, retryAfterDetails(response));
       const body = await response.json().catch(() => null);
-      error.code = body?.error?.code;
+      const apiError = body?.error && typeof body.error === 'object' ? body.error : {};
+      error.code = apiError.code;
+      error.providerCode = String(apiError.status || '').slice(0, 80);
+      error.providerReason = Array.isArray(apiError.details)
+        ? apiError.details.map((item) => item?.reason || item?.metadata?.quota_metric)
+          .filter(Boolean).join(' ').slice(0, 160) : '';
+      error.providerMessage = String(apiError.message || '').replace(/\s+/g, ' ').slice(0, 240);
+      error.retryAfterMs = geminiRetryAfterMs(error);
     }
     throw error;
   }
