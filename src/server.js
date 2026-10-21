@@ -33,7 +33,7 @@ const { canAddVideoToPlaylist } = require('./youtube-playlists');
 const { parseGoogleSearchConsoleCsv } = require('./google-search-console');
 const { createPlaylistAutoAssigner } = require('./playlist-auto');
 const { isYouTubeUploadLimitError, recoverInterruptedYouTubeUploads,
-  YOUTUBE_UPLOAD_LIMIT_RETRY_MS } = require('./draft-recovery');
+  findDueTwitchVodRetries, YOUTUBE_UPLOAD_LIMIT_RETRY_MS } = require('./draft-recovery');
 const { initializeWithRetry } = require('./retryable-initializer');
 
 for (const name of ['BASE_URL', 'DATABASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SESSION_SECRET', 'TOKEN_ENCRYPTION_KEY', 'AGENT_KEY', 'ADMIN_KEY']) {
@@ -500,9 +500,9 @@ async function scheduleDueHighlightRetries() {
   try {
     const drafts = await store.listDrafts();
     const timestamp = Date.now();
+    const dueTwitchVodRetries = new Set(findDueTwitchVodRetries(drafts, timestamp).map((draft) => draft.id));
     for (const draft of drafts) {
-      if (draft.sourceType === 'twitch_vod' &&
-          draft.status === 'clip_retry_wait' && Date.parse(draft.nextClipAttemptAt || '') <= timestamp) {
+      if (dueTwitchVodRetries.has(draft.id)) {
         enqueueClipProcessing(draft.id);
         continue;
       }
