@@ -430,11 +430,15 @@ DATA: ${JSON.stringify(payload)}`;
     error.status = response.status;
     error.route = native ? 'native' : 'compatible';
     error.contentType = response.headers?.get?.('content-type') || null;
-    if (response.circuitOpen) error.retryAfterMs = response.retryAfterMs;
-    // OpenAI uses HTTP 429 for both temporary rate limits and exhausted credits.
-    // Keep the machine-readable code so the worker can pause only quota failures.
-    if (response.status === 429) {
+    if (response.circuitOpen) {
+      error.retryAfterMs = response.retryAfterMs;
+      error.retryAfterPresent = Number.isFinite(Number(response.retryAfterMs));
+    } else if ([429, 503].includes(response.status)) {
       Object.assign(error, retryAfterDetails(response));
+    }
+    // OpenAI uses HTTP 429 for both temporary rate limits and exhausted credits.
+    // Keep the machine-readable code so the worker can distinguish provider quota failures.
+    if (response.status === 429) {
       const body = await response.json().catch(() => null);
       const apiError = body?.error && typeof body.error === 'object' ? body.error : {};
       error.code = apiError.code;
