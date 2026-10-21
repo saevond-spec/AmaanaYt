@@ -34,7 +34,7 @@ const { parseGoogleSearchConsoleCsv } = require('./google-search-console');
 const { createPlaylistAutoAssigner } = require('./playlist-auto');
 const { isYouTubeUploadLimitError, isDefiniteYouTubeUploadRejection,
   isRetryableYouTubeUploadRejection, isUploadRetryCoolingDown,
-  isOwnedPrivateYouTubeVideo, buildUploadReconciliationPatch,
+  buildUploadReconciliationPatch, canRetryTwitchDraft,
   recoverInterruptedYouTubeUploads, findDueTwitchVodRetries,
   findDueTwitchHighlightRetryParents, YOUTUBE_UPLOAD_LIMIT_RETRY_MS } = require('./draft-recovery');
 const { initializeWithRetry } = require('./retryable-initializer');
@@ -1356,10 +1356,8 @@ app.post('/api/drafts/:id/retry', admin, async (req, res, next) => {
     if (isUploadRetryCoolingDown(draft)) {
       return res.status(409).json({ error: 'This retry is still inside its provider backoff window' });
     }
-    const retryable = ['clip_failed', 'clip_partial', 'clip_retry_wait'].includes(draft.status) ||
-      draft.sourceType === 'twitch_highlight_batch' && Boolean(draft.error);
-    if (!['twitch_vod', 'twitch_highlight_batch'].includes(draft.sourceType) || !retryable) {
-      return res.status(409).json({ error: 'Only failed Twitch clip jobs can be retried' });
+    if (!canRetryTwitchDraft(draft)) {
+      return res.status(409).json({ error: 'Only failed Twitch clip jobs outside their retry window can be retried' });
     }
     const updated = await store.updateDraft(draft.id, {
       status: 'clip_queued', productionState: 'queued', productionFailures: [],
