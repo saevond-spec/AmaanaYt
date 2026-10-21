@@ -530,6 +530,9 @@ async function scheduleDueHighlightRetries() {
     const drafts = await store.listDrafts();
     const timestamp = Date.now();
     const dueTwitchVodRetries = new Set(findDueTwitchVodRetries(drafts, timestamp).map((draft) => draft.id));
+    const dueShortRetryParents = new Set(
+      findDueTwitchHighlightRetryParents(drafts, timestamp).map((draft) => draft.id)
+    );
     for (const draft of drafts) {
       if (dueTwitchVodRetries.has(draft.id)) {
         enqueueClipProcessing(draft.id);
@@ -576,7 +579,11 @@ async function scheduleDueHighlightRetries() {
       await store.updateDraft(draft.id, { nextClipAttemptAt });
       console.info('Moved Twitch metadata retry for batch ' + draft.id + ' forward to ' + nextClipAttemptAt);
     }
-    findDueHighlightRetries(drafts, timestamp).forEach((draft) => enqueueHighlightBatch(draft.id));
+    const dueHighlightBatchIds = new Set([
+      ...findDueHighlightRetries(drafts, timestamp).map((draft) => draft.id),
+      ...dueShortRetryParents
+    ]);
+    dueHighlightBatchIds.forEach((id) => enqueueHighlightBatch(id));
   } catch (error) {
     console.error('Failed to scan scheduled highlight retries:', error.message);
   } finally {
@@ -1283,10 +1290,72 @@ app.post('/api/drafts/:id/exclude-test-vod', admin, async (req, res, next) => {
   }
 });
 
+app.post('/api/drafts/:id/reconcile-upload', admin, async (req, res, next) => {
+  try {
+    const draft = await store.getDraft(req.params.id);
+    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    const youtubeVideoId = String(req.body?.youtubeVideoId || '').trim();
+    const confirmNoUpload = req.body?.confirmNoUpload === true;
+    if (Boolean(youtubeVideoId) === confirmNoUpload) {
+      return res.status(400).json({ error: 'Provide a private video ID or explicitly confirm that no matching upload exists' });
+    }
+    if (!['twitch_vod', 'twitch_highlight_batch', 'twitch_highlight_short'].includes(draft.sourceType) ||
+        draft.status !== 'clip_upload_uncertain') {
+      return res.status(409).json({ error: 'Only an uncertain Twitch upload can be reconciled' });
+    }
+    if (draft.sourceType === 'twitch_highlight_short') {
+      const parent = await store.getDraft(draft.parentId);
+      if (!parent || parent.sourceType !== 'twitch_highlight_batch' || !parent.youtubeVideoId) {
+        return res.status(409).json({ error: 'The parent highlight must have a saved private YouTube video before reconciling its Short' });
+      }
+    }
+    if (youtubeVideoId) {
+      if (!/^[A-Za-z0-9_-]{11}$/.test(youtubeVideoId)) {
+        return res.status(400).json({ error: 'Enter the 11-character ID of the private YouTube video' });
+      }
+      const [channel, video] = await Promise.all([
+        youtube.ownedChannel(), youtube.getVideo(youtubeVideoId)
+      ]);
+      if (!video || video.id !== youtubeVideoId) {
+        return res.status(404).json({ error: 'YouTube video was not found on the connected channel' });
+      }
+      if (video.snippet?.channelId !== channel.id) {
+        return res.status(403).json({ error: 'That video does not belong to the connected YouTube channel' });
+      }
+      if (video.status?.privacyStatus !== 'private') {
+        return res.status(409).json({ error: 'Only a matching private video can be attached during reconciliation' });
+      }
+      if (String(video.snippet?.title || '').trim() !== String(draft.title || '').trim()) {
+        return res.status(409).json({ error: 'The private video title does not match this draft; verify the ID before attaching it' });
+      }
+    }
+    const patch = buildUploadReconciliationPatch(draft, {
+      youtubeVideoId: youtubeVideoId || undefined, confirmNoUpload
+    });
+    const updated = await store.updateDraft(draft.id, patch);
+    if (draft.sourceType === 'twitch_highlight_batch') {
+      if (youtubeVideoId || confirmNoUpload) enqueueHighlightBatch(draft.id);
+    } else if (draft.sourceType === 'twitch_highlight_short') {
+      enqueueHighlightBatch(draft.parentId);
+    } else if (confirmNoUpload) {
+      enqueueClipProcessing(draft.id);
+    }
+    res.json({ draft: updated, youtubeVisibilityChanged: false, publicationTriggered: false });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/api/drafts/:id/retry', admin, async (req, res, next) => {
   try {
     const draft = await store.getDraft(req.params.id);
     if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    if (['clip_upload_uncertain', 'uploading_private_to_youtube'].includes(draft.status)) {
+      return res.status(409).json({ error: 'Reconcile the YouTube upload before retrying to avoid a duplicate video' });
+    }
+    if (isUploadRetryCoolingDown(draft)) {
+      return res.status(409).json({ error: 'This retry is still inside its provider backoff window' });
+    }
     const retryable = ['clip_failed', 'clip_partial', 'clip_retry_wait'].includes(draft.status) ||
       draft.sourceType === 'twitch_highlight_batch' && Boolean(draft.error);
     if (!['twitch_vod', 'twitch_highlight_batch'].includes(draft.sourceType) || !retryable) {
@@ -1294,7 +1363,8 @@ app.post('/api/drafts/:id/retry', admin, async (req, res, next) => {
     }
     const updated = await store.updateDraft(draft.id, {
       status: 'clip_queued', productionState: 'queued', productionFailures: [],
-      clipAttemptCount: 0, nextClipAttemptAt: null, error: null
+      clipAttemptCount: 0, nextClipAttemptAt: null, error: null,
+      uploadRejectionStatus: null
     });
     if (draft.sourceType === 'twitch_highlight_batch') enqueueHighlightBatch(draft.id);
     else enqueueClipProcessing(draft.id);
