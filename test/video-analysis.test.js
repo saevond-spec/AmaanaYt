@@ -235,18 +235,27 @@ test('analysis 503 pauses only analysis while metadata SEO generation continues'
 test('permanent video-analysis failures are cooled down per video instead of requeued every scan', async () => {
   let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
     completed: true, viewPriorityScanVersion: 1, enabled: true };
-  let claimed = false;
+  let claims = 0;
+  let failureRecorded = false;
+  let analysisCalls = 0;
   const failures = [];
   const finished = [];
   const store = {
     getSeoSyncState: async () => state,
     saveSeoSyncState: async (next) => { state = next; },
     seoCounts: async () => ({ attemptedToday: 0 }),
-    claimSeoVideo: async () => claimed ? null : (claimed = true, {
-      videoId, claimToken: 'claim-403', source, context: {}, attempts: 1
-    }),
+    claimSeoVideo: async () => {
+      if (claims >= 2) return null;
+      claims += 1;
+      return { videoId, claimToken: 'claim-403-' + claims, source, context: {}, attempts: claims };
+    },
     getVideoAnalysis: async () => null,
-    markVideoAnalysisFailure: async (id, failure) => failures.push({ id, failure }),
+    getVideoAnalysisFailure: async () => failureRecorded
+      ? { status: 403, retryAfter: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() } : null,
+    markVideoAnalysisFailure: async (id, failure) => {
+      failureRecorded = true;
+      failures.push({ id, failure });
+    },
     finishSeoVideo: async (_id, _token, pkg) => { finished.push(pkg); }
   };
   const youtube = { isConnected: async () => true,
@@ -256,6 +265,7 @@ test('permanent video-analysis failures are cooled down per video instead of req
     env: { SEO_AI_API_KEY: 'seo-key', SEO_AI_MODEL: 'test-model',
       VIDEO_ANALYSIS_API_KEY: 'analysis-key', ENABLE_VIDEO_ANALYSIS: 'true' },
     analyze: async () => {
+      analysisCalls += 1;
       throw Object.assign(new Error('Video analysis provider returned HTTP 403'), {
         status: 403, providerCode: 'PERMISSION_DENIED', providerMessage: 'Access to this video was denied'
       });
@@ -265,14 +275,17 @@ test('permanent video-analysis failures are cooled down per video instead of req
   });
 
   await worker.run();
+  await worker.run();
 
   assert.equal(failures.length, 1);
+  assert.equal(analysisCalls, 1, 'the persisted per-video failure suppresses another provider request');
+  assert.equal(finished.length, 2, 'SEO metadata generation still runs while video analysis is cooling down');
   assert.equal(failures[0].id, videoId);
   assert.equal(failures[0].failure.status, 403);
   assert.equal(failures[0].failure.providerCode, 'PERMISSION_DENIED');
   assert.match(failures[0].failure.message, /Access to this video was denied/);
   assert.ok(Date.parse(failures[0].failure.retryAfter) - Date.now() > 23 * 60 * 60 * 1000);
-  assert.equal(finished.length, 1, 'SEO metadata generation can continue without footage analysis');
+  assert.equal(finished.length, 2, 'SEO metadata generation can continue without footage analysis');
   assert.equal(state.videoAnalysisBlockedUntil, undefined, 'one video permission failure must not block other videos');
 });
 
@@ -298,7 +311,7 @@ test('a shared Gemini 429 pauses both analysis and SEO requests for the run', as
     store, youtube,
     env: { SEO_AI_API_KEY: 'shared-key', SEO_AI_MODEL: 'gemini-3.8-flash',
       SEO_AI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
-      VIDEO_ANALYSIS_API_KEY: 'shared-key', ENABLE_VIDEO_ANALYSIS: 'true' },
+      VIDEO_ANALYSIS_API_KEY: 'analysis-key', ENABLE_VIDEO_ANALYSIS: 'true' },
     analyze: async () => {
       throw Object.assign(new Error('Gemini rate limit'), {
         status: 429, retryAfterPresent: true, retryAfterMs: 60000
