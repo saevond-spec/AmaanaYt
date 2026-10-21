@@ -2,7 +2,8 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { isYouTubeUploadLimitError, recoverInterruptedYouTubeUploads } = require('../src/draft-recovery');
+const { isYouTubeUploadLimitError, findDueTwitchVodRetries,
+  recoverInterruptedYouTubeUploads } = require('../src/draft-recovery');
 
 test('identifies a definite YouTube channel upload-limit rejection', () => {
   assert.equal(isYouTubeUploadLimitError({
@@ -60,4 +61,20 @@ test('recovers interrupted private uploads without retrying ambiguous ones', asy
   assert.equal(recovered[5].youtubeVideoId, 'yt-short');
   assert.equal(recovered[5].status, 'clip_partial');
   assert.equal(recovered[6], drafts[6]);
+});
+
+test('finds due VOD retry jobs across community and live-capture sources', () => {
+  const now = Date.parse('2026-10-21T12:00:00Z');
+  const due = findDueTwitchVodRetries([
+    { id: 'community', sourceType: 'twitch_vod', discoverySource: 'twitch_community_clip',
+      status: 'clip_retry_wait', nextClipAttemptAt: '2026-10-21T11:00:00Z' },
+    { id: 'live-capture', sourceType: 'twitch_vod', discoverySource: 'twitch_live_capture',
+      status: 'clip_retry_wait', nextClipAttemptAt: '2026-10-21T11:30:00Z' },
+    { id: 'future', sourceType: 'twitch_vod', discoverySource: 'twitch_live_capture',
+      status: 'clip_retry_wait', nextClipAttemptAt: '2026-10-21T13:00:00Z' },
+    { id: 'bad-date', sourceType: 'twitch_vod', status: 'clip_retry_wait', nextClipAttemptAt: 'bad' },
+    { id: 'batch', sourceType: 'twitch_highlight_batch', status: 'clip_retry_wait',
+      nextClipAttemptAt: '2026-10-21T11:00:00Z' }
+  ], now);
+  assert.deepEqual(due.map((draft) => draft.id), ['community', 'live-capture']);
 });
