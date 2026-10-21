@@ -602,9 +602,14 @@ async function scheduleDueHighlightRetries() {
       console.info('Moved Twitch metadata retry for batch ' + draft.id + ' forward to ' + nextClipAttemptAt);
     }
     for (const parent of claimedShortRetryParents) {
-      enqueueHighlightBatch(parent.id, {
-        retryLeaseClaimToken: parent.retryLeaseClaimToken
+      const claimToken = parent.retryLeaseClaimToken;
+      const accepted = enqueueHighlightBatch(parent.id, {
+        retryLeaseClaimToken: claimToken
       });
+      if (!accepted && typeof store.releaseHighlightRetryLease === 'function') {
+        await store.releaseHighlightRetryLease(parent.id, claimToken);
+        console.warn('Released highlight retry lease after an active queue duplicate: ' + parent.id);
+      }
     }
   } catch (error) {
     console.error('Failed to scan scheduled highlight retries:', error.message);
