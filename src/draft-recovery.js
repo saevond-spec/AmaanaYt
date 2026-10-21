@@ -73,10 +73,11 @@ function isUploadRetryCoolingDown(draft, now = Date.now()) {
 
 function canRetryTwitchDraft(draft, now = Date.now()) {
   if (!draft || !['twitch_vod', 'twitch_highlight_batch'].includes(draft.sourceType) ||
-      ['clip_upload_uncertain', 'uploading_private_to_youtube'].includes(draft.status) ||
+      ['excluded_by_owner', 'completed', 'clip_upload_uncertain',
+        'uploading_private_to_youtube'].includes(draft.status) ||
+      draft.productionState === 'published' || draft.publicationStatus === 'published' ||
       isUploadRetryCoolingDown(draft, now)) return false;
-  return ['clip_failed', 'clip_partial', 'clip_retry_wait'].includes(draft.status) ||
-    draft.sourceType === 'twitch_highlight_batch' && Boolean(draft.error);
+  return ['clip_failed', 'clip_partial', 'clip_retry_wait'].includes(draft.status);
 }
 
 function isOwnedPrivateYouTubeVideo(video, channel, expectedVideoId) {
