@@ -665,18 +665,23 @@ test('transient failures use bounded backoff attempts, while authorization error
   assert.equal(isTransientError({ status: 403 }), false);
 });
 
-test('duplicate VOD events resolve to the same batch and queue only one active job', async () => {
+test('duplicate VOD events merge a later retry lease into the pending queue job', async () => {
   const existing = { sourceType: 'twitch_highlight_batch', vodId: '1234567890', id: 'existing' };
   assert.equal(findHighlightBatchByVodId([existing], '1234567890'), existing);
   assert.equal(findHighlightBatchByVodId([existing], '1234567891'), null);
   const scheduled = [];
   const processed = [];
-  const queue = createBatchQueue(async (id) => { processed.push(id); }, { schedule: (fn) => scheduled.push(fn) });
+  const queue = createBatchQueue(async (id, options) => { processed.push({ id, options }); },
+    { schedule: (fn) => scheduled.push(fn) });
   assert.equal(queue.enqueue('existing'), true);
   assert.equal(queue.enqueue('existing'), false);
+  assert.equal(queue.enqueue('existing', { retryLeaseClaimToken: 'fresh-claim' }), true);
   assert.equal(queue.enqueue('second'), true);
   await queue.drain();
-  assert.deepEqual(processed, ['existing', 'second']);
+  assert.deepEqual(processed, [
+    { id: 'existing', options: { retryLeaseClaimToken: 'fresh-claim' } },
+    { id: 'second', options: null }
+  ]);
   assert.equal(queue.queuedCount, 0);
   assert.equal(scheduled.length, 1);
 });
