@@ -174,6 +174,14 @@ test('cannot blindly retry uncertain uploads or bypass a future upload-limit dea
     nextClipAttemptAt: '2026-10-21T11:59:00Z' }, now), true);
   assert.equal(canRetryTwitchDraft({ sourceType: 'twitch_vod',
     status: 'clip_failed' }, now), true);
+  assert.equal(canRetryTwitchDraft({ sourceType: 'twitch_highlight_batch',
+    status: 'excluded_by_owner', error: 'old processing error' }, now), false);
+  assert.equal(canRetryTwitchDraft({ sourceType: 'twitch_highlight_batch',
+    status: 'completed', error: 'stale error' }, now), false);
+  assert.equal(canRetryTwitchDraft({ sourceType: 'twitch_highlight_batch',
+    status: 'clip_partial', publicationStatus: 'published' }, now), false);
+  assert.equal(canRetryTwitchDraft({ sourceType: 'twitch_highlight_batch',
+    status: 'clip_queued', error: 'stale error' }, now), false);
 });
 
 test('Twitch VOD retry selector enforces attempt limits and retry deadlines', () => {
