@@ -213,7 +213,10 @@ test('retryable Short parent claims require a durable lease and defer to parent 
 
   let persistedParent = { ...parent };
   const claimed = await claimDueTwitchHighlightRetryParents([persistedParent, short],
-    async (_id, patch) => (persistedParent = { ...persistedParent, ...patch }),
+    async (_id, options) => (persistedParent = { ...persistedParent,
+      retryLeaseUntil: new Date(options.now + options.leaseMs).toISOString(),
+      retryLeaseClaimedAt: new Date(options.now).toISOString(),
+      retryLeaseClaimToken: options.claimToken }),
     { now, leaseMs: 60_000 });
   assert.deepEqual(claimed.map((draft) => draft.id), ['parent']);
   assert.equal(Date.parse(persistedParent.retryLeaseUntil), now + 60_000);
