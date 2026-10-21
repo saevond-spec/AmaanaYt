@@ -144,6 +144,7 @@ async function harness(t, options = {}) {
   let seoFailureUsed = false;
   let idCounter = 0;
   let leaseCounter = 0;
+  let clipSaveFailureUsed = false;
 
   const copy = (value) => value && structuredClone(value);
   const store = {
@@ -167,6 +168,44 @@ async function harness(t, options = {}) {
       const next = { ...current, ...copy(patch), updatedAt: new Date().toISOString() };
       drafts.set(id, next);
       return copy(next);
+    },
+    async updateDraftWithRetryLease(id, token, patch) {
+      const current = drafts.get(id);
+      const until = Date.parse(current?.retryLeaseUntil || '');
+      if (!current || current.retryLeaseClaimToken !== token || !Number.isFinite(until) ||
+          until <= Date.now() || current.status === 'excluded_by_owner' ||
+          current.productionState === 'excluded' || current.excludedAt) return null;
+      if (options.failClipSaveOnce && patch.pendingTwitchClipIntentIndex === null &&
+          Array.isArray(patch.twitchClips) && !clipSaveFailureUsed) {
+        clipSaveFailureUsed = true;
+        throw Object.assign(new Error('database connection reset after Twitch accepted clip'), { code: 'ECONNRESET' });
+      }
+      const next = { ...current, ...copy(patch), updatedAt: new Date().toISOString() };
+      drafts.set(id, next);
+      return copy(next);
+    },
+    async addHighlightShortDraft(parentId, token, draft) {
+      const parent = drafts.get(parentId);
+      const until = Date.parse(parent?.retryLeaseUntil || '');
+      if (!parent || parent.status !== 'creating_shorts' || !parent.youtubeVideoId ||
+          parent.retryLeaseClaimToken !== token || !Number.isFinite(until) || until <= Date.now() ||
+          parent.productionState === 'excluded' || parent.excludedAt) return null;
+      if (drafts.has(draft.id)) throw new Error('duplicate draft id');
+      drafts.set(draft.id, copy(draft));
+      return copy(draft);
+    },
+    async reserveHighlightShortUpload(parentId, token, shortId, patch) {
+      const parent = drafts.get(parentId);
+      const child = drafts.get(shortId);
+      const until = Date.parse(parent?.retryLeaseUntil || '');
+      if (!parent || parent.status !== 'creating_shorts' || !parent.youtubeVideoId ||
+          parent.retryLeaseClaimToken !== token || !Number.isFinite(until) || until <= Date.now() ||
+          parent.productionState === 'excluded' || parent.excludedAt || !child ||
+          child.status === 'excluded_by_owner' || child.productionState === 'excluded' || child.excludedAt ||
+          child.parentId !== parentId) return null;
+      const updated = { ...child, ...copy(patch), updatedAt: new Date().toISOString() };
+      drafts.set(shortId, updated);
+      return copy(updated);
     },
     async claimHighlightRetryParent(id, claimOptions = {}) {
       const current = drafts.get(id);
@@ -393,8 +432,8 @@ test('legacy Twitch-discovered batches without a target duration cannot create u
 
 test('owner exclusion during upload reservation prevents a private YouTube upload', async (t) => {
   const h = await harness(t);
-  const updateDraft = h.store.updateDraft.bind(h.store);
-  h.store.updateDraft = async (id, patch) => {
+  const updateClaimed = h.store.updateDraftWithRetryLease.bind(h.store);
+  h.store.updateDraftWithRetryLease = async (id, token, patch) => {
     if (patch.status === 'uploading_private_to_youtube') {
       const current = h.drafts.get(id);
       h.drafts.set(id, { ...current, status: 'excluded_by_owner',
@@ -402,7 +441,7 @@ test('owner exclusion during upload reservation prevents a private YouTube uploa
         retryLeaseUntil: null, retryLeaseClaimedAt: null, retryLeaseClaimToken: null });
       return null;
     }
-    return updateDraft(id, patch);
+    return updateClaimed(id, token, patch);
   };
 
   await h.processor(h.batch.id);
@@ -410,6 +449,18 @@ test('owner exclusion during upload reservation prevents a private YouTube uploa
   assert.equal(h.drafts.get(h.batch.id).status, 'excluded_by_owner');
   assert.equal(h.counters.uploads.length, 0);
   assert.equal(h.counters.publications.length, 0);
+});
+
+test('ambiguous Twitch clip creation is held for review instead of repeated', async (t) => {
+  const h = await harness(t, { failClipSaveOnce: true });
+  await h.processor(h.batch.id);
+  const parent = h.drafts.get(h.batch.id);
+  assert.equal(h.counters.clipCreates, 1);
+  assert.equal(parent.status, 'clip_failed');
+  assert.equal(parent.productionState, 'manual_review');
+  assert.equal(parent.pendingTwitchClipIntentIndex, 0);
+  assert.match(parent.error, /may have succeeded/);
+  assert.equal(h.counters.uploads.length, 0);
 });
 
 test('12-minute batches assemble exactly 720 seconds across verified 60-second sources', async (t) => {
