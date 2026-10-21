@@ -532,7 +532,9 @@ function createTwitchHighlightDiscovery({
     await queueReadyLiveShorts(stream, session, result);
     await queueReadyLiveBatches(vod, stream, session, result);
 
-    const pendingOffset = Number(session.pendingCaptureOffset);
+    const rawPendingOffset = session.pendingCaptureOffset;
+    const pendingOffset = rawPendingOffset === null || rawPendingOffset === undefined || rawPendingOffset === ''
+      ? NaN : Number(rawPendingOffset);
     const hasPendingCapture = Number.isFinite(pendingOffset) && pendingOffset >= 0;
     const retryAt = Date.parse(session.nextCaptureAttemptAt || '');
     if (hasPendingCapture && Number.isFinite(retryAt) && timestamp < retryAt) {
@@ -544,7 +546,9 @@ function createTwitchHighlightDiscovery({
     const lastCaptureAt = Date.parse(session.lastCaptureAt || '');
     const captureDue = hasPendingCapture || !Number.isFinite(lastCaptureAt) ||
       timestamp - lastCaptureAt >= liveCaptureIntervalMs;
-    const previousOffset = Number(session.lastCaptureOffset);
+    const rawPreviousOffset = session.lastCaptureOffset;
+    const previousOffset = rawPreviousOffset === null || rawPreviousOffset === undefined || rawPreviousOffset === ''
+      ? NaN : Number(rawPreviousOffset);
     const newSegmentAvailable = hasPendingCapture || !Number.isFinite(previousOffset) ||
       captureOffset - previousOffset >= requestedDuration + 30;
     if (!captureDue || !newSegmentAvailable) {
@@ -554,9 +558,11 @@ function createTwitchHighlightDiscovery({
     }
 
     const requestedVodOffset = hasPendingCapture ? pendingOffset : captureOffset;
-    const requestedDurationSeconds = hasPendingCapture &&
-      Number.isFinite(Number(session.pendingCaptureDuration))
-      ? Number(session.pendingCaptureDuration) : requestedDuration;
+    const rawPendingDuration = session.pendingCaptureDuration;
+    const pendingDuration = rawPendingDuration === null || rawPendingDuration === undefined || rawPendingDuration === ''
+      ? NaN : Number(rawPendingDuration);
+    const hasPendingDuration = hasPendingCapture && Number.isFinite(pendingDuration) && pendingDuration > 0;
+    const requestedDurationSeconds = hasPendingDuration ? pendingDuration : requestedDuration;
     const requestedStart = requestedVodOffset - requestedDurationSeconds;
     if (!hasPendingCapture) {
       session.pendingCaptureOffset = requestedVodOffset;
