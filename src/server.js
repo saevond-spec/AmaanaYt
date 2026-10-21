@@ -21,7 +21,7 @@ const { normalizeJapaneseChannelLocalization, suggestJapaneseChannelLocalization
 const { createJapaneseLocalizationWorker } = require('./japanese-localization-worker');
 const { hasVerifiedGameplayHighlight, hasVerifiedLiveGameplayClip } = require('./highlight-validation');
 const { buildHighlightTimeline, buildHighlightDescription } = require('./highlight-metadata');
-const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
+const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries, isTransientError,
   shouldPullForwardTwitchMetadataRetry, shouldRequeueUnexpectedTwitchDownloadHost,
   shouldPullForwardAllowedTwitchDownloadHost, shouldRequeueTwitchSegmentDurationFailure } = require('./highlight-pipeline');
 const { createTwitchHighlightDiscovery } = require('./twitch-highlight-discovery');
@@ -32,8 +32,11 @@ const { createSessionStore } = require('./session-store');
 const { canAddVideoToPlaylist } = require('./youtube-playlists');
 const { parseGoogleSearchConsoleCsv } = require('./google-search-console');
 const { createPlaylistAutoAssigner } = require('./playlist-auto');
-const { isYouTubeUploadLimitError, recoverInterruptedYouTubeUploads,
-  findDueTwitchVodRetries, YOUTUBE_UPLOAD_LIMIT_RETRY_MS } = require('./draft-recovery');
+const { isYouTubeUploadLimitError, isDefiniteYouTubeUploadRejection,
+  isRetryableYouTubeUploadRejection, isUploadRetryCoolingDown,
+  isOwnedPrivateYouTubeVideo, buildUploadReconciliationPatch,
+  recoverInterruptedYouTubeUploads, findDueTwitchVodRetries,
+  findDueTwitchHighlightRetryParents, YOUTUBE_UPLOAD_LIMIT_RETRY_MS } = require('./draft-recovery');
 const { initializeWithRetry } = require('./retryable-initializer');
 
 for (const name of ['BASE_URL', 'DATABASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SESSION_SECRET', 'TOKEN_ENCRYPTION_KEY', 'AGENT_KEY', 'ADMIN_KEY']) {
@@ -292,8 +295,9 @@ async function processTwitchClipDraft(id) {
     let draft = await store.getDraft(id);
     if (!draft || draft.sourceType !== 'twitch_vod' || draft.status === 'awaiting_owner_approval' ||
         draft.status === 'excluded_by_owner') return;
-    if (draft.discoverySource === 'twitch_community_clip' && draft.youtubeVideoId) {
-      await store.updateDraft(id, { status: 'awaiting_owner_approval', error: null });
+    if (draft.youtubeVideoId) {
+      await store.updateDraft(id, { status: 'awaiting_owner_approval',
+        productionState: 'ready', error: null, nextClipAttemptAt: null });
       return;
     }
     if (draft.discoverySource === 'twitch_community_clip') {
@@ -421,28 +425,53 @@ async function processTwitchClipDraft(id) {
   } catch (error) {
     console.error(`Twitch clip job ${id} failed:`, error.message);
     const latest = await store.getDraft(id).catch(() => null);
+    const uploadInProgress = latest?.status === 'uploading_private_to_youtube';
+    const uploadLimitRejected = isYouTubeUploadLimitError(error);
+    const definiteUploadRejection = isDefiniteYouTubeUploadRejection(error);
+    const retryableUploadRejection = isRetryableYouTubeUploadRejection(error);
     if (latest && latest.youtubeVideoId) {
-      await store.updateDraft(id, { status: 'awaiting_owner_approval', error: null }).catch(() => {});
-    } else if (latest && latest.discoverySource === 'twitch_community_clip' &&
-        latest.status !== 'uploading_private_to_youtube' && Number(latest.clipAttemptCount) < 8 &&
-        isRetryableCommunityClipError(error)) {
-      const attempt = Math.max(1, Number(latest.clipAttemptCount) || 1);
-      const nextClipAttemptAt = new Date(Date.now() + clipRetryDelayMs(attempt, id)).toISOString();
-      await store.updateDraft(id, {
-        status: 'clip_retry_wait', productionState: 'retry_scheduled', nextClipAttemptAt,
-        error: cleanText(error.message, 500)
-      }).catch(() => {});
-    } else if (latest && latest.status === 'uploading_private_to_youtube' &&
-        isYouTubeUploadLimitError(error)) {
+      await store.updateDraft(id, { status: 'awaiting_owner_approval',
+        productionState: 'ready', error: null, nextClipAttemptAt: null }).catch(() => {});
+    } else if (uploadInProgress && uploadLimitRejected) {
       await store.updateDraft(id, {
         status: 'clip_retry_wait', productionState: 'retry_scheduled',
         nextClipAttemptAt: new Date(Date.now() + YOUTUBE_UPLOAD_LIMIT_RETRY_MS).toISOString(),
         error: 'YouTube rejected this upload because the channel upload limit was reached. A retry is queued after a conservative 24-hour wait.'
       }).catch(() => {});
-    } else if (latest && latest.status === 'uploading_private_to_youtube') {
+    } else if (uploadInProgress && definiteUploadRejection && retryableUploadRejection) {
+      const delay = Math.max(Number(error.retryAfterMs) || 0, clipRetryDelayMs(
+        Math.max(1, Number(latest.clipAttemptCount) || 1), id));
+      await store.updateDraft(id, {
+        status: 'clip_retry_wait', productionState: 'retry_scheduled',
+        nextClipAttemptAt: new Date(Date.now() + delay).toISOString(),
+        error: cleanText(error.message, 500)
+      }).catch(() => {});
+    } else if (uploadInProgress && definiteUploadRejection) {
+      await store.updateDraft(id, {
+        status: 'clip_failed', productionState: 'failed', nextClipAttemptAt: null,
+        error: cleanText(error.message, 500)
+      }).catch(() => {});
+    } else if (uploadInProgress) {
       await store.updateDraft(id, {
         status: 'clip_upload_uncertain', productionState: 'manual_reconciliation',
         error: cleanText(error.message, 500), nextClipAttemptAt: null
+      }).catch(() => {});
+    } else if (latest && latest.discoverySource === 'twitch_community_clip' &&
+        Number(latest.clipAttemptCount) < 8 && isRetryableCommunityClipError(error)) {
+      const attempt = Math.max(1, Number(latest.clipAttemptCount) || 1);
+      const delay = Math.max(Number(error.retryAfterMs) || 0, clipRetryDelayMs(attempt, id));
+      const nextClipAttemptAt = new Date(Date.now() + delay).toISOString();
+      await store.updateDraft(id, {
+        status: 'clip_retry_wait', productionState: 'retry_scheduled', nextClipAttemptAt,
+        error: cleanText(error.message, 500)
+      }).catch(() => {});
+    } else if (latest && Number(latest.clipAttemptCount) < 8 && isTransientError(error)) {
+      const attempt = Math.max(1, Number(latest.clipAttemptCount) || 1);
+      const delay = Math.max(Number(error.retryAfterMs) || 0, clipRetryDelayMs(attempt, id));
+      await store.updateDraft(id, {
+        status: 'clip_retry_wait', productionState: 'retry_scheduled',
+        nextClipAttemptAt: new Date(Date.now() + delay).toISOString(),
+        error: cleanText(error.message, 500)
       }).catch(() => {});
     } else {
       await store.updateDraft(id, { status: 'clip_failed', error: cleanText(error.message, 500) }).catch(() => {});
