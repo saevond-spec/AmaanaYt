@@ -299,6 +299,16 @@ async function processTwitchClipDraft(id) {
     let draft = await store.getDraft(id);
     if (!draft || draft.sourceType !== 'twitch_vod' || draft.status === 'awaiting_owner_approval' ||
         draft.status === 'excluded_by_owner') return;
+    const activeLeaseUntil = Date.parse(draft.retryLeaseUntil || '');
+    if (draft.retryLeaseClaimToken && Number.isFinite(activeLeaseUntil) && activeLeaseUntil > Date.now()) return;
+    if (Number(draft.clipAttemptCount || 0) >= twitchClipMaxAutoAttempts) {
+      await store.updateDraft(id, {
+        status: 'clip_failed', productionState: 'manual_review',
+        error: 'Automatic Twitch clip attempt limit reached; owner review is required.',
+        nextClipAttemptAt: null
+      });
+      return;
+    }
     if (draft.youtubeVideoId) {
       await store.updateDraft(id, { status: 'awaiting_owner_approval',
         productionState: 'ready', error: null, nextClipAttemptAt: null });
@@ -518,8 +528,8 @@ const processHighlightBatch = createHighlightProcessor({
 });const highlightBatchQueue = createBatchQueue(processHighlightBatch, {
   onError: (id, error) => console.error('Highlight batch queue failed for ' + id + ':', error.message)
 });
-function enqueueHighlightBatch(id) {
-  return highlightBatchQueue.enqueue(id);
+function enqueueHighlightBatch(id, options = null) {
+  return highlightBatchQueue.enqueue(id, options);
 }
 const twitchHighlightDiscovery = createTwitchHighlightDiscovery({
   twitch, store, video, enqueueBatch: enqueueHighlightBatch, enqueueClip: enqueueClipProcessing,
@@ -536,18 +546,13 @@ async function scheduleDueHighlightRetries() {
     const dueTwitchVodRetries = new Set(
       findDueTwitchVodRetries(drafts, timestamp, twitchClipMaxAutoAttempts).map((draft) => draft.id)
     );
-    const potentialShortRetryParentIds = new Set(
-      findDueTwitchHighlightRetryParents(drafts, timestamp, highlightMaxAutoAttempts)
-        .map((draft) => draft.id)
-    );
     const claimedShortRetryParents = await claimDueTwitchHighlightRetryParents(
       drafts,
-      (id, patch) => store.updateDraft(id, patch),
+      (id, claimOptions) => store.claimHighlightRetryParent(id, claimOptions),
       { now: timestamp, maxAttempts: highlightMaxAutoAttempts,
         onError: (error, parent) => console.error(
           'Failed to persist retry lease for highlight batch ' + parent.id + ': ' + error.message) }
     );
-    const dueShortRetryParents = new Set(claimedShortRetryParents.map((draft) => draft.id));
     for (const draft of drafts) {
       if (dueTwitchVodRetries.has(draft.id)) {
         enqueueClipProcessing(draft.id);
@@ -594,14 +599,11 @@ async function scheduleDueHighlightRetries() {
       await store.updateDraft(draft.id, { nextClipAttemptAt });
       console.info('Moved Twitch metadata retry for batch ' + draft.id + ' forward to ' + nextClipAttemptAt);
     }
-    const dueHighlightBatchIds = new Set([
-      ...findDueHighlightRetries(drafts, timestamp, highlightMaxAutoAttempts)
-        .filter((draft) => !potentialShortRetryParentIds.has(draft.id) ||
-          dueShortRetryParents.has(draft.id))
-        .map((draft) => draft.id),
-      ...dueShortRetryParents
-    ]);
-    dueHighlightBatchIds.forEach((id) => enqueueHighlightBatch(id));
+    for (const parent of claimedShortRetryParents) {
+      enqueueHighlightBatch(parent.id, {
+        retryLeaseClaimToken: parent.retryLeaseClaimToken
+      });
+    }
   } catch (error) {
     console.error('Failed to scan scheduled highlight retries:', error.message);
   } finally {
@@ -1495,14 +1497,21 @@ initializeWithRetry(() => store.init(), {
           'formatting_vertical_short',
           'clip_retry_wait'
         ]);
-        drafts.filter((draft) => draft.sourceType === 'twitch_vod' && resumable.has(draft.status) &&
-          (draft.status !== 'clip_retry_wait' ||
-            Date.parse(draft.nextClipAttemptAt || '') <= Date.now()) &&
-          (draft.status !== 'clip_retry_wait' ||
-            Number(draft.clipAttemptCount || 0) < twitchClipMaxAutoAttempts))
-          .forEach((draft) => enqueueClipProcessing(draft.id));
-        drafts.filter((draft) => draft.sourceType === 'twitch_highlight_batch'
-          && ['clip_queued', 'creating_twitch_clips', 'assembling_highlight_video', 'creating_shorts'].includes(draft.status))
+        drafts.filter((draft) => {
+          const retryAt = Date.parse(draft.nextClipAttemptAt || '');
+          const leaseUntil = Date.parse(draft.retryLeaseUntil || '');
+          const leaseValue = draft.retryLeaseUntil;
+          return draft.sourceType === 'twitch_vod' && resumable.has(draft.status) &&
+            Number(draft.clipAttemptCount || 0) < twitchClipMaxAutoAttempts &&
+            !(leaseValue != null && leaseValue !== '' && Number.isFinite(leaseUntil) && leaseUntil > Date.now()) &&
+            (draft.status !== 'clip_retry_wait' ||
+              Number.isFinite(retryAt) && retryAt <= Date.now());
+        }).forEach((draft) => enqueueClipProcessing(draft.id));
+        drafts.filter((draft) => draft.sourceType === 'twitch_highlight_batch' &&
+          ['clip_queued', 'creating_twitch_clips', 'assembling_highlight_video', 'creating_shorts'].includes(draft.status) &&
+          Number(draft.clipAttemptCount || 0) < highlightMaxAutoAttempts &&
+          !(Number.isFinite(Date.parse(draft.retryLeaseUntil || '')) &&
+            Date.parse(draft.retryLeaseUntil) > Date.now()))
           .forEach((draft) => enqueueHighlightBatch(draft.id));
       } catch (error) {
         console.error('Failed to resume Twitch clip jobs:', error.message);
