@@ -554,6 +554,8 @@ async function scheduleDueHighlightRetries() {
           'Failed to persist retry lease for highlight batch ' + parent.id + ': ' + error.message) }
     );
     for (const draft of drafts) {
+      if (draft.sourceType === 'twitch_highlight_batch' &&
+          Number(draft.clipAttemptCount || 0) >= highlightMaxAutoAttempts) continue;
       if (dueTwitchVodRetries.has(draft.id)) {
         enqueueClipProcessing(draft.id);
         continue;
@@ -1484,6 +1486,31 @@ initializeWithRetry(() => store.init(), {
       void scheduleDueHighlightRetries();
       try {
         let drafts = await store.listDrafts();
+        const resumableHighlightStatuses = new Set([
+          'clip_queued', 'creating_twitch_clips', 'assembling_highlight_video',
+          'creating_shorts', 'clip_partial', 'clip_retry_wait'
+        ]);
+        const resumableVodStatuses = new Set([
+          'clip_queued', 'creating_twitch_clip', 'waiting_for_clip_media',
+          'downloading_twitch_clip', 'formatting_vertical_short', 'clip_retry_wait'
+        ]);
+        for (const draft of drafts) {
+          const exhaustedVod = draft.sourceType === 'twitch_vod' &&
+            resumableVodStatuses.has(draft.status) &&
+            Number(draft.clipAttemptCount || 0) >= twitchClipMaxAutoAttempts;
+          const exhaustedHighlight = draft.sourceType === 'twitch_highlight_batch' &&
+            resumableHighlightStatuses.has(draft.status) &&
+            Number(draft.clipAttemptCount || 0) >= highlightMaxAutoAttempts;
+          if (exhaustedVod || exhaustedHighlight) {
+            await store.updateDraft(draft.id, {
+              status: 'clip_failed', productionState: 'manual_review',
+              error: 'Automatic Twitch processing attempt limit reached; owner review is required.',
+              nextClipAttemptAt: null, retryLeaseUntil: null,
+              retryLeaseClaimedAt: null, retryLeaseClaimToken: null
+            });
+            console.warn('Marked exhausted Twitch draft for owner review: ' + draft.id);
+          }
+        }
         drafts = await recoverInterruptedYouTubeUploads(drafts,
           (id, patch) => store.updateDraft(id, patch),
           (error, draft) => console.error('Could not persist interrupted upload recovery for ' +
