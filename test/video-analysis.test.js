@@ -119,6 +119,26 @@ test('analysis retries 503 on a fallback model and honors short 429 Retry-After'
   assert.deepEqual(delays, [1000, 20000]);
 });
 
+test('analysis exposes bounded, redacted provider diagnostics for permanent 403 responses', async () => {
+  await assert.rejects(analyzeVideo(videoUrl, {
+    apiKey: 'test-key', model: 'gemini-3.8-flash',
+    circuitBreaker: createModelCircuitBreaker(),
+    fetchImpl: async () => ({
+      ok: false, status: 403,
+      async json() {
+        return { error: { status: 'PERMISSION_DENIED',
+          message: 'API key: hidden-provider-secret does not have permission for this video' } };
+      }
+    })
+  }), (error) => {
+    assert.equal(error.status, 403);
+    assert.equal(error.providerCode, 'PERMISSION_DENIED');
+    assert.match(error.providerMessage, /does not have permission/);
+    assert.doesNotMatch(error.providerMessage, /hidden-provider-secret/);
+    return true;
+  });
+});
+
 test('analysis supports the package prompt without promoting suggested moments to chapters', () => {
   const analysis = { ...rawAnalysis, moments: [{ time: '02:00', detail: 'Final exchange', approximate: true }] };
   const pkg = validatePackage(packageDraft, source, normalizeContext({}, 190), analysis);
@@ -210,6 +230,91 @@ test('analysis 503 pauses only analysis while metadata SEO generation continues'
   assert.ok(finished.every((pkg) => pkg.evidence.videoAnalysis === false));
   assert.ok(Date.parse(state.videoAnalysisBlockedUntil) > Date.now());
   assert.equal(state.providerBlockedUntil, undefined);
+});
+
+test('permanent video-analysis failures are cooled down per video instead of requeued every scan', async () => {
+  let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
+    completed: true, viewPriorityScanVersion: 1, enabled: true };
+  let claimed = false;
+  const failures = [];
+  const finished = [];
+  const store = {
+    getSeoSyncState: async () => state,
+    saveSeoSyncState: async (next) => { state = next; },
+    seoCounts: async () => ({ attemptedToday: 0 }),
+    claimSeoVideo: async () => claimed ? null : (claimed = true, {
+      videoId, claimToken: 'claim-403', source, context: {}, attempts: 1
+    }),
+    getVideoAnalysis: async () => null,
+    markVideoAnalysisFailure: async (id, failure) => failures.push({ id, failure }),
+    finishSeoVideo: async (_id, _token, pkg) => { finished.push(pkg); }
+  };
+  const youtube = { isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner' }) };
+  const worker = createSeoWorker({
+    store, youtube,
+    env: { SEO_AI_API_KEY: 'seo-key', SEO_AI_MODEL: 'test-model',
+      VIDEO_ANALYSIS_API_KEY: 'analysis-key', ENABLE_VIDEO_ANALYSIS: 'true' },
+    analyze: async () => {
+      throw Object.assign(new Error('Video analysis provider returned HTTP 403'), {
+        status: 403, providerCode: 'PERMISSION_DENIED', providerMessage: 'Access to this video was denied'
+      });
+    },
+    generate: async () => packageDraft,
+    logger: { info() {}, warn() {}, error() {} }
+  });
+
+  await worker.run();
+
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].id, videoId);
+  assert.equal(failures[0].failure.status, 403);
+  assert.equal(failures[0].failure.providerCode, 'PERMISSION_DENIED');
+  assert.match(failures[0].failure.message, /Access to this video was denied/);
+  assert.ok(Date.parse(failures[0].failure.retryAfter) - Date.now() > 23 * 60 * 60 * 1000);
+  assert.equal(finished.length, 1, 'SEO metadata generation can continue without footage analysis');
+  assert.equal(state.videoAnalysisBlockedUntil, undefined, 'one video permission failure must not block other videos');
+});
+
+test('a shared Gemini 429 pauses both analysis and SEO requests for the run', async () => {
+  let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
+    completed: true, viewPriorityScanVersion: 1, enabled: true };
+  let claimed = false;
+  let seoCalls = 0;
+  let completion = null;
+  const store = {
+    getSeoSyncState: async () => state,
+    saveSeoSyncState: async (next) => { state = next; },
+    seoCounts: async () => ({ attemptedToday: 0 }),
+    claimSeoVideo: async () => claimed ? null : (claimed = true, {
+      videoId, claimToken: 'claim-429', source, context: {}, attempts: 1
+    }),
+    getVideoAnalysis: async () => null,
+    finishSeoVideo: async (_id, _token, pkg, error) => { completion = { pkg, error }; }
+  };
+  const youtube = { isConnected: async () => true,
+    ownedChannel: async () => ({ id: 'channel-1', title: 'Owner' }) };
+  const worker = createSeoWorker({
+    store, youtube,
+    env: { SEO_AI_API_KEY: 'shared-key', SEO_AI_MODEL: 'gemini-3.8-flash',
+      SEO_AI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
+      VIDEO_ANALYSIS_API_KEY: 'shared-key', ENABLE_VIDEO_ANALYSIS: 'true' },
+    analyze: async () => {
+      throw Object.assign(new Error('Gemini rate limit'), {
+        status: 429, retryAfterPresent: true, retryAfterMs: 60000
+      });
+    },
+    generate: async () => { seoCalls += 1; return packageDraft; },
+    logger: { info() {}, warn() {}, error() {} }
+  });
+
+  await worker.run();
+
+  assert.equal(seoCalls, 0, 'the shared Gemini project must not receive a second request after 429');
+  assert.equal(completion.pkg, null);
+  assert.equal(completion.error.retry, true);
+  assert.ok(Date.parse(state.videoAnalysisBlockedUntil) > Date.now());
+  assert.ok(Date.parse(state.providerBlockedUntil) > Date.now());
 });
 
 test('private uploads skip YouTube URL analysis', async () => {
