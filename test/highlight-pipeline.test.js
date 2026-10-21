@@ -243,12 +243,22 @@ async function harness(t, options = {}) {
       const call = { kind: isShort ? 'short' : 'highlight', title: request.title,
         privacyStatus: 'private', succeeded: false };
       counters.uploads.push(call);
+      if (isShort && options.failShort403 && !shortFailureUsed) {
+        shortFailureUsed = true;
+        throw Object.assign(new Error('YouTube upload forbidden'), { status: 403 });
+      }
       if (isShort && request.title.startsWith(options.failShortTitle || '\u0000') && !shortFailureUsed) {
         shortFailureUsed = true;
-        throw Object.assign(new Error('YouTube upload quota exceeded'), { status: 429 });
+        throw Object.assign(new Error('YouTube request rate limited'), { status: 429 });
       }
       if (!isShort && options.failParentUpload403) {
         throw Object.assign(new Error('YouTube upload forbidden'), { status: 403 });
+      }
+      if (!isShort && options.failParentUpload429) {
+        throw Object.assign(new Error('YouTube upload rate limited'), { status: 429 });
+      }
+      if (!isShort && options.failParentUploadTimeout) {
+        throw Object.assign(new Error('YouTube upload response was lost'), { code: 'ECONNRESET' });
       }
       call.succeeded = true;
       let id = isShort ? 'yt-short-' + request.title.split(' | ')[0].toLowerCase().replaceAll(' ', '-') : 'yt-parent';
@@ -508,13 +518,19 @@ test('repeated moment labels produce unique titles and clip-specific description
   assert.ok(h.drafts.get(h.batch.id).title.includes('Highlights: Saevond ranked session — Same clutch moment'));
 });
 
-test('a transient Short upload failure schedules retry, then finishes without duplicate uploads', async (t) => {
+test('a definite Short 429 schedules a safe retry and then completes without duplicate uploads', async (t) => {
   const h = await harness(t, { failShortTitle: 'Moment two' });
   await h.processor(h.batch.id);
   assert.equal(h.drafts.get(h.batch.id).status, 'clip_retry_wait');
   assert.ok(Date.parse(h.drafts.get(h.batch.id).nextClipAttemptAt) > Date.now());
   assert.match(h.drafts.get(h.batch.id).error, /Short 2/);
   assert.equal([...h.drafts.values()].filter((draft) => draft.sourceType === 'twitch_highlight_short').length, 2);
+  const retryableShort = [...h.drafts.values()].find((draft) =>
+    draft.sourceType === 'twitch_highlight_short' && draft.highlightIndex === 1);
+  assert.equal(retryableShort.uploadRejectionStatus, 429);
+  const dueAt = new Date(Date.now() - 1000).toISOString();
+  await h.store.updateDraft(retryableShort.id, { nextClipAttemptAt: dueAt });
+  await h.store.updateDraft(h.batch.id, { nextClipAttemptAt: dueAt });
   await h.processor(h.batch.id);
   assert.equal(h.drafts.get(h.batch.id).status, 'completed');
   assert.equal(h.drafts.get(h.batch.id).productionState, 'published');
@@ -590,6 +606,31 @@ test('permanent YouTube permission failure does not create an upload or mark the
   assert.equal(h.drafts.get(h.batch.id).productionState, 'failed');
   assert.equal(h.counters.uploads.filter((upload) => upload.succeeded).length, 0);
   assert.equal(h.counters.visibilityMutations, 0);
+});
+
+test('explicit parent upload 429 is safely queued, but a lost response stays uncertain', async (t) => {
+  const rejected = await harness(t, { failParentUpload429: true });
+  await rejected.processor(rejected.batch.id);
+  assert.equal(rejected.drafts.get(rejected.batch.id).status, 'clip_retry_wait');
+  assert.ok(Date.parse(rejected.drafts.get(rejected.batch.id).nextClipAttemptAt) > Date.now());
+  assert.equal(rejected.counters.uploads.filter((upload) => upload.succeeded).length, 0);
+
+  const ambiguous = await harness(t, { failParentUploadTimeout: true });
+  await ambiguous.processor(ambiguous.batch.id);
+  assert.equal(ambiguous.drafts.get(ambiguous.batch.id).status, 'clip_upload_uncertain');
+  assert.equal(ambiguous.drafts.get(ambiguous.batch.id).productionState, 'manual_reconciliation');
+  assert.equal(ambiguous.drafts.get(ambiguous.batch.id).youtubeVideoId, undefined);
+  assert.equal(ambiguous.counters.uploads.filter((upload) => upload.succeeded).length, 0);
+});
+
+test('explicit Short 403 rejection is actionable and not classified as an ambiguous upload', async (t) => {
+  const h = await harness(t, { failShort403: true });
+  await h.processor(h.batch.id);
+  const short = [...h.drafts.values()].find((draft) => draft.sourceType === 'twitch_highlight_short');
+  assert.equal(short.status, 'clip_failed');
+  assert.equal(short.uploadRejectionStatus, 403);
+  assert.equal(h.drafts.get(h.batch.id).status, 'clip_partial');
+  assert.equal(short.youtubeVideoId, null);
 });
 
 test('transient failures use bounded backoff attempts, while authorization errors are permanent', async (t) => {
