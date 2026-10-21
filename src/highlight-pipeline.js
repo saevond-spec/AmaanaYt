@@ -255,19 +255,20 @@ function createHighlightProcessor(dependencies) {
       Date.parse(current.retryLeaseUntil || '') > now());
   }
 
-  async function releaseRetryLeaseWhenDurable(parent) {
-    if (!parent?.retryLeaseUntil || !parent.retryLeaseClaimedAt ||
-        !parent.retryLeaseClaimToken) return;
+  async function releaseRetryLeaseWhenDurable(parent, fallbackId, fallbackToken) {
+    const id = parent?.id || fallbackId;
+    const claimToken = parent?.retryLeaseClaimToken || fallbackToken;
+    if (!id || !claimToken) return;
     try {
-      const current = await store.getDraft(parent.id);
-      if (!current || current.retryLeaseClaimedAt !== parent.retryLeaseClaimedAt ||
-          current.retryLeaseClaimToken !== parent.retryLeaseClaimToken) return;
+      const current = await store.getDraft(id);
+      if (!current || current.retryLeaseClaimToken !== claimToken ||
+          parent?.retryLeaseClaimedAt && current.retryLeaseClaimedAt !== parent.retryLeaseClaimedAt) return;
       const parentRetryAt = Date.parse(current.nextClipAttemptAt || '');
       const parentBackoffIsDurable = current.status === 'clip_retry_wait' &&
         Number.isFinite(parentRetryAt) && parentRetryAt > now();
       const children = await store.listDrafts();
       const retryChildren = children.filter((draft) =>
-        draft.parentId === parent.id && draft.sourceType === 'twitch_highlight_short' &&
+        draft.parentId === id && draft.sourceType === 'twitch_highlight_short' &&
         draft.status === 'clip_retry_wait' &&
         (isYouTubeUploadLimitError({ message: draft.error }) ||
           isRetryableYouTubeUploadRejection({ status: draft.uploadRejectionStatus })));
@@ -279,14 +280,14 @@ function createHighlightProcessor(dependencies) {
         'awaiting_owner_approval', 'excluded_by_owner'].includes(current.status);
       if (!parentBackoffIsDurable && !(settled && everyChildHasFutureDeadline)) return;
       if (typeof store.releaseHighlightRetryLease === 'function') {
-        await store.releaseHighlightRetryLease(parent.id, parent.retryLeaseClaimToken);
+        await store.releaseHighlightRetryLease(id, claimToken);
       } else {
-        await store.updateDraft(parent.id, {
+        await store.updateDraft(id, {
           retryLeaseUntil: null, retryLeaseClaimedAt: null, retryLeaseClaimToken: null
         });
       }
     } catch (error) {
-      logError(parent.id, error);
+      logError(id, error);
     }
   }
 
@@ -296,6 +297,7 @@ function createHighlightProcessor(dependencies) {
     let parentUploadStarted = false;
     let acceptedHighlightId = null;
     let retryLeaseHeartbeat = null;
+    let claimToken = String(queueOptions?.retryLeaseClaimToken || '');
     try {
       batch = await store.getDraft(id);
       if (!batch || batch.sourceType !== 'twitch_highlight_batch' || batch.status === 'completed' ||
@@ -305,17 +307,17 @@ function createHighlightProcessor(dependencies) {
         throw new Error('Durable highlight retry claims are unavailable; refusing to process this batch');
       }
       if (typeof store.claimHighlightRetryParent === 'function') {
-        const suppliedToken = queueOptions && queueOptions.retryLeaseClaimToken;
+        const suppliedToken = claimToken;
         if (suppliedToken) {
           if (batch.retryLeaseClaimToken !== suppliedToken ||
               Date.parse(batch.retryLeaseUntil || '') <= now()) return;
         } else {
           batch = await store.claimHighlightRetryParent(id, {
-            now: now(), maxAttempts, leaseMs: DEFAULT_HIGHLIGHT_RETRY_LEASE_MS
+            now: now(), maxAttempts: maxAutoAttempts, leaseMs: DEFAULT_HIGHLIGHT_RETRY_LEASE_MS
           });
           if (!batch) return;
         }
-        const claimToken = batch.retryLeaseClaimToken;
+        claimToken = batch.retryLeaseClaimToken;
         if (claimToken && typeof store.extendHighlightRetryLease === 'function') {
           const heartbeatMs = Math.max(1000, Math.floor(DEFAULT_HIGHLIGHT_RETRY_LEASE_MS / 3));
           retryLeaseHeartbeat = setInterval(() => {
@@ -1063,7 +1065,7 @@ function createHighlightProcessor(dependencies) {
     } finally {
       if (retryLeaseHeartbeat) clearInterval(retryLeaseHeartbeat);
       await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => {});
-      await releaseRetryLeaseWhenDurable(batch);
+      await releaseRetryLeaseWhenDurable(batch, id, claimToken);
     }
   }
 
