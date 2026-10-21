@@ -11,6 +11,23 @@ test('identifies a definite YouTube channel upload-limit rejection', () => {
   assert.equal(isYouTubeUploadLimitError(new Error('network socket closed')), false);
 });
 
+test('continues recovery for other drafts when one recovery write fails', async () => {
+  const drafts = [
+    { id: 'broken-write', sourceType: 'twitch_vod', status: 'uploading_private_to_youtube' },
+    { id: 'next', sourceType: 'twitch_vod', status: 'uploading_private_to_youtube' }
+  ];
+  const errors = [];
+  const recovered = await recoverInterruptedYouTubeUploads(drafts, async (id) => {
+    if (id === 'broken-write') throw new Error('temporary database error');
+    return { ...drafts[1], status: 'clip_upload_uncertain' };
+  }, (error, draft) => errors.push([draft.id, error.message]));
+
+  assert.deepEqual(errors, [['broken-write', 'temporary database error']]);
+  assert.equal(recovered[0].status, 'clip_upload_uncertain');
+  assert.equal(recovered[1].status, 'clip_upload_uncertain');
+  assert.equal(recovered[0].productionState, 'manual_reconciliation');
+});
+
 test('recovers interrupted private uploads without retrying ambiguous ones', async () => {
   const drafts = [
     { id: 'ambiguous', sourceType: 'twitch_vod', status: 'uploading_private_to_youtube' },
