@@ -11,6 +11,7 @@ const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
   shouldRequeueTwitchSegmentDurationFailure, waitForVerifiedClipMetadata } = require('../src/highlight-pipeline');
 const { buildHighlightTimeline, buildHighlightDescription } = require('../src/highlight-metadata');
 const { downloadClip } = require('../src/twitch');
+const { computeRetryDelayMs } = require('../src/draft-recovery');
 
 test('one-time diagnostic retry is limited to failed Twitch download-host batches', () => {
   const failed = {
@@ -329,6 +330,7 @@ async function harness(t, options = {}) {
   const dependencies = {
     uploadDir, store, twitch, video, youtube, seo, autoAssignPlaylist,
     buildHighlightTimeline, buildHighlightDescription, cleanText,
+    now: options.now,
     autoPublish: options.autoPublish !== false,
     maxAutoAttempts: options.maxAutoAttempts,
     sleep: options.sleep || (async () => {}),
@@ -518,19 +520,28 @@ test('repeated moment labels produce unique titles and clip-specific description
   assert.ok(h.drafts.get(h.batch.id).title.includes('Highlights: Saevond ranked session — Same clutch moment'));
 });
 
-test('a definite Short 429 schedules a safe retry and then completes without duplicate uploads', async (t) => {
-  const h = await harness(t, { failShortTitle: 'Moment two' });
+test('a definite Short 429 schedules a deterministic safe retry without duplicate uploads', async (t) => {
+  let clock = Date.now();
+  const h = await harness(t, { failShortTitle: 'Moment two', now: () => clock });
   await h.processor(h.batch.id);
-  assert.equal(h.drafts.get(h.batch.id).status, 'clip_retry_wait');
-  assert.ok(Date.parse(h.drafts.get(h.batch.id).nextClipAttemptAt) > Date.now());
-  assert.match(h.drafts.get(h.batch.id).error, /Short 2/);
-  assert.equal([...h.drafts.values()].filter((draft) => draft.sourceType === 'twitch_highlight_short').length, 2);
+  const parent = h.drafts.get(h.batch.id);
+  assert.equal(parent.status, 'clip_retry_wait');
+  assert.ok(Date.parse(parent.nextClipAttemptAt) > clock);
+  assert.match(parent.error, /Short 2/);
+  assert.equal([...h.drafts.values()].filter((draft) => draft.sourceType === 'twitch_highlight_short').length, 3,
+    'later Shorts in the batch continue after one definite rejection');
   const retryableShort = [...h.drafts.values()].find((draft) =>
     draft.sourceType === 'twitch_highlight_short' && draft.highlightIndex === 1);
   assert.equal(retryableShort.uploadRejectionStatus, 429);
-  const dueAt = new Date(Date.now() - 1000).toISOString();
-  await h.store.updateDraft(retryableShort.id, { nextClipAttemptAt: dueAt });
-  await h.store.updateDraft(h.batch.id, { nextClipAttemptAt: dueAt });
+  const expectedChildDelay = computeRetryDelayMs({
+    attempt: 1, providerRetryAfterMs: 0, minimumDelayMs: 1000,
+    baseDelayMs: 60 * 1000, maxDelayMs: 30 * 60 * 1000, seed: retryableShort.id
+  });
+  assert.equal(Date.parse(retryableShort.nextClipAttemptAt), clock + expectedChildDelay);
+  assert.deepEqual(findDueHighlightRetries([parent], clock), [],
+    'the parent selector does not schedule before the persisted backoff');
+  clock = Math.max(Date.parse(retryableShort.nextClipAttemptAt), Date.parse(parent.nextClipAttemptAt));
+  assert.deepEqual(findDueHighlightRetries([parent], clock).map((draft) => draft.id), [parent.id]);
   await h.processor(h.batch.id);
   assert.equal(h.drafts.get(h.batch.id).status, 'completed');
   assert.equal(h.drafts.get(h.batch.id).productionState, 'published');
@@ -623,7 +634,7 @@ test('explicit parent upload 429 is safely queued, but a lost response stays unc
   assert.equal(ambiguous.counters.uploads.filter((upload) => upload.succeeded).length, 0);
 });
 
-test('explicit Short 403 rejection is actionable and not classified as an ambiguous upload', async (t) => {
+test('explicit Short 403 remains failed and can be retried after owner fixes access', async (t) => {
   const h = await harness(t, { failShort403: true });
   await h.processor(h.batch.id);
   const short = [...h.drafts.values()].find((draft) => draft.sourceType === 'twitch_highlight_short');
@@ -631,6 +642,13 @@ test('explicit Short 403 rejection is actionable and not classified as an ambigu
   assert.equal(short.uploadRejectionStatus, 403);
   assert.equal(h.drafts.get(h.batch.id).status, 'clip_partial');
   assert.equal(short.youtubeVideoId, null);
+
+  // This second invocation models the owner explicitly retrying the parent after fixing OAuth.
+  await h.processor(h.batch.id);
+  const retried = h.drafts.get(short.id);
+  assert.equal(retried.uploadRejectionStatus, null);
+  assert.ok(retried.youtubeVideoId);
+  assert.equal(h.counters.uploads.filter((upload) => upload.kind === 'short' && upload.succeeded).length, 3);
 });
 
 test('transient failures use bounded backoff attempts, while authorization errors are permanent', async (t) => {
