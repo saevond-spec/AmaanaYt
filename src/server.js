@@ -1362,7 +1362,9 @@ store.init()
       try {
         let drafts = await store.listDrafts();
         drafts = await recoverInterruptedYouTubeUploads(drafts,
-          (id, patch) => store.updateDraft(id, patch));
+          (id, patch) => store.updateDraft(id, patch),
+          (error, draft) => console.error('Could not persist interrupted upload recovery for ' +
+            draft.id + ': ' + error.message));
         twitchHighlightDiscovery.start();
         const resumable = new Set([
           'clip_queued',
