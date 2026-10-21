@@ -298,6 +298,9 @@ function createHighlightProcessor(dependencies) {
     let acceptedHighlightId = null;
     let retryLeaseHeartbeat = null;
     let claimToken = String(queueOptions?.retryLeaseClaimToken || '');
+    const updateOwnedDraft = (patch) => claimToken &&
+      typeof store.updateDraftWithRetryLease === 'function'
+      ? store.updateDraftWithRetryLease(id, claimToken, patch) : Promise.resolve(null);
     try {
       batch = await store.getDraft(id);
       if (!batch || batch.sourceType !== 'twitch_highlight_batch' || batch.status === 'completed' ||
@@ -328,7 +331,7 @@ function createHighlightProcessor(dependencies) {
         }
       }
       if (Number(batch.clipAttemptCount || 0) >= maxAutoAttempts) {
-        await store.updateDraft(id, {
+        await updateOwnedDraft( {
           status: 'clip_failed', productionState: 'manual_review',
           error: 'Automatic highlight attempt limit reached; owner review is required.',
           retryLeaseUntil: null, retryLeaseClaimedAt: null, retryLeaseClaimToken: null
@@ -376,19 +379,39 @@ function createHighlightProcessor(dependencies) {
         return reason;
       };
       await fs.promises.mkdir(directory, { recursive: true });
-      await store.updateDraft(id, {
+      const twitchClips = [...(batch.twitchClips || [])];
+      if (batch.status === 'creating_twitch_clips') {
+        const ambiguousIndex = batch.highlights.findIndex((_moment, index) => !twitchClips[index]?.id);
+        if (ambiguousIndex >= 0) {
+          await updateOwnedDraft({
+            status: 'clip_failed', productionState: 'manual_review',
+            error: 'Twitch may have accepted clip creation for highlight ' + (ambiguousIndex + 1) +
+              ' before the worker stopped. Check Twitch clips before retrying.',
+            nextClipAttemptAt: null
+          });
+          return;
+        }
+      }
+      const creating = await store.updateDraftWithRetryLease(id, claimToken, {
         status: 'creating_twitch_clips', productionState: 'processing',
         clipAttemptCount: attemptCount, nextClipAttemptAt: null, error: null, productionFailures: []
       });
+      if (!creating) return;
+      batch = { ...batch, ...creating };
 
       const sources = [];
-      const twitchClips = [...(batch.twitchClips || [])];
       for (let index = 0; index < batch.highlights.length; index += 1) {
         const moment = batch.highlights[index];
         let clip = twitchClips[index];
         if (!clip) {
           const requestedVodOffset = Math.round(moment.endSeconds);
           const requestedDuration = Number(moment.duration.toFixed(1));
+          const intent = await updateOwnedDraft({
+            pendingTwitchClipIntentIndex: index,
+            pendingTwitchClipIntentAt: new Date(now()).toISOString()
+          });
+          if (!intent) return;
+          batch = { ...batch, ...intent };
           const created = await twitch.createClipFromVod({
             vodId: batch.vodId, vodOffset: requestedVodOffset,
             duration: requestedDuration, title: moment.title
@@ -402,7 +425,11 @@ function createHighlightProcessor(dependencies) {
             requestProofReconstructed: false
           };
           twitchClips[index] = clip;
-          await store.updateDraft(id, { twitchClips });
+          const savedClip = await updateOwnedDraft({
+            twitchClips, pendingTwitchClipIntentIndex: null, pendingTwitchClipIntentAt: null
+          });
+          if (!savedClip) return;
+          batch = { ...batch, ...savedClip };
         } else if (['twitch_clips_api', 'twitch_live_capture'].includes(batch.discoverySource) &&
             clip.requestProofVersion !== 1) {
           // Older Amaana batches stored the clip ID but not the request fields. This pipeline
@@ -416,7 +443,7 @@ function createHighlightProcessor(dependencies) {
             requestProofReconstructed: true
           };
           twitchClips[index] = clip;
-          await store.updateDraft(id, { twitchClips });
+          await updateOwnedDraft( { twitchClips });
         }
         const download = await twitch.waitForClipDownload({
           clipId: clip.id, broadcasterId: clip.broadcasterId, editorId: clip.editorId
@@ -444,7 +471,7 @@ function createHighlightProcessor(dependencies) {
           });
         }
         twitchClips[index] = { ...twitchClips[index], timestampVerification: verifiedTimestamp };
-        await store.updateDraft(id, { twitchClips });
+        await updateOwnedDraft( { twitchClips });
         const url = download.landscape_download_url;
         if (!url) throw new Error('Twitch clip has no landscape gameplay source; portrait-only Twitch media is rejected');
         const source = path.join(directory, 'source-' + index + '.mp4');
@@ -472,12 +499,12 @@ function createHighlightProcessor(dependencies) {
             model: cleanText(visualGameplay.model || '', 80)
           }
         };
-        await store.updateDraft(id, { twitchClips });
+        await updateOwnedDraft( { twitchClips });
         sources.push(source);
       }
 
       const montage = path.join(directory, 'highlight.mp4');
-      await store.updateDraft(id, { status: 'assembling_highlight_video' });
+      await updateOwnedDraft( { status: 'assembling_highlight_video' });
       const durations = await video.assembleHighlights(sources, montage, directory,
         batch.highlights.map((moment) => Number(moment.duration)),
         Number.isFinite(targetHighlightDurationSeconds) ? targetHighlightDurationSeconds : null);
@@ -531,7 +558,7 @@ function createHighlightProcessor(dependencies) {
           chapterStatus: timeline.chapters.length >= 3 ? 'chapters_added' : 'timestamps_only',
           thumbnailStatus, thumbnailError, thumbnailHeadline
         });
-        await store.updateDraft(id, uploadIntent);
+        await updateOwnedDraft( uploadIntent);
         if (!await ownsRetryLease(id, batch.retryLeaseClaimToken)) return;
         parentUploadStarted = true;
         highlight = await youtube.uploadPrivate({
@@ -562,7 +589,7 @@ function createHighlightProcessor(dependencies) {
       if (acceptedHighlightId) {
         await persistAcceptedYouTubeUpload(store, id, acceptedHighlightId, highlightPatch);
       } else {
-        await store.updateDraft(id, highlightPatch);
+        await updateOwnedDraft( highlightPatch);
       }
 
       const playlistAssignment = await autoAssignPlaylist({
@@ -571,7 +598,7 @@ function createHighlightProcessor(dependencies) {
         context: { topic: batch.streamTitle || '', takeaways: batch.highlights.map((moment) =>
           moment.title + ': ' + moment.reason).join('\n'), videoType: 'Gameplay' }
       });
-      await store.updateDraft(id, { playlistAssignment });
+      await updateOwnedDraft( { playlistAssignment });
 
       if (batch.pipelineVersion >= 2 && thumbnailReady) {
         try {
@@ -582,7 +609,7 @@ function createHighlightProcessor(dependencies) {
           thumbnailStatus = 'failed';
           thumbnailError = noteFailure('thumbnail', error, 300);
         }
-        await store.updateDraft(id, { thumbnailStatus, thumbnailError, thumbnailHeadline });
+        await updateOwnedDraft( { thumbnailStatus, thumbnailError, thumbnailHeadline });
       }
       if (batch.pipelineVersion >= 2 && thumbnailStatus !== 'applied') {
         if (!failures.some((failure) => failure.startsWith('thumbnail: '))) {
@@ -713,24 +740,29 @@ function createHighlightProcessor(dependencies) {
               seoRegistrationStatus: 'pending', publicationStatus: 'pending',
               createdAt: new Date().toISOString()
             };
-            // Persist a durable intent before contacting YouTube.
-            await store.addDraft(shortDraft);
+            // Serialize child creation with owner exclusion on the parent row.
+            if (typeof store.addHighlightShortDraft !== 'function') {
+              throw new Error('Atomic highlight Short creation is unavailable; no Short upload was made');
+            }
+            const savedShortDraft = await store.addHighlightShortDraft(id, claimToken, shortDraft);
+            if (!savedShortDraft) return;
+            shortDraft = savedShortDraft;
             shortsByIndex.set(index, shortDraft);
           }
           await video.shortFromHighlight(montage, offset, length, shortPath);
           await video.validateShort(shortPath, length);
-          await store.updateDraft(shortDraft.id, {
+          if (typeof store.reserveHighlightShortUpload !== 'function') {
+            throw new Error('Atomic highlight Short upload reservation is unavailable; no Short upload was made');
+          }
+          const uploadReservation = await store.reserveHighlightShortUpload(id, claimToken, shortDraft.id, {
             status: 'uploading_private_to_youtube', productionState: 'uploading',
             mediaValidation: 'passed', title: shortTitle, description: shortDescription,
             tags: shortTags, nextClipAttemptAt: null, error: null,
             uploadRejectionStatus: null
           });
-          shortDraft = { ...shortDraft, status: 'uploading_private_to_youtube',
-            productionState: 'uploading', mediaValidation: 'passed',
-            title: shortTitle, description: shortDescription, tags: shortTags,
-            uploadRejectionStatus: null };
+          if (!uploadReservation) return;
+          shortDraft = uploadReservation;
           shortsByIndex.set(index, shortDraft);
-          if (!await ownsRetryLease(id, batch.retryLeaseClaimToken)) return;
           const uploaded = await youtube.uploadPrivate({
             filePath: shortPath, title: shortTitle, description: shortDescription, tags: shortTags
           });
@@ -919,7 +951,7 @@ function createHighlightProcessor(dependencies) {
             });
           }
         }
-        await store.updateDraft(id, {
+        await updateOwnedDraft( {
           status: canAutoRetry ? 'clip_retry_wait' : 'clip_partial',
           productionState: canAutoRetry ? 'retry_scheduled' : 'partial',
           productionFailures: failures.length ? failures : [error], error, nextClipAttemptAt,
@@ -934,14 +966,14 @@ function createHighlightProcessor(dependencies) {
             });
           }
         }
-        await store.updateDraft(id, {
+        await updateOwnedDraft( {
           status: 'awaiting_owner_approval', productionState: 'ready',
           publicationStatus: 'pending', productionFailures: [], error: null,
           nextClipAttemptAt: null, processedAt: new Date(now()).toISOString()
         });
         logSuccess(id, finalShorts.length);
       } else {
-        await store.updateDraft(id, {
+        await updateOwnedDraft( {
           status: 'clip_retry_wait', productionState: 'publishing',
           publicationStatus: 'publishing', productionFailures: [], error: null,
           nextClipAttemptAt: new Date(now()).toISOString()
@@ -991,7 +1023,7 @@ function createHighlightProcessor(dependencies) {
           publishedShorts.length === expectedShortCount &&
           publishedShorts.every((draft) => draft.publicationStatus === 'published');
         if (publishedEverything) {
-          await store.updateDraft(id, {
+          await updateOwnedDraft( {
             status: 'completed', productionState: 'published',
             publicationStatus: 'published', productionFailures: [], error: null,
             nextClipAttemptAt: null, processedAt: new Date(now()).toISOString()
@@ -1008,7 +1040,7 @@ function createHighlightProcessor(dependencies) {
               }
             }
           }
-          await store.updateDraft(id, {
+          await updateOwnedDraft( {
             status: canAutoRetry ? 'clip_retry_wait' : 'awaiting_owner_approval',
             productionState: canAutoRetry ? 'retry_scheduled' : 'ready',
             publicationStatus: canAutoRetry ? 'retry' : 'failed',
@@ -1019,6 +1051,18 @@ function createHighlightProcessor(dependencies) {
         }
       }
     } catch (error) {
+      const pendingIndex = Number(batch?.pendingTwitchClipIntentIndex);
+      if (Number.isSafeInteger(pendingIndex) && pendingIndex >= 0 &&
+          !batch?.twitchClips?.[pendingIndex]?.id) {
+        logError(id, error);
+        await updateOwnedDraft({
+          status: 'clip_failed', productionState: 'manual_review',
+          error: 'Twitch clip creation for highlight ' + (pendingIndex + 1) +
+            ' may have succeeded before the request failed. Check Twitch clips before retrying.',
+          nextClipAttemptAt: null, processedAt: new Date(now()).toISOString()
+        }).catch(() => {});
+        return;
+      }
       let message = cleanText(error.message || 'Highlight production failed', 500);
       const attemptCount = (Number(batch && batch.clipAttemptCount) || 0) + 1;
       const uploadLimitRejected = isYouTubeUploadLimitError(error);
@@ -1028,7 +1072,7 @@ function createHighlightProcessor(dependencies) {
       let latest = await store.getDraft(id).catch(() => null);
       if (!latest?.youtubeVideoId && (acceptedHighlightId || error.youtubeVideoId)) {
         const knownId = acceptedHighlightId || error.youtubeVideoId;
-        latest = await store.updateDraft(id, {
+        latest = await updateOwnedDraft( {
           youtubeVideoId: knownId, status: 'creating_shorts', productionState: 'processing',
           error: null, nextClipAttemptAt: null
         }).catch(() => latest);
@@ -1047,14 +1091,14 @@ function createHighlightProcessor(dependencies) {
       }
       logError(id, error);
       if (uploadingWithoutId && !uploadLimitRejected && !definiteUploadRejection) {
-        await store.updateDraft(id, {
+        await updateOwnedDraft( {
           status: 'clip_upload_uncertain', productionState: 'manual_reconciliation',
           error: 'YouTube upload may have been accepted before its video ID was saved. Check the channel for a private upload before retrying.',
           productionFailures: [message], nextClipAttemptAt: null,
           processedAt: new Date(now()).toISOString()
         }).catch(() => {});
       } else {
-        await store.updateDraft(id, {
+        await updateOwnedDraft( {
           status: canAutoRetry ? 'clip_retry_wait' : 'clip_failed',
           productionState: canAutoRetry ? 'retry_scheduled' : 'failed', error: message,
           productionFailures: [message],
