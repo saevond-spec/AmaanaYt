@@ -4,6 +4,7 @@ const { Pool } = require('pg');
 const { prioritizeSeoAutoCandidates } = require('./seo-priority');
 const SEO_AUTOPILOT_VERSION = require('./seo-autopilot-version');
 const { createRetryableInitializer } = require('./retryable-initializer');
+const { isDueRetryableHighlightShort } = require('./draft-recovery');
 
 function databaseConnectionString(value, production = false) {
   if (!production || !value) return value;
@@ -215,6 +216,89 @@ async function updateDraft(id, patch) {
   } finally {
     client.release();
   }
+}
+
+async function claimHighlightRetryParent(id, options = {}) {
+  const timestamp = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
+  const leaseMs = Number.isFinite(Number(options.leaseMs)) && Number(options.leaseMs) > 0
+    ? Math.min(Number(options.leaseMs), 60 * 60 * 1000) : 15 * 60 * 1000;
+  const maxAttempts = Number.isSafeInteger(options.maxAttempts) && options.maxAttempts > 0
+    ? Math.min(options.maxAttempts, 24) : 12;
+  const claimToken = String(options.claimToken || crypto.randomUUID());
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(claimToken)) {
+    throw new Error('A UUID retry claim token is required');
+  }
+  await init();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const selected = await client.query(
+      'SELECT payload FROM amaana_drafts WHERE id = $1 FOR UPDATE', [id]);
+    const parent = selected.rows[0]?.payload;
+    const retryValue = parent?.nextClipAttemptAt;
+    const retryAt = Date.parse(retryValue || '');
+    const leaseValue = parent?.retryLeaseUntil;
+    const leaseUntil = Date.parse(leaseValue || '');
+    const allowedStatuses = ['clip_queued', 'creating_twitch_clips',
+      'assembling_highlight_video', 'creating_shorts', 'clip_partial', 'clip_retry_wait'];
+    let eligible = Boolean(parent && parent.sourceType === 'twitch_highlight_batch' &&
+      parent.youtubeVideoId && allowedStatuses.includes(parent.status) &&
+      Number(parent.clipAttemptCount || 0) < maxAttempts &&
+      parent.productionState !== 'published' && parent.publicationStatus !== 'published' &&
+      !(leaseValue != null && leaseValue !== '' && !Number.isFinite(leaseUntil)) &&
+      !(Number.isFinite(leaseUntil) && leaseUntil > timestamp) &&
+      !(retryValue != null && retryValue !== '' && !Number.isFinite(retryAt)) &&
+      !(Number.isFinite(retryAt) && retryAt > timestamp));
+    if (eligible && parent.status === 'clip_retry_wait') {
+      eligible = Number.isFinite(retryAt) && retryAt <= timestamp;
+    }
+    if (eligible && parent.status === 'clip_partial') {
+      const children = await client.query(
+        `SELECT payload FROM amaana_drafts
+          WHERE payload->>'parentId' = $1
+            AND payload->>'sourceType' = 'twitch_highlight_short'
+          FOR UPDATE`, [String(id)]);
+      eligible = children.rows.some((row) =>
+        isDueRetryableHighlightShort(row.payload, timestamp));
+    }
+    if (!eligible) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    const claimedAt = new Date(timestamp).toISOString();
+    const updated = {
+      ...parent,
+      retryLeaseUntil: new Date(timestamp + leaseMs).toISOString(),
+      retryLeaseClaimedAt: claimedAt,
+      retryLeaseClaimToken: claimToken,
+      updatedAt: claimedAt
+    };
+    await client.query(
+      'UPDATE amaana_drafts SET payload = $2::jsonb, updated_at = NOW() WHERE id = $1',
+      [id, JSON.stringify(updated)]);
+    await client.query('COMMIT');
+    return updated;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function extendHighlightRetryLease(id, claimToken, leaseMs = 15 * 60 * 1000) {
+  const duration = Number.isFinite(Number(leaseMs)) && Number(leaseMs) > 0
+    ? Math.min(Number(leaseMs), 60 * 60 * 1000) : 15 * 60 * 1000;
+  const leaseUntil = new Date(Date.now() + duration).toISOString();
+  await init();
+  const result = await pool.query(
+    `UPDATE amaana_drafts
+      SET payload = jsonb_set(payload, '{retryLeaseUntil}', to_jsonb($3::text), true),
+          updated_at = NOW()
+      WHERE id = $1 AND payload->>'retryLeaseClaimToken' = $2
+      RETURNING payload`,
+    [id, String(claimToken), leaseUntil]);
+  return result.rows[0]?.payload || null;
 }
 
 async function excludeDrafts(ids, reason = 'owner_excluded_non_gameplay_test') {
@@ -974,6 +1058,8 @@ module.exports = {
   getDraft,
   addDraft,
   updateDraft,
+  claimHighlightRetryParent,
+  extendHighlightRetryLease,
   excludeDrafts,
   claimTikTokDelivery,
   saveSeoSyncState,
