@@ -7,7 +7,8 @@ const { validateHighlightMoments, verifyCreatedClip, verifyClipCreationRequest }
 const { buildHighlightTitle: defaultBuildHighlightTitle, buildShortTitle: defaultBuildShortTitle,
   buildShortDescription: defaultBuildShortDescription } = require('./highlight-metadata');
 const { isYouTubeUploadLimitError, isDefiniteYouTubeUploadRejection,
-  isRetryableYouTubeUploadRejection, YOUTUBE_UPLOAD_LIMIT_RETRY_MS } = require('./draft-recovery');
+  isRetryableYouTubeUploadRejection, youtubeUploadHttpStatus,
+  YOUTUBE_UPLOAD_LIMIT_RETRY_MS } = require('./draft-recovery');
 
 function createBatchQueue(processJob, options = {}) {
   const schedule = options.schedule || setImmediate;
@@ -578,7 +579,8 @@ function createHighlightProcessor(dependencies) {
             continue;
           }
           const existingShortRetryDue = existingShort.status === 'clip_retry_wait' &&
-            isYouTubeUploadLimitError({ message: existingShort.error }) &&
+            (isYouTubeUploadLimitError({ message: existingShort.error }) ||
+              isRetryableYouTubeUploadRejection({ status: existingShort.uploadRejectionStatus })) &&
             Number.isFinite(Date.parse(existingShort.nextClipAttemptAt || '')) &&
             Date.parse(existingShort.nextClipAttemptAt) <= now();
           if (existingShort.status !== 'clip_queued' && !existingShortRetryDue) {
@@ -613,11 +615,13 @@ function createHighlightProcessor(dependencies) {
           await store.updateDraft(shortDraft.id, {
             status: 'uploading_private_to_youtube', productionState: 'uploading',
             mediaValidation: 'passed', title: shortTitle, description: shortDescription,
-            tags: shortTags, nextClipAttemptAt: null, error: null
+            tags: shortTags, nextClipAttemptAt: null, error: null,
+            uploadRejectionStatus: null
           });
           shortDraft = { ...shortDraft, status: 'uploading_private_to_youtube',
             productionState: 'uploading', mediaValidation: 'passed',
-            title: shortTitle, description: shortDescription, tags: shortTags };
+            title: shortTitle, description: shortDescription, tags: shortTags,
+            uploadRejectionStatus: null };
           shortsByIndex.set(index, shortDraft);
           const uploaded = await youtube.uploadPrivate({
             filePath: shortPath, title: shortTitle, description: shortDescription, tags: shortTags
@@ -680,18 +684,22 @@ function createHighlightProcessor(dependencies) {
                 : cleanText(error.message || 'YouTube rejected the Short upload; retry is scheduled', 300);
               await store.updateDraft(shortDraft.id, {
                 status: 'clip_retry_wait', productionState: 'retry_scheduled',
-                nextClipAttemptAt, error: errorMessage
+                nextClipAttemptAt, error: errorMessage,
+                uploadRejectionStatus: youtubeUploadHttpStatus(error)
               }).catch(() => {});
               shortDraft = { ...shortDraft, status: 'clip_retry_wait',
-                productionState: 'retry_scheduled', nextClipAttemptAt, error: errorMessage };
+                productionState: 'retry_scheduled', nextClipAttemptAt, error: errorMessage,
+                uploadRejectionStatus: youtubeUploadHttpStatus(error) };
             } else if (definiteUploadRejection) {
               const errorMessage = cleanText(error.message || 'YouTube rejected the Short upload', 300);
               await store.updateDraft(shortDraft.id, {
                 status: 'clip_failed', productionState: 'failed',
-                nextClipAttemptAt: null, error: errorMessage
+                nextClipAttemptAt: null, error: errorMessage,
+                uploadRejectionStatus: youtubeUploadHttpStatus(error)
               }).catch(() => {});
               shortDraft = { ...shortDraft, status: 'clip_failed',
-                productionState: 'failed', nextClipAttemptAt: null, error: errorMessage };
+                productionState: 'failed', nextClipAttemptAt: null, error: errorMessage,
+                uploadRejectionStatus: youtubeUploadHttpStatus(error) };
             } else {
               const errorMessage = 'Short upload may have been accepted without a saved YouTube ID. Check the channel for a private upload before retrying.';
               await store.updateDraft(shortDraft.id, {
