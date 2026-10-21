@@ -292,15 +292,29 @@ function unlinkQuietly(filePath) {
   if (filePath) fs.unlink(filePath, () => {});
 }
 
-async function processTwitchClipDraft(id) {
+async function processTwitchClipDraft(id, queueOptions = {}) {
   let sourcePath;
   let shortPath;
+  let claimToken = null;
+  let leaseHeartbeat = null;
+  const ownsLease = async () => {
+    if (!claimToken) return false;
+    const current = await store.getDraft(id);
+    const leaseUntil = Date.parse(current?.retryLeaseUntil || '');
+    return Boolean(current && current.status !== 'excluded_by_owner' &&
+      current.productionState !== 'excluded' && !current.excludedAt &&
+      current.retryLeaseClaimToken === claimToken &&
+      Number.isFinite(leaseUntil) && leaseUntil > Date.now());
+  };
   try {
     let draft = await store.getDraft(id);
     if (!draft || draft.sourceType !== 'twitch_vod' || draft.status === 'awaiting_owner_approval' ||
-        draft.status === 'excluded_by_owner') return;
-    const activeLeaseUntil = Date.parse(draft.retryLeaseUntil || '');
-    if (draft.retryLeaseClaimToken && Number.isFinite(activeLeaseUntil) && activeLeaseUntil > Date.now()) return;
+        draft.status === 'excluded_by_owner' || draft.productionState === 'excluded' || draft.excludedAt) return;
+    if (draft.youtubeVideoId) {
+      await store.updateDraft(id, { status: 'awaiting_owner_approval',
+        productionState: 'ready', error: null, nextClipAttemptAt: null });
+      return;
+    }
     if (Number(draft.clipAttemptCount || 0) >= twitchClipMaxAutoAttempts) {
       await store.updateDraft(id, {
         status: 'clip_failed', productionState: 'manual_review',
@@ -309,15 +323,41 @@ async function processTwitchClipDraft(id) {
       });
       return;
     }
-    if (draft.youtubeVideoId) {
-      await store.updateDraft(id, { status: 'awaiting_owner_approval',
-        productionState: 'ready', error: null, nextClipAttemptAt: null });
+    if (typeof store.claimTwitchVodDraft !== 'function') {
+      throw new Error('Durable Twitch VOD claims are unavailable; refusing to process this clip');
+    }
+    const suppliedClaimToken = String(queueOptions?.retryLeaseClaimToken || '');
+    if (suppliedClaimToken) {
+      const leaseUntil = Date.parse(draft.retryLeaseUntil || '');
+      if (draft.retryLeaseClaimToken !== suppliedClaimToken ||
+          !Number.isFinite(leaseUntil) || leaseUntil <= Date.now()) return;
+      claimToken = suppliedClaimToken;
+    } else {
+      draft = await store.claimTwitchVodDraft(id, {
+        maxAttempts: twitchClipMaxAutoAttempts, leaseMs: 15 * 60 * 1000
+      });
+      if (!draft) return;
+      claimToken = draft.retryLeaseClaimToken;
+    }
+    if (!claimToken) return;
+    leaseHeartbeat = setInterval(() => {
+      store.extendHighlightRetryLease(id, claimToken, 15 * 60 * 1000)
+        .catch((error) => console.error('Failed to extend Twitch VOD retry lease ' + id + ':', error.message));
+    }, 5 * 60 * 1000);
+    leaseHeartbeat.unref?.();
+
+    if (draft.status === 'creating_twitch_clip' && !draft.twitchClipId) {
+      await store.updateDraft(id, {
+        status: 'clip_failed', productionState: 'manual_review', nextClipAttemptAt: null,
+        error: 'Twitch clip creation may have completed before this worker stopped. Check Twitch clips before retrying.'
+      });
       return;
     }
     draft = await store.updateDraft(id, {
       clipAttemptCount: (Number(draft.clipAttemptCount) || 0) + 1,
       lastClipAttemptAt: new Date().toISOString()
     });
+    if (!draft || !await ownsLease()) return;
     if (draft.discoverySource === 'twitch_live_capture' && !hasVerifiedLiveGameplayClip(draft)) {
       throw new Error('Live Twitch clip did not pass gameplay verification; no YouTube upload was made');
     }
@@ -325,6 +365,7 @@ async function processTwitchClipDraft(id) {
 
     if (!draft.twitchClipId) {
       draft = await store.updateDraft(id, { status: 'creating_twitch_clip', error: null });
+      if (!draft || !await ownsLease()) return;
       const clip = await twitch.createClipFromVod({
         vodId: draft.vodId,
         vodOffset: draft.endSeconds,
@@ -387,7 +428,8 @@ async function processTwitchClipDraft(id) {
     }
     await video.validateShort(shortPath, draft.duration);
 
-    await store.updateDraft(id, { status: 'uploading_private_to_youtube' });
+    const uploadReservation = await store.updateDraft(id, { status: 'uploading_private_to_youtube' });
+    if (!uploadReservation || !await ownsLease()) return;
     const hasVodTimestamp = /^\d+$/.test(String(draft.vodId || '')) && Number.isFinite(Number(draft.startSeconds));
     const sourceUrl = hasVodTimestamp
       ? 'https://www.twitch.tv/videos/' + draft.vodId + '?t=' + Math.floor(draft.startSeconds) + 's'
@@ -491,6 +533,11 @@ async function processTwitchClipDraft(id) {
       await store.updateDraft(id, { status: 'clip_failed', error: cleanText(error.message, 500) }).catch(() => {});
     }
   } finally {
+    if (leaseHeartbeat) clearInterval(leaseHeartbeat);
+    if (claimToken && typeof store.releaseHighlightRetryLease === 'function') {
+      await store.releaseHighlightRetryLease(id, claimToken).catch((error) =>
+        console.error('Failed to release Twitch VOD retry lease ' + id + ':', error.message));
+    }
     unlinkQuietly(sourcePath);
     unlinkQuietly(shortPath);
   }
@@ -501,19 +548,28 @@ async function runClipQueue() {
   clipWorkerRunning = true;
   try {
     while (clipQueue.length) {
-      const id = clipQueue.shift();
-      try { await processTwitchClipDraft(id); } finally { queuedClipIds.delete(id); }
+      const job = clipQueue.shift();
+      try { await processTwitchClipDraft(job.id, job.options); } finally { queuedClipIds.delete(job.id); }
     }
   } finally {
     clipWorkerRunning = false;
   }
 }
 
-function enqueueClipProcessing(id) {
-  if (queuedClipIds.has(id)) return;
-  queuedClipIds.add(id);
-  clipQueue.push(id);
+function enqueueClipProcessing(id, options = null) {
+  const value = String(id);
+  if (queuedClipIds.has(value)) {
+    const pending = clipQueue.find((job) => job.id === value);
+    if (pending && options?.retryLeaseClaimToken) {
+      pending.options = { ...(pending.options || {}), ...options };
+      return true;
+    }
+    return false;
+  }
+  queuedClipIds.add(value);
+  clipQueue.push({ id: value, options });
   setImmediate(() => runClipQueue().catch((error) => console.error('Clip queue failed:', error.message)));
+  return true;
 }
 
 const processHighlightBatch = createHighlightProcessor({
@@ -543,9 +599,28 @@ async function scheduleDueHighlightRetries() {
   try {
     const drafts = await store.listDrafts();
     const timestamp = Date.now();
-    const dueTwitchVodRetries = new Set(
-      findDueTwitchVodRetries(drafts, timestamp, twitchClipMaxAutoAttempts).map((draft) => draft.id)
+    const dueTwitchVodRetryDrafts = findDueTwitchVodRetries(
+      drafts, timestamp, twitchClipMaxAutoAttempts
     );
+    const dueTwitchVodRetryIds = new Set(dueTwitchVodRetryDrafts.map((draft) => draft.id));
+    const claimedTwitchVodRetries = [];
+    for (const candidate of dueTwitchVodRetryDrafts) {
+      try {
+        const claimed = await store.claimTwitchVodDraft(candidate.id, {
+          now: timestamp, maxAttempts: twitchClipMaxAutoAttempts, leaseMs: 15 * 60 * 1000
+        });
+        if (claimed) claimedTwitchVodRetries.push(claimed);
+      } catch (error) {
+        console.error('Failed to claim Twitch VOD retry ' + candidate.id + ': ' + error.message);
+      }
+    }
+    for (const draft of claimedTwitchVodRetries) {
+      const claimToken = draft.retryLeaseClaimToken;
+      const accepted = enqueueClipProcessing(draft.id, { retryLeaseClaimToken: claimToken });
+      if (!accepted && typeof store.releaseHighlightRetryLease === 'function') {
+        await store.releaseHighlightRetryLease(draft.id, claimToken);
+      }
+    }
     const claimedShortRetryParents = await claimDueTwitchHighlightRetryParents(
       drafts,
       (id, claimOptions) => store.claimHighlightRetryParent(id, claimOptions),
@@ -566,10 +641,7 @@ async function scheduleDueHighlightRetries() {
     for (const draft of drafts) {
       if (draft.sourceType === 'twitch_highlight_batch' &&
           Number(draft.clipAttemptCount || 0) >= highlightMaxAutoAttempts) continue;
-      if (dueTwitchVodRetries.has(draft.id)) {
-        enqueueClipProcessing(draft.id);
-        continue;
-      }
+      if (dueTwitchVodRetryIds.has(draft.id)) continue;
       if (shouldRequeueTwitchSegmentDurationFailure(draft)) {
         const retryAt = new Date(timestamp).toISOString();
         await store.updateDraft(draft.id, {
