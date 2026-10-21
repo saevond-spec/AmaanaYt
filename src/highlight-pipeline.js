@@ -238,6 +238,13 @@ function createHighlightProcessor(dependencies) {
     }
   }
 
+  async function ownsRetryLease(id, claimToken) {
+    if (!claimToken) return true;
+    const current = await store.getDraft(id);
+    return Boolean(current && current.retryLeaseClaimToken === claimToken &&
+      Date.parse(current.retryLeaseUntil || '') > now());
+  }
+
   async function releaseRetryLeaseWhenDurable(parent) {
     if (!parent?.retryLeaseUntil || !parent.retryLeaseClaimedAt ||
         !parent.retryLeaseClaimToken) return;
@@ -261,9 +268,13 @@ function createHighlightProcessor(dependencies) {
       const settled = ['clip_partial', 'clip_failed', 'completed',
         'awaiting_owner_approval', 'excluded_by_owner'].includes(current.status);
       if (!parentBackoffIsDurable && !(settled && everyChildHasFutureDeadline)) return;
-      await store.updateDraft(parent.id, {
-        retryLeaseUntil: null, retryLeaseClaimedAt: null, retryLeaseClaimToken: null
-      });
+      if (typeof store.releaseHighlightRetryLease === 'function') {
+        await store.releaseHighlightRetryLease(parent.id, parent.retryLeaseClaimToken);
+      } else {
+        await store.updateDraft(parent.id, {
+          retryLeaseUntil: null, retryLeaseClaimedAt: null, retryLeaseClaimToken: null
+        });
+      }
     } catch (error) {
       logError(parent.id, error);
     }
@@ -506,6 +517,7 @@ function createHighlightProcessor(dependencies) {
           thumbnailStatus, thumbnailError, thumbnailHeadline
         });
         await store.updateDraft(id, uploadIntent);
+        if (!await ownsRetryLease(id, batch.retryLeaseClaimToken)) return;
         parentUploadStarted = true;
         highlight = await youtube.uploadPrivate({
           filePath: montage, title: highlightTitle, description, tags: highlightTags
@@ -703,6 +715,7 @@ function createHighlightProcessor(dependencies) {
             title: shortTitle, description: shortDescription, tags: shortTags,
             uploadRejectionStatus: null };
           shortsByIndex.set(index, shortDraft);
+          if (!await ownsRetryLease(id, batch.retryLeaseClaimToken)) return;
           const uploaded = await youtube.uploadPrivate({
             filePath: shortPath, title: shortTitle, description: shortDescription, tags: shortTags
           });
