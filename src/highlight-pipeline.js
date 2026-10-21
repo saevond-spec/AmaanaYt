@@ -1052,8 +1052,11 @@ function createHighlightProcessor(dependencies) {
       }
     } catch (error) {
       const pendingIndex = Number(batch?.pendingTwitchClipIntentIndex);
-      if (Number.isSafeInteger(pendingIndex) && pendingIndex >= 0 &&
-          !batch?.twitchClips?.[pendingIndex]?.id) {
+      const hasPendingClipIntent = Number.isSafeInteger(pendingIndex) && pendingIndex >= 0 &&
+        !batch?.twitchClips?.[pendingIndex]?.id;
+      const status = Number(error?.status || error?.statusCode);
+      const definiteProviderRejection = status >= 400 && status < 500;
+      if (hasPendingClipIntent && !definiteProviderRejection) {
         logError(id, error);
         await updateOwnedDraft({
           status: 'clip_failed', productionState: 'manual_review',
@@ -1062,6 +1065,13 @@ function createHighlightProcessor(dependencies) {
           nextClipAttemptAt: null, processedAt: new Date(now()).toISOString()
         }).catch(() => {});
         return;
+      }
+      if (hasPendingClipIntent && definiteProviderRejection) {
+        const clearedIntent = await updateOwnedDraft({
+          pendingTwitchClipIntentIndex: null, pendingTwitchClipIntentAt: null
+        }).catch(() => null);
+        if (!clearedIntent) return;
+        batch = { ...batch, ...clearedIntent };
       }
       let message = cleanText(error.message || 'Highlight production failed', 500);
       const attemptCount = (Number(batch && batch.clipAttemptCount) || 0) + 1;
