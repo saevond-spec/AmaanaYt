@@ -18,9 +18,6 @@ function problem(message, status = 400) {
 function retryablePublishError(error) {
   if (isYouTubeAuthorizationError(error)) return true;
   const code = Number(error?.status || error?.response?.status || error?.code);
-  if (code === 409 && /metadata changed since the package was generated/i.test(String(error?.message || ''))) {
-    return true;
-  }
   if ([401, 408, 425, 429, 500, 502, 503, 504].includes(code)) return true;
   if (code !== 403) return ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED', 'EPIPE'].includes(error?.code);
   const apiError = error?.response?.data?.error || {};
@@ -496,13 +493,22 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
       }
       assertVideoMatchesCatalog(video, channel.id, item);
     } catch (error) {
+      const staleMetadata = Number(error?.status || error?.response?.status || error?.code) === 409 &&
+        /metadata changed since the package was generated/i.test(String(error?.message || ''));
       const retry = retryablePublishError(error);
       if (isYouTubeQuotaError(error)) quotaFailure = error;
-      if (metadataWritePending) metadata = { state: retry ? 'retry' : 'skipped',
-        reason: publishErrorMessage(error) };
-      if (thumbnailWritePending) thumbnail = { state: retry ? 'retry' : 'skipped',
-        reason: publishErrorMessage(error) };
-      logger.warn?.('SEO auto publish ' + videoId + ': ' + publishErrorMessage(error));
+      const metadataReason = staleMetadata
+        ? publishErrorMessage(error) + '; owner review is required before updating this video'
+        : publishErrorMessage(error);
+      if (metadataWritePending) metadata = { state: retry ? 'retry' : 'skipped', reason: metadataReason };
+      if (thumbnailWritePending) thumbnail = {
+        state: staleMetadata ? 'skipped' : retry ? 'retry' : 'skipped',
+        reason: staleMetadata
+          ? 'Thumbnail held because YouTube metadata changed after package generation; owner review is required'
+          : publishErrorMessage(error)
+      };
+      const log = staleMetadata ? logger.info : logger.warn;
+      log?.call(logger, 'SEO auto publish ' + videoId + ': ' + metadataReason);
       return recordFailure(videoId, generation, metadata, thumbnail, prior, error);
     }
 
@@ -546,9 +552,14 @@ function createSeoPublisher({ store, youtube, logger = console, fetchImpl = fetc
         thumbnail = result;
         if (result.state === 'applied') logger.info?.('SEO thumbnail applied to public video ' + videoId);
       } catch (error) {
-        const retry = retryablePublishError(error);
+        const thumbnailNotReady = Number(error?.status || error?.response?.status || error?.code) === 404 &&
+          /YouTube thumbnail download returned HTTP 404/i.test(String(error?.message || ''));
+        const retry = thumbnailNotReady || retryablePublishError(error);
         if (isYouTubeQuotaError(error)) quotaFailure = error;
-        thumbnail = { state: retry ? 'retry' : 'skipped', reason: publishErrorMessage(error) };
+        const reason = thumbnailNotReady
+          ? publishErrorMessage(error) + '; will retry in one hour if the image becomes available'
+          : publishErrorMessage(error);
+        thumbnail = { state: retry ? 'retry' : 'skipped', reason };
         logger.warn?.('SEO thumbnail ' + videoId + ': ' + thumbnail.reason);
       }
     }
