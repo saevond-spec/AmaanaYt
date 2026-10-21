@@ -435,8 +435,9 @@ async function processTwitchClipDraft(id) {
     } else if (latest && latest.status === 'uploading_private_to_youtube' &&
         isYouTubeUploadLimitError(error)) {
       await store.updateDraft(id, {
-        status: 'clip_failed', productionState: 'failed', nextClipAttemptAt: null,
-        error: 'YouTube rejected this upload because the channel reached its daily upload limit. Retry after the limit resets.'
+        status: 'clip_retry_wait', productionState: 'retry_scheduled',
+        nextClipAttemptAt: new Date(Date.now() + YOUTUBE_UPLOAD_LIMIT_RETRY_MS).toISOString(),
+        error: 'YouTube rejected this upload because the channel upload limit was reached. A retry is queued after a conservative 24-hour wait.'
       }).catch(() => {});
     } else if (latest && latest.status === 'uploading_private_to_youtube') {
       await store.updateDraft(id, {
