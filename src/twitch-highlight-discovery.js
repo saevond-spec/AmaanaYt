@@ -426,7 +426,39 @@ function createTwitchHighlightDiscovery({
     if (!broadcast || !broadcast.stream) {
       const state = await getState();
       for (const session of Object.values(state.liveSessions)) {
-        if (!session || !Array.isArray(session.shortCandidates) || !session.shortCandidates.length) continue;
+        if (!session) continue;
+        const rawOffset = session.pendingCaptureOffset;
+        const pendingOffset = rawOffset === null || rawOffset === undefined || rawOffset === ''
+          ? NaN : Number(rawOffset);
+        const hasPendingCapture = Number.isFinite(pendingOffset) && pendingOffset >= 0;
+        if (hasPendingCapture && /^\\d+$/.test(String(session.vodId || ''))) {
+          try {
+            const archivedVod = await twitch.getVod(String(session.vodId));
+            const matchesSession = archivedVod && archivedVod.type === 'archive' &&
+              String(archivedVod.id) === String(session.vodId) &&
+              (!session.streamId || String(archivedVod.stream_id || '') === String(session.streamId));
+            if (!matchesSession) throw new Error('Archived VOD does not match the ended live session');
+            const handoff = await scanVod(archivedVod);
+            if (handoff.status !== 'already_scanning') {
+              session.pendingCaptureOffset = null;
+              session.pendingCaptureDuration = null;
+              session.pendingCaptureClipId = null;
+              session.pendingCaptureAttempts = 0;
+              session.nextCaptureAttemptAt = null;
+              session.pendingCaptureRecoveryStatus = handoff.status;
+              session.pendingCaptureRecoveredAt = new Date(now()).toISOString();
+              result.pendingCapturesRecovered = (Number(result.pendingCapturesRecovered) || 0) + 1;
+            }
+          } catch (error) {
+            result.pendingCaptureRecoveryError = clean(error && error.message ||
+              'Archived VOD recovery failed', 300);
+            if (logger && typeof logger.warn === 'function') {
+              logger.warn('Amaana ended-stream VOD recovery failed for ' +
+                String(session.vodId) + ': ' + result.pendingCaptureRecoveryError);
+            }
+          }
+        }
+        if (!Array.isArray(session.shortCandidates) || !session.shortCandidates.length) continue;
         await queueReadyLiveShorts({
           id: session.streamId, user_id: session.streamUserId,
           user_name: session.sourceChannel, user_login: session.sourceChannel,
