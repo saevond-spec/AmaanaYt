@@ -8,7 +8,7 @@ const { buildHighlightTitle: defaultBuildHighlightTitle, buildShortTitle: defaul
   buildShortDescription: defaultBuildShortDescription } = require('./highlight-metadata');
 const { isYouTubeUploadLimitError, isDefiniteYouTubeUploadRejection,
   isRetryableYouTubeUploadRejection, youtubeUploadHttpStatus, computeRetryDelayMs,
-  YOUTUBE_UPLOAD_LIMIT_RETRY_MS } = require('./draft-recovery');
+  YOUTUBE_UPLOAD_LIMIT_RETRY_MS, DEFAULT_HIGHLIGHT_RETRY_LEASE_MS } = require('./draft-recovery');
 
 function createBatchQueue(processJob, options = {}) {
   const schedule = options.schedule || setImmediate;
@@ -23,9 +23,10 @@ function createBatchQueue(processJob, options = {}) {
     draining = true;
     try {
       while (jobs.length) {
-        const id = jobs.shift();
+        const job = jobs.shift();
+        const id = job.id;
         try {
-          await processJob(id);
+          await processJob(id, job.options);
         } catch (error) {
           onError(id, error);
         } finally {
@@ -47,11 +48,11 @@ function createBatchQueue(processJob, options = {}) {
     });
   }
 
-  function enqueue(id) {
+  function enqueue(id, options = null) {
     if (id === null || id === undefined || queuedIds.has(String(id))) return false;
     const value = String(id);
     queuedIds.add(value);
-    jobs.push(value);
+    jobs.push({ id: value, options });
     requestDrain();
     return true;
   }
@@ -238,10 +239,12 @@ function createHighlightProcessor(dependencies) {
   }
 
   async function releaseRetryLeaseWhenDurable(parent) {
-    if (!parent?.retryLeaseUntil || !parent.retryLeaseClaimedAt) return;
+    if (!parent?.retryLeaseUntil || !parent.retryLeaseClaimedAt ||
+        !parent.retryLeaseClaimToken) return;
     try {
       const current = await store.getDraft(parent.id);
-      if (!current || current.retryLeaseClaimedAt !== parent.retryLeaseClaimedAt) return;
+      if (!current || current.retryLeaseClaimedAt !== parent.retryLeaseClaimedAt ||
+          current.retryLeaseClaimToken !== parent.retryLeaseClaimToken) return;
       const parentRetryAt = Date.parse(current.nextClipAttemptAt || '');
       const parentBackoffIsDurable = current.status === 'clip_retry_wait' &&
         Number.isFinite(parentRetryAt) && parentRetryAt > now();
@@ -258,22 +261,54 @@ function createHighlightProcessor(dependencies) {
       const settled = ['clip_partial', 'clip_failed', 'completed',
         'awaiting_owner_approval', 'excluded_by_owner'].includes(current.status);
       if (!parentBackoffIsDurable && !(settled && everyChildHasFutureDeadline)) return;
-      await store.updateDraft(parent.id, { retryLeaseUntil: null, retryLeaseClaimedAt: null });
+      await store.updateDraft(parent.id, {
+        retryLeaseUntil: null, retryLeaseClaimedAt: null, retryLeaseClaimToken: null
+      });
     } catch (error) {
       logError(parent.id, error);
     }
   }
 
-  async function processHighlightBatch(id) {
+  async function processHighlightBatch(id, queueOptions = {}) {
     const directory = path.join(uploadDir, 'highlights-' + id);
     let batch;
     let parentUploadStarted = false;
     let acceptedHighlightId = null;
+    let retryLeaseHeartbeat = null;
     try {
       batch = await store.getDraft(id);
       if (!batch || batch.sourceType !== 'twitch_highlight_batch' || batch.status === 'completed' ||
           batch.status === 'excluded_by_owner' ||
           batch.status === 'awaiting_owner_approval' && batch.productionState === 'ready') return;
+      if (typeof store.claimHighlightRetryParent === 'function') {
+        const suppliedToken = queueOptions && queueOptions.retryLeaseClaimToken;
+        if (suppliedToken) {
+          if (batch.retryLeaseClaimToken !== suppliedToken ||
+              Date.parse(batch.retryLeaseUntil || '') <= now()) return;
+        } else {
+          batch = await store.claimHighlightRetryParent(id, {
+            now: now(), maxAttempts, leaseMs: DEFAULT_HIGHLIGHT_RETRY_LEASE_MS
+          });
+          if (!batch) return;
+        }
+        const claimToken = batch.retryLeaseClaimToken;
+        if (claimToken && typeof store.extendHighlightRetryLease === 'function') {
+          const heartbeatMs = Math.max(1000, Math.floor(DEFAULT_HIGHLIGHT_RETRY_LEASE_MS / 3));
+          retryLeaseHeartbeat = setInterval(() => {
+            store.extendHighlightRetryLease(id, claimToken, DEFAULT_HIGHLIGHT_RETRY_LEASE_MS)
+              .catch((error) => logError(id, error));
+          }, heartbeatMs);
+          retryLeaseHeartbeat.unref?.();
+        }
+      }
+      if (Number(batch.clipAttemptCount || 0) >= maxAutoAttempts) {
+        await store.updateDraft(id, {
+          status: 'clip_failed', productionState: 'manual_review',
+          error: 'Automatic highlight attempt limit reached; owner review is required.',
+          retryLeaseUntil: null, retryLeaseClaimedAt: null, retryLeaseClaimToken: null
+        });
+        return;
+      }
       if (['twitch_clips_api', 'twitch_live_capture'].includes(batch.discoverySource) &&
           !(Number.isFinite(Number(batch.targetHighlightDurationSeconds)) &&
             Number(batch.targetHighlightDurationSeconds) > 0)) {
@@ -1000,6 +1035,7 @@ function createHighlightProcessor(dependencies) {
         }).catch(() => {});
       }
     } finally {
+      if (retryLeaseHeartbeat) clearInterval(retryLeaseHeartbeat);
       await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => {});
       await releaseRetryLeaseWhenDurable(batch);
     }
