@@ -1380,6 +1380,7 @@ store.init()
           .forEach((draft) => enqueueHighlightBatch(draft.id));
       } catch (error) {
         console.error('Failed to resume Twitch clip jobs:', error.message);
+        twitchHighlightDiscovery.start();
       }
     });
   })
