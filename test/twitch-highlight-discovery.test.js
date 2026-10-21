@@ -47,9 +47,9 @@ function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], live
   startAt = Date.parse('2026-10-18T15:00:00.000Z'),
   now = () => startAt, getVodError, listError, clipErrorByVod = {}, onClipsRead,
   targetDurationSeconds = 15, visualGameplayVerificationAvailable = true,
-  liveCreateError = null } = {}) {
+  liveCreateError = null, initialState = null } = {}) {
   let clock = startAt;
-  let persistedState = null;
+  let persistedState = initialState ? structuredClone(initialState) : null;
   const drafts = [...initialDrafts];
   const enqueued = [];
   const enqueuedClips = [];
@@ -789,22 +789,34 @@ test('live Twitch 429 preserves the failed offset and waits for the provider res
   assert.equal(h.state.liveSessions['7777'].lastCaptureOffset, null);
   assert.equal(Date.parse(h.state.liveSessions['7777'].nextCaptureAttemptAt) - clock, 120_000);
 
+  const restarted = harness({
+    liveBroadcast: () => makeLiveBroadcast(clock, streamStartedAt),
+    video: {
+      async inspectMedia() { return { durationSeconds: 60, width: 1280, height: 720 }; },
+      async verifyGameplay() {
+        return { verified: true, totalFrames: 5, activeGameplayFrames: 5,
+          confidence: 0.95, gameName: 'Test Game', model: 'fixture' };
+      }
+    },
+    startAt: clock, now: () => clock, targetDurationSeconds: 60,
+    initialState: structuredClone(h.state)
+  });
   clock += 119_999;
-  h.setNow(clock);
-  const waiting = await h.discovery.runLive();
+  restarted.setNow(clock);
+  const waiting = await restarted.discovery.runLive();
   assert.equal(waiting.status, 'waiting_for_capture_retry');
-  assert.equal(h.calls.liveClipCreates.length, 1);
+  assert.equal(restarted.calls.liveClipCreates.length, 0);
 
   clock += 1;
-  h.setNow(clock);
-  const retried = await h.discovery.runLive();
+  restarted.setNow(clock);
+  const retried = await restarted.discovery.runLive();
   assert.equal(retried.captureAccepted, true);
-  assert.equal(h.calls.liveClipCreates.length, 2);
-  assert.equal(h.calls.liveClipCreates[1].vodOffset, firstOffset);
-  assert.equal(h.state.liveSessions['7777'].pendingCaptureOffset, null);
-  assert.equal(h.state.liveSessions['7777'].lastCaptureOffset, firstOffset);
+  assert.equal(restarted.calls.liveClipCreates.length, 1);
+  assert.equal(restarted.calls.liveClipCreates[0].vodOffset, firstOffset);
+  assert.equal(restarted.state.liveSessions['7777'].pendingCaptureOffset, null);
+  assert.equal(restarted.state.liveSessions['7777'].lastCaptureOffset, firstOffset);
   assert.equal(retried.batchesQueued, 1,
     'the verified retry should be consumed into the configured highlight batch');
-  assert.equal(h.drafts.filter((draft) => draft.sourceType === 'twitch_highlight_batch').length, 1);
-  assert.equal(h.state.liveSessions['7777'].candidates.length, 0);
+  assert.equal(restarted.drafts.filter((draft) => draft.sourceType === 'twitch_highlight_batch').length, 1);
+  assert.equal(restarted.state.liveSessions['7777'].candidates.length, 0);
 });
