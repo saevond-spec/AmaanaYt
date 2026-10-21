@@ -7,7 +7,7 @@ const { validateHighlightMoments, verifyCreatedClip, verifyClipCreationRequest }
 const { buildHighlightTitle: defaultBuildHighlightTitle, buildShortTitle: defaultBuildShortTitle,
   buildShortDescription: defaultBuildShortDescription } = require('./highlight-metadata');
 const { isYouTubeUploadLimitError, isDefiniteYouTubeUploadRejection,
-  isRetryableYouTubeUploadRejection, youtubeUploadHttpStatus,
+  isRetryableYouTubeUploadRejection, youtubeUploadHttpStatus, computeRetryDelayMs,
   YOUTUBE_UPLOAD_LIMIT_RETRY_MS } = require('./draft-recovery');
 
 function createBatchQueue(processJob, options = {}) {
@@ -69,9 +69,17 @@ function findHighlightBatchByVodId(drafts, vodId) {
     String(draft.vodId) === requestedId) || null;
 }
 
-function findDueHighlightRetries(drafts, now = Date.now()) {
-  return drafts.filter((draft) => draft.sourceType === 'twitch_highlight_batch' &&
-    draft.status === 'clip_retry_wait' && Date.parse(draft.nextClipAttemptAt || 0) <= now);
+function findDueHighlightRetries(drafts, now = Date.now(), maxAttempts = 12) {
+  const attemptLimit = Number.isSafeInteger(maxAttempts) && maxAttempts > 0 ? maxAttempts : 12;
+  return drafts.filter((draft) => {
+    const retryLeaseUntil = Date.parse(draft.retryLeaseUntil || '');
+    return draft?.sourceType === 'twitch_highlight_batch' &&
+      draft.status === 'clip_retry_wait' &&
+      Number(draft.clipAttemptCount || 0) < attemptLimit &&
+      !(Number.isFinite(retryLeaseUntil) && retryLeaseUntil > Number(now)) &&
+      Number.isFinite(Date.parse(draft.nextClipAttemptAt || '')) &&
+      Date.parse(draft.nextClipAttemptAt) <= Number(now);
+  });
 }
 
 function shouldRequeueUnexpectedTwitchDownloadHost(draft) {
@@ -226,6 +234,33 @@ function createHighlightProcessor(dependencies) {
       const reason = noteFailure(label, error, 250);
       await store.updateDraft(draftId, { seoRegistrationStatus: 'failed', seoRegistrationError: reason });
       return false;
+    }
+  }
+
+  async function releaseRetryLeaseWhenDurable(parent) {
+    if (!parent?.retryLeaseUntil || !parent.retryLeaseClaimedAt) return;
+    try {
+      const current = await store.getDraft(parent.id);
+      if (!current || current.retryLeaseClaimedAt !== parent.retryLeaseClaimedAt) return;
+      const parentRetryAt = Date.parse(current.nextClipAttemptAt || '');
+      const parentBackoffIsDurable = current.status === 'clip_retry_wait' &&
+        Number.isFinite(parentRetryAt) && parentRetryAt > now();
+      const children = await store.listDrafts();
+      const retryChildren = children.filter((draft) =>
+        draft.parentId === parent.id && draft.sourceType === 'twitch_highlight_short' &&
+        draft.status === 'clip_retry_wait' &&
+        (isYouTubeUploadLimitError({ message: draft.error }) ||
+          isRetryableYouTubeUploadRejection({ status: draft.uploadRejectionStatus })));
+      const everyChildHasFutureDeadline = retryChildren.every((draft) => {
+        const retryAt = Date.parse(draft.nextClipAttemptAt || '');
+        return Number.isFinite(retryAt) && retryAt > now();
+      });
+      const settled = ['clip_partial', 'clip_failed', 'completed',
+        'awaiting_owner_approval', 'excluded_by_owner'].includes(current.status);
+      if (!parentBackoffIsDurable && !(settled && everyChildHasFutureDeadline)) return;
+      await store.updateDraft(parent.id, { retryLeaseUntil: null, retryLeaseClaimedAt: null });
+    } catch (error) {
+      logError(parent.id, error);
     }
   }
 
@@ -584,12 +619,16 @@ function createHighlightProcessor(dependencies) {
             offset += durations[index];
             continue;
           }
+          const retryableShortError = isYouTubeUploadLimitError({ message: existingShort.error }) ||
+            isRetryableYouTubeUploadRejection({ status: existingShort.uploadRejectionStatus });
           const existingShortRetryDue = existingShort.status === 'clip_retry_wait' &&
-            (isYouTubeUploadLimitError({ message: existingShort.error }) ||
-              isRetryableYouTubeUploadRejection({ status: existingShort.uploadRejectionStatus })) &&
+            retryableShortError &&
             Number.isFinite(Date.parse(existingShort.nextClipAttemptAt || '')) &&
             Date.parse(existingShort.nextClipAttemptAt) <= now();
-          if (existingShort.status !== 'clip_queued' && !existingShortRetryDue) {
+          // Permanent 4xx upload rejection requires an explicit owner retry of the parent.
+          const manualDefiniteRejectionRetry = existingShort.status === 'clip_failed' &&
+            isDefiniteYouTubeUploadRejection({ status: existingShort.uploadRejectionStatus });
+          if (existingShort.status !== 'clip_queued' && !existingShortRetryDue && !manualDefiniteRejectionRetry) {
             noteFailure('Short ' + (index + 1),
               new Error('Short has no saved YouTube ID and is not in a safe-to-upload state'),
               150, { forcePermanent: true });
@@ -669,16 +708,19 @@ function createHighlightProcessor(dependencies) {
           const uploadLimitRejected = isYouTubeUploadLimitError(error);
           const definiteUploadRejection = isDefiniteYouTubeUploadRejection(error);
           const retryableUploadRejection = isRetryableYouTubeUploadRejection(error);
-          const retryDelayMs = Math.max(
-            uploadLimitRejected ? YOUTUBE_UPLOAD_LIMIT_RETRY_MS : 0,
-            Number(error?.retryAfterMs) > 0 ? Number(error.retryAfterMs) : 0,
-            Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attemptCount - 1)))
-          );
+          const retryDelayMs = computeRetryDelayMs({
+            attempt: attemptCount,
+            providerRetryAfterMs: error?.retryAfterMs,
+            minimumDelayMs: uploadLimitRejected ? YOUTUBE_UPLOAD_LIMIT_RETRY_MS : 1000,
+            baseDelayMs: 60 * 1000,
+            maxDelayMs: 30 * 60 * 1000,
+            seed: shortDraft?.id || id
+          });
           if (shortDraft && acceptedShortId) {
             await store.updateDraft(shortDraft.id, {
               youtubeVideoId: acceptedShortId, status: 'clip_partial',
               productionState: 'processing', error: null
-            }).catch(() => {});
+            });
             shortDraft = { ...shortDraft, youtubeVideoId: acceptedShortId,
               status: 'clip_partial', productionState: 'processing' };
             shortsByIndex.set(index, shortDraft);
@@ -692,7 +734,7 @@ function createHighlightProcessor(dependencies) {
                 status: 'clip_retry_wait', productionState: 'retry_scheduled',
                 nextClipAttemptAt, error: errorMessage,
                 uploadRejectionStatus: youtubeUploadHttpStatus(error)
-              }).catch(() => {});
+              });
               shortDraft = { ...shortDraft, status: 'clip_retry_wait',
                 productionState: 'retry_scheduled', nextClipAttemptAt, error: errorMessage,
                 uploadRejectionStatus: youtubeUploadHttpStatus(error) };
@@ -702,7 +744,7 @@ function createHighlightProcessor(dependencies) {
                 status: 'clip_failed', productionState: 'failed',
                 nextClipAttemptAt: null, error: errorMessage,
                 uploadRejectionStatus: youtubeUploadHttpStatus(error)
-              }).catch(() => {});
+              });
               shortDraft = { ...shortDraft, status: 'clip_failed',
                 productionState: 'failed', nextClipAttemptAt: null, error: errorMessage,
                 uploadRejectionStatus: youtubeUploadHttpStatus(error) };
@@ -711,7 +753,7 @@ function createHighlightProcessor(dependencies) {
               await store.updateDraft(shortDraft.id, {
                 status: 'clip_upload_uncertain', productionState: 'manual_reconciliation',
                 nextClipAttemptAt: null, error: errorMessage
-              }).catch(() => {});
+              });
               shortDraft = { ...shortDraft, status: 'clip_upload_uncertain',
                 productionState: 'manual_reconciliation', nextClipAttemptAt: null, error: errorMessage };
             }
@@ -726,7 +768,7 @@ function createHighlightProcessor(dependencies) {
             await store.updateDraft(shortDraft.id, {
               status: nextStatus, productionState: retryable ? 'retry_scheduled' : 'failed',
               nextClipAttemptAt, error: errorMessage
-            }).catch(() => {});
+            });
             shortDraft = { ...shortDraft, status: nextStatus,
               productionState: retryable ? 'retry_scheduled' : 'failed', nextClipAttemptAt, error: errorMessage };
             shortsByIndex.set(index, shortDraft);
@@ -790,8 +832,10 @@ function createHighlightProcessor(dependencies) {
       }
       const productionReady = localProductionReady && youtubeProcessingReady;
       const maxAttemptsAllowed = Number.isSafeInteger(maxAutoAttempts) && maxAutoAttempts > 0 ? maxAutoAttempts : 12;
-      const retryDelay = Math.max(providerRetryAfterMs,
-        Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attemptCount - 1))));
+      const retryDelay = computeRetryDelayMs({
+        attempt: attemptCount, providerRetryAfterMs, baseDelayMs: 60 * 1000,
+        maxDelayMs: 30 * 60 * 1000, seed: id
+      });
       if (!productionReady) {
         const canAutoRetry = hasRetryableFailure && !hasPermanentFailure && attemptCount < maxAttemptsAllowed;
         const nextClipAttemptAt = canAutoRetry ? new Date(now() + retryDelay).toISOString() : null;
@@ -799,10 +843,12 @@ function createHighlightProcessor(dependencies) {
         for (const short of finalShorts) {
           const ambiguousUpload = ['clip_upload_uncertain', 'uploading_private_to_youtube'].includes(short.status);
           const notYetUploaded = short.status === 'clip_queued' && !short.youtubeVideoId;
-          const scheduledUploadLimitRetry = short.status === 'clip_retry_wait' &&
-            Date.parse(short.nextClipAttemptAt || '') > now();
+          const scheduledShortRetry = short.status === 'clip_retry_wait' &&
+            (isYouTubeUploadLimitError({ message: short.error }) ||
+              isRetryableYouTubeUploadRejection({ status: short.uploadRejectionStatus }));
+          const definiteShortFailure = short.status === 'clip_failed';
           if (short.publicationStatus !== 'published' && !ambiguousUpload &&
-              !notYetUploaded && !scheduledUploadLimitRetry) {
+              !notYetUploaded && !scheduledShortRetry && !definiteShortFailure) {
             await store.updateDraft(short.id, {
               status: 'clip_partial',
               productionState: canAutoRetry ? 'processing' : 'partial',
@@ -955,6 +1001,7 @@ function createHighlightProcessor(dependencies) {
       }
     } finally {
       await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => {});
+      await releaseRetryLeaseWhenDurable(batch);
     }
   }
 
