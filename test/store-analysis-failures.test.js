@@ -80,6 +80,100 @@ test('stale owner-excluded drafts cannot be restored by a retry transition', asy
   assert.equal(attached.youtubeVideoId, 'abcdefghijk');
   assert.equal(current.status, 'awaiting_owner_approval');
 });
+test('lease-fenced draft updates reject a worker whose claim has been replaced', async (t) => {
+  const originalConnect = store.pool.connect;
+  const originalQuery = store.pool.query;
+  let current = {
+    id: 'draft-1', sourceType: 'twitch_vod', status: 'clip_retry_wait',
+    retryLeaseClaimToken: 'new-owner', retryLeaseUntil: new Date(Date.now() + 60000).toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const calls = [];
+  store.pool.query = async () => ({ rows: [] });
+  store.pool.connect = async () => ({
+    async query(sql, parameters) {
+      calls.push({ sql: String(sql), parameters });
+      if (/SELECT payload FROM amaana_drafts WHERE id = \$1 FOR UPDATE/.test(String(sql))) {
+        return { rows: [{ payload: { ...current } }] };
+      }
+      if (/UPDATE amaana_drafts SET payload = \$2::jsonb/.test(String(sql))) {
+        current = JSON.parse(parameters[1]);
+      }
+      return { rows: [] };
+    },
+    release() {}
+  });
+  t.after(() => { store.pool.connect = originalConnect; store.pool.query = originalQuery; });
+
+  const stale = await store.updateDraftWithRetryLease('draft-1', 'old-owner', { status: 'clip_failed' });
+  assert.equal(stale, null);
+  assert.equal(current.status, 'clip_retry_wait');
+  assert.ok(calls.some((call) => call.sql === 'ROLLBACK'));
+
+  const currentOwner = await store.updateDraftWithRetryLease('draft-1', 'new-owner', {
+    status: 'waiting_for_clip_media', twitchClipId: 'clip-1'
+  });
+  assert.equal(currentOwner.status, 'waiting_for_clip_media');
+  assert.equal(current.twitchClipId, 'clip-1');
+});
+
+test('group exclusion locks VOD parents and discovers children before updating', async (t) => {
+  const originalConnect = store.pool.connect;
+  const originalQuery = store.pool.query;
+  const rootId = '11111111-1111-4111-8111-111111111111';
+  const batchId = '22222222-2222-4222-8222-222222222222';
+  const shortId = '33333333-3333-4333-8333-333333333333';
+  const drafts = new Map([
+    [rootId, { id: rootId, sourceType: 'twitch_vod', vodId: '1234567890', status: 'clip_failed' }],
+    [batchId, { id: batchId, sourceType: 'twitch_highlight_batch', vodId: '1234567890', status: 'creating_shorts' }],
+    [shortId, { id: shortId, sourceType: 'twitch_highlight_short', vodId: '1234567890',
+      parentId: batchId, status: 'uploading_private_to_youtube' }]
+  ]);
+  const calls = [];
+  store.pool.query = async () => ({ rows: [] });
+  store.pool.connect = async () => ({
+    async query(sql, parameters) {
+      const text = String(sql);
+      calls.push(text);
+      if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK') return { rows: [] };
+      if (/SELECT id, payload FROM amaana_drafts WHERE id = \$1 FOR UPDATE/.test(text)) {
+        const row = drafts.get(String(parameters[0]));
+        return { rows: row ? [{ id: row.id, payload: { ...row } }] : [] };
+      }
+      if (/SELECT id FROM amaana_drafts WHERE payload->>'sourceType'/.test(text)) {
+        return { rows: [{ id: batchId }] };
+      }
+      if (/SELECT id FROM amaana_drafts WHERE payload->>'parentId'/.test(text)) {
+        assert.deepEqual(parameters[0], [rootId, batchId]);
+        return { rows: [{ id: shortId }] };
+      }
+      if (/SELECT id, payload FROM amaana_drafts WHERE id = ANY/.test(text)) {
+        return { rows: parameters[0].map((id) => drafts.get(id)).filter(Boolean)
+          .map((row) => ({ id: row.id, payload: { ...row } })) };
+      }
+      if (/UPDATE amaana_drafts SET payload = \$2::jsonb/.test(text)) {
+        const updated = JSON.parse(parameters[1]);
+        drafts.set(String(parameters[0]), updated);
+      }
+      return { rows: [] };
+    },
+    release() {}
+  });
+  t.after(() => { store.pool.connect = originalConnect; store.pool.query = originalQuery; });
+
+  await assert.rejects(store.excludeDrafts([rootId, batchId], 'test', rootId), (error) => error.status === 409);
+  const parentLock = calls.findIndex((sql) => /payload->>'sourceType'/.test(sql));
+  const childrenLock = calls.findIndex((sql) => /payload->>'parentId'/.test(sql));
+  assert.ok(parentLock >= 0 && childrenLock > parentLock);
+  assert.equal(drafts.get(rootId).status, 'clip_failed');
+  assert.equal(drafts.get(batchId).status, 'creating_shorts');
+
+  drafts.set(shortId, { ...drafts.get(shortId), status: 'clip_queued' });
+  const excluded = await store.excludeDrafts([rootId, batchId], 'test', rootId);
+  assert.equal(excluded.length, 3);
+  assert.equal(drafts.get(shortId).status, 'excluded_by_owner');
+});
+
 test('Twitch VOD retry claims serialize competing workers with one lease token', async (t) => {
   const originalConnect = store.pool.connect;
   const originalQuery = store.pool.query;
