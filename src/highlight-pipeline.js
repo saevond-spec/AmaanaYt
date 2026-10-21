@@ -247,9 +247,11 @@ function createHighlightProcessor(dependencies) {
   }
 
   async function ownsRetryLease(id, claimToken) {
-    if (!claimToken) return true;
+    if (!claimToken) return false;
     const current = await store.getDraft(id);
-    return Boolean(current && current.retryLeaseClaimToken === claimToken &&
+    return Boolean(current && current.status !== 'excluded_by_owner' &&
+      current.productionState !== 'excluded' && !current.excludedAt &&
+      current.retryLeaseClaimToken === claimToken &&
       Date.parse(current.retryLeaseUntil || '') > now());
   }
 
@@ -297,8 +299,11 @@ function createHighlightProcessor(dependencies) {
     try {
       batch = await store.getDraft(id);
       if (!batch || batch.sourceType !== 'twitch_highlight_batch' || batch.status === 'completed' ||
-          batch.status === 'excluded_by_owner' ||
+          batch.status === 'excluded_by_owner' || batch.productionState === 'excluded' || batch.excludedAt ||
           batch.status === 'awaiting_owner_approval' && batch.productionState === 'ready') return;
+      if (typeof store.claimHighlightRetryParent !== 'function') {
+        throw new Error('Durable highlight retry claims are unavailable; refusing to process this batch');
+      }
       if (typeof store.claimHighlightRetryParent === 'function') {
         const suppliedToken = queueOptions && queueOptions.retryLeaseClaimToken;
         if (suppliedToken) {
