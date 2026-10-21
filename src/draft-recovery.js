@@ -1,6 +1,9 @@
 'use strict';
 
 const YOUTUBE_UPLOAD_LIMIT_RETRY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_TWITCH_VOD_MAX_ATTEMPTS = 8;
+const DEFAULT_HIGHLIGHT_MAX_ATTEMPTS = 12;
+const DEFAULT_HIGHLIGHT_RETRY_LEASE_MS = 15 * 60 * 1000;
 const RECOVERABLE_YOUTUBE_UPLOAD_TYPES = new Set([
   'twitch_vod', 'twitch_highlight_batch', 'twitch_highlight_short'
 ]);
@@ -36,19 +39,6 @@ function isDefiniteYouTubeUploadRejection(error) {
   return status !== null && status >= 400 && status < 500;
 }
 
-function youtubeUploadHttpStatus(error) {
-  const candidates = [
-    error?.response?.status,
-    error?.status,
-    error?.statusCode,
-    error?.response?.data?.error?.code
-  ];
-  for (const value of candidates) {
-    const status = Number(value);
-    if (Number.isInteger(status) && status >= 400 && status <= 599) return status;
-  }
-  return null;
-}
 
 function isRetryableYouTubeUploadRejection(error) {
   const status = youtubeUploadHttpStatus(error);
@@ -102,30 +92,72 @@ function buildUploadReconciliationPatch(draft, { youtubeVideoId, confirmNoUpload
     manualReconciliationAction: 'owner_confirmed_no_upload' };
 }
 
-function findDueTwitchHighlightRetryParents(drafts, now = Date.now()) {
+function isDueRetryableHighlightShort(short, now = Date.now()) {
+  return short?.sourceType === 'twitch_highlight_short' &&
+    short.status === 'clip_retry_wait' &&
+    (isYouTubeUploadLimitError({ message: short.error }) ||
+      isRetryableYouTubeUploadRejection({ status: short.uploadRejectionStatus })) &&
+    Number.isFinite(Date.parse(short.nextClipAttemptAt || '')) &&
+    Date.parse(short.nextClipAttemptAt) <= Number(now);
+}
+
+function findDueTwitchHighlightRetryParents(drafts, now = Date.now(),
+  maxAttempts = DEFAULT_HIGHLIGHT_MAX_ATTEMPTS) {
   if (!Array.isArray(drafts)) return [];
+  const timestamp = Number(now);
+  const attemptLimit = Number.isSafeInteger(maxAttempts) && maxAttempts > 0
+    ? maxAttempts : DEFAULT_HIGHLIGHT_MAX_ATTEMPTS;
   const byId = new Map(drafts.map((draft) => [draft?.id, draft]));
   const parentIds = new Set();
   for (const short of drafts) {
-    if (short?.sourceType !== 'twitch_highlight_short' ||
-        short.status !== 'clip_retry_wait' ||
-        !(isYouTubeUploadLimitError({ message: short.error }) ||
-          isRetryableYouTubeUploadRejection({ status: short.uploadRejectionStatus })) ||
-        !Number.isFinite(Date.parse(short.nextClipAttemptAt || '')) ||
-        Date.parse(short.nextClipAttemptAt) > Number(now)) continue;
+    if (!isDueRetryableHighlightShort(short, timestamp)) continue;
     const parent = byId.get(short.parentId);
+    const parentRetryAt = Date.parse(parent?.nextClipAttemptAt || '');
+    const retryLeaseUntil = Date.parse(parent?.retryLeaseUntil || '');
     if (!parent || parent.sourceType !== 'twitch_highlight_batch' ||
         !parent.youtubeVideoId ||
-        !['clip_partial', 'clip_retry_wait'].includes(parent.status)) continue;
+        !['clip_partial', 'clip_retry_wait'].includes(parent.status) ||
+        Number(parent.clipAttemptCount) >= attemptLimit ||
+        Number.isFinite(parentRetryAt) && parentRetryAt > timestamp ||
+        Number.isFinite(retryLeaseUntil) && retryLeaseUntil > timestamp) continue;
     parentIds.add(parent.id);
   }
   return drafts.filter((draft) => parentIds.has(draft?.id));
 }
 
-function findDueTwitchVodRetries(drafts, now = Date.now()) {
+async function claimDueTwitchHighlightRetryParents(drafts, updateDraft, options = {}) {
+  if (!Array.isArray(drafts) || typeof updateDraft !== 'function') {
+    throw new TypeError('Drafts and an update function are required to claim retry parents');
+  }
+  const timestamp = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
+  const leaseMs = Number.isFinite(Number(options.leaseMs)) && Number(options.leaseMs) > 0
+    ? Number(options.leaseMs) : DEFAULT_HIGHLIGHT_RETRY_LEASE_MS;
+  const candidates = findDueTwitchHighlightRetryParents(drafts, timestamp, options.maxAttempts);
+  const claimed = new Set();
+  const leaseUntil = new Date(timestamp + leaseMs).toISOString();
+  for (const parent of candidates) {
+    try {
+      const updated = await updateDraft(parent.id, {
+        retryLeaseUntil: leaseUntil,
+        retryLeaseClaimedAt: new Date(timestamp).toISOString()
+      });
+      if (updated === null || updated === false) continue;
+      claimed.add(parent.id);
+    } catch (error) {
+      if (typeof options.onError === 'function') options.onError(error, parent);
+    }
+  }
+  return drafts.filter((draft) => claimed.has(draft?.id));
+}
+
+function findDueTwitchVodRetries(drafts, now = Date.now(),
+  maxAttempts = DEFAULT_TWITCH_VOD_MAX_ATTEMPTS) {
   if (!Array.isArray(drafts)) return [];
+  const attemptLimit = Number.isSafeInteger(maxAttempts) && maxAttempts > 0
+    ? maxAttempts : DEFAULT_TWITCH_VOD_MAX_ATTEMPTS;
   return drafts.filter((draft) => draft?.sourceType === 'twitch_vod' &&
     draft.status === 'clip_retry_wait' &&
+    Number(draft.clipAttemptCount || 0) < attemptLimit &&
     Number.isFinite(Date.parse(draft.nextClipAttemptAt || '')) &&
     Date.parse(draft.nextClipAttemptAt) <= Number(now));
 }
@@ -166,4 +198,7 @@ module.exports = { isYouTubeUploadLimitError, isDefiniteYouTubeUploadRejection,
   isUploadRetryCoolingDown, canRetryTwitchDraft,
   isOwnedPrivateYouTubeVideo, buildUploadReconciliationPatch,
   findDueTwitchVodRetries, findDueTwitchHighlightRetryParents,
-  recoverInterruptedYouTubeUploads, YOUTUBE_UPLOAD_LIMIT_RETRY_MS };
+  claimDueTwitchHighlightRetryParents, isDueRetryableHighlightShort,
+  recoverInterruptedYouTubeUploads, YOUTUBE_UPLOAD_LIMIT_RETRY_MS,
+  DEFAULT_TWITCH_VOD_MAX_ATTEMPTS, DEFAULT_HIGHLIGHT_MAX_ATTEMPTS,
+  DEFAULT_HIGHLIGHT_RETRY_LEASE_MS };
