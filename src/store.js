@@ -302,6 +302,21 @@ async function extendHighlightRetryLease(id, claimToken, leaseMs = 15 * 60 * 100
   return result.rows[0]?.payload || null;
 }
 
+async function releaseHighlightRetryLease(id, claimToken) {
+  await init();
+  const result = await pool.query(
+    `UPDATE amaana_drafts
+      SET payload = payload || jsonb_build_object(
+            'retryLeaseUntil', NULL,
+            'retryLeaseClaimedAt', NULL,
+            'retryLeaseClaimToken', NULL),
+          updated_at = NOW()
+      WHERE id = $1 AND payload->>'retryLeaseClaimToken' = $2
+      RETURNING payload`,
+    [id, String(claimToken)]);
+  return result.rows[0]?.payload || null;
+}
+
 async function excludeDrafts(ids, reason = 'owner_excluded_non_gameplay_test') {
   if (!Array.isArray(ids) || ids.some((id) =>
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(id)))) {
@@ -1061,6 +1076,7 @@ module.exports = {
   updateDraft,
   claimHighlightRetryParent,
   extendHighlightRetryLease,
+  releaseHighlightRetryLease,
   excludeDrafts,
   claimTikTokDelivery,
   saveSeoSyncState,
