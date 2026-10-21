@@ -289,7 +289,7 @@ async function listClipsForVod(vod, { maxPages = 10 } = {}) {
   const now = Date.now();
   const createdAt = Date.parse(archive.created_at || '');
   const weekAgo = now - 7 * 24 * 60 * 60 * 1000;
-  const durationMatch = /^(?:(\\d+)h)?(?:(\\d+)m)?(?:(\\d+)s)?$/i.exec(String(archive.duration || ''));
+  const durationMatch = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/i.exec(String(archive.duration || ''));
   const durationSeconds = durationMatch
     ? Number(durationMatch[1] || 0) * 3600 + Number(durationMatch[2] || 0) * 60 + Number(durationMatch[3] || 0)
     : 0;
