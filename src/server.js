@@ -501,7 +501,7 @@ async function scheduleDueHighlightRetries() {
     const drafts = await store.listDrafts();
     const timestamp = Date.now();
     for (const draft of drafts) {
-      if (draft.sourceType === 'twitch_vod' && draft.discoverySource === 'twitch_community_clip' &&
+      if (draft.sourceType === 'twitch_vod' &&
           draft.status === 'clip_retry_wait' && Date.parse(draft.nextClipAttemptAt || '') <= timestamp) {
         enqueueClipProcessing(draft.id);
         continue;
