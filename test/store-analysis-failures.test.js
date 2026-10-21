@@ -80,3 +80,44 @@ test('stale owner-excluded drafts cannot be restored by a retry transition', asy
   assert.equal(attached.youtubeVideoId, 'abcdefghijk');
   assert.equal(current.status, 'awaiting_owner_approval');
 });
+test('Twitch VOD retry claims serialize competing workers with one lease token', async (t) => {
+  const originalConnect = store.pool.connect;
+  const originalQuery = store.pool.query;
+  let current = {
+    id: 'vod-1', sourceType: 'twitch_vod', status: 'clip_retry_wait',
+    clipAttemptCount: 2, nextClipAttemptAt: '2026-10-21T17:59:00.000Z',
+    updatedAt: '2026-10-21T17:58:00.000Z'
+  };
+  const calls = [];
+  let writes = 0;
+  store.pool.query = async () => ({ rows: [] });
+  store.pool.connect = async () => ({
+    async query(sql, parameters) {
+      calls.push({ sql: String(sql), parameters });
+      if (/SELECT payload FROM amaana_drafts WHERE id = \$1 FOR UPDATE/.test(String(sql))) {
+        return { rows: [{ payload: { ...current } }] };
+      }
+      if (/UPDATE amaana_drafts SET payload = \$2::jsonb/.test(String(sql))) {
+        current = JSON.parse(parameters[1]);
+        writes += 1;
+      }
+      return { rows: [] };
+    },
+    release() {}
+  });
+  t.after(() => {
+    store.pool.connect = originalConnect;
+    store.pool.query = originalQuery;
+  });
+
+  const now = Date.parse('2026-10-21T18:00:00.000Z');
+  const winner = await store.claimTwitchVodDraft('vod-1', { now });
+  const competingClaim = await store.claimTwitchVodDraft('vod-1', { now });
+
+  assert.equal(winner.retryLeaseClaimToken, current.retryLeaseClaimToken);
+  assert.ok(winner.retryLeaseClaimToken);
+  assert.equal(competingClaim, null);
+  assert.equal(writes, 1);
+  assert.equal(calls.filter((call) =>
+    /SELECT payload FROM amaana_drafts WHERE id = \$1 FOR UPDATE/.test(call.sql)).length, 2);
+});
