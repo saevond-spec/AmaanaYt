@@ -308,11 +308,16 @@ async function listClipsForVod(vod, { maxPages = 10 } = {}) {
   const pageLimit = Number.isFinite(pageLimitValue) && pageLimitValue > 0
     ? Math.min(10, pageLimitValue) : 10;
   const clips = [];
-  let pages = 0;
-  for (const window of windows) {
+  let pagesRemaining = pageLimit;
+  for (let windowIndex = 0; windowIndex < windows.length && pagesRemaining > 0; windowIndex += 1) {
+    const window = windows[windowIndex];
+    const windowsAfterThis = windows.length - windowIndex - 1;
+    const fairShare = Math.max(1, Math.floor(pageLimit / windows.length));
+    const windowBudget = windowsAfterThis === 0 ? pagesRemaining
+      : Math.max(1, Math.min(fairShare, pagesRemaining - windowsAfterThis));
     const seenCursors = new Set();
     let after;
-    for (; pages < pageLimit; pages += 1) {
+    for (let windowPages = 0; windowPages < windowBudget && pagesRemaining > 0; windowPages += 1) {
       const payload = await helix('/clips', {
         query: {
           broadcaster_id: user.id,
@@ -322,16 +327,13 @@ async function listClipsForVod(vod, { maxPages = 10 } = {}) {
           after
         }
       });
+      pagesRemaining -= 1;
       clips.push(...(payload.data || []).filter((clip) => String(clip.video_id || '') === String(archive.id)));
       const cursor = payload.pagination && payload.pagination.cursor;
-      if (!cursor || seenCursors.has(cursor)) {
-        pages += 1;
-        break;
-      }
+      if (!cursor || seenCursors.has(cursor)) break;
       seenCursors.add(cursor);
       after = cursor;
     }
-    if (pages >= pageLimit) break;
   }
   return [...new Map(clips.filter((clip) => clip && clip.id)
     .map((clip) => [String(clip.id), clip])).values()];
