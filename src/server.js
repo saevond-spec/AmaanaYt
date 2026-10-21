@@ -295,7 +295,7 @@ function unlinkQuietly(filePath) {
 async function processTwitchClipDraft(id, queueOptions = {}) {
   let sourcePath;
   let shortPath;
-  let claimToken = null;
+  let claimToken = String(queueOptions?.retryLeaseClaimToken || '');
   let leaseHeartbeat = null;
   const ownsLease = async () => {
     if (!claimToken) return false;
@@ -326,12 +326,10 @@ async function processTwitchClipDraft(id, queueOptions = {}) {
     if (typeof store.claimTwitchVodDraft !== 'function') {
       throw new Error('Durable Twitch VOD claims are unavailable; refusing to process this clip');
     }
-    const suppliedClaimToken = String(queueOptions?.retryLeaseClaimToken || '');
-    if (suppliedClaimToken) {
+    if (claimToken) {
       const leaseUntil = Date.parse(draft.retryLeaseUntil || '');
-      if (draft.retryLeaseClaimToken !== suppliedClaimToken ||
+      if (draft.retryLeaseClaimToken !== claimToken ||
           !Number.isFinite(leaseUntil) || leaseUntil <= Date.now()) return;
-      claimToken = suppliedClaimToken;
     } else {
       draft = await store.claimTwitchVodDraft(id, {
         maxAttempts: twitchClipMaxAutoAttempts, leaseMs: 15 * 60 * 1000
