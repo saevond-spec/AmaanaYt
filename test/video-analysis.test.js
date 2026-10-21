@@ -100,6 +100,29 @@ test('Gemini gameplay screening sends sampled frames as images and returns a str
   assert.equal(result.gameName, 'Example game');
 });
 
+test('gameplay frame analysis obeys provider cooldown and avoids another request', async () => {
+  const breaker = createModelCircuitBreaker();
+  const frames = Array.from({ length: 3 }, () => ({ mimeType: 'image/jpeg', data: 'aGVsbG8=' }));
+  let calls = 0;
+  const options = {
+    apiKey: 'test-key', model: 'gemini-3.8-flash', circuitBreaker: breaker,
+    fetchImpl: async () => {
+      calls += 1;
+      return {
+        ok: false, status: 429,
+        headers: { get: (name) => name.toLowerCase() === 'retry-after' ? '3600' : null },
+        json: async () => ({ error: { status: 'RESOURCE_EXHAUSTED',
+          message: 'rate limit exceeded', details: [{ reason: 'RATE_LIMIT_EXCEEDED' }] } })
+      };
+    }
+  };
+  await assert.rejects(analyzeGameplayFrames(frames, options), (error) =>
+    error.status === 429 && error.retryAfterMs === 3_600_000);
+  assert.ok(breaker.remaining('gemini-3.8-flash') > 3_599_000);
+  await assert.rejects(analyzeGameplayFrames(frames, options), /paused by the provider cooldown/);
+  assert.equal(calls, 1, 'the cooldown prevents another provider request');
+});
+
 test('analysis retries 503 on a fallback model and honors short 429 Retry-After', async () => {
   const urls = [];
   const delays = [];
