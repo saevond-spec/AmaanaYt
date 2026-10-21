@@ -137,6 +137,7 @@ async function harness(t, options = {}) {
   };
   const processingChecks = new Map();
   let listFailureUsed = false;
+  let getDraftFailureUsed = false;
   let clipFailureUsed = false;
   let thumbnailUploadFailureUsed = false;
   let thumbnailCreateFailureUsed = false;
@@ -148,7 +149,13 @@ async function harness(t, options = {}) {
 
   const copy = (value) => value && structuredClone(value);
   const store = {
-    async getDraft(id) { return copy(drafts.get(id)); },
+    async getDraft(id) {
+      if (options.failGetDraftOnce && !getDraftFailureUsed) {
+        getDraftFailureUsed = true;
+        throw Object.assign(new Error('database connection reset before draft read'), { code: 'ECONNRESET' });
+      }
+      return copy(drafts.get(id));
+    },
     async listDrafts() {
       if (options.failListDraftsOnce && !listFailureUsed) {
         listFailureUsed = true;
@@ -449,6 +456,22 @@ test('owner exclusion during upload reservation prevents a private YouTube uploa
   assert.equal(h.drafts.get(h.batch.id).status, 'excluded_by_owner');
   assert.equal(h.counters.uploads.length, 0);
   assert.equal(h.counters.publications.length, 0);
+});
+
+test('a transient initial read releases a supplied durable retry lease after backoff is saved', async (t) => {
+  const h = await harness(t, { failGetDraftOnce: true });
+  const token = '00000000-0000-4000-8000-999999999999';
+  h.drafts.set(h.batch.id, { ...h.batch,
+    status: 'clip_retry_wait', nextClipAttemptAt: new Date(Date.now() - 1000).toISOString(),
+    retryLeaseClaimToken: token, retryLeaseClaimedAt: new Date().toISOString(),
+    retryLeaseUntil: new Date(Date.now() + 15 * 60 * 1000).toISOString()
+  });
+  await h.processor(h.batch.id, { retryLeaseClaimToken: token });
+  const parent = h.drafts.get(h.batch.id);
+  assert.equal(parent.status, 'clip_retry_wait');
+  assert.ok(Date.parse(parent.nextClipAttemptAt) > Date.now());
+  assert.equal(parent.retryLeaseClaimToken, null);
+  assert.equal(h.counters.clipCreates, 0);
 });
 
 test('ambiguous Twitch clip creation is held for review instead of repeated', async (t) => {
