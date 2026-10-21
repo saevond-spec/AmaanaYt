@@ -36,7 +36,8 @@ const { isYouTubeUploadLimitError, isDefiniteYouTubeUploadRejection,
   isRetryableYouTubeUploadRejection, isUploadRetryCoolingDown,
   buildUploadReconciliationPatch, canRetryTwitchDraft,
   recoverInterruptedYouTubeUploads, findDueTwitchVodRetries,
-  findDueTwitchHighlightRetryParents, YOUTUBE_UPLOAD_LIMIT_RETRY_MS } = require('./draft-recovery');
+  findDueTwitchHighlightRetryParents, claimDueTwitchHighlightRetryParents,
+  YOUTUBE_UPLOAD_LIMIT_RETRY_MS } = require('./draft-recovery');
 const { initializeWithRetry } = require('./retryable-initializer');
 
 for (const name of ['BASE_URL', 'DATABASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SESSION_SECRET', 'TOKEN_ENCRYPTION_KEY', 'AGENT_KEY', 'ADMIN_KEY']) {
@@ -123,6 +124,9 @@ const monetization = createMonetizationWorker({ store, youtube });
 const configuredHighlightAttempts = Number(process.env.HIGHLIGHT_MAX_AUTO_ATTEMPTS);
 const highlightMaxAutoAttempts = Number.isSafeInteger(configuredHighlightAttempts) && configuredHighlightAttempts > 0
   ? Math.min(configuredHighlightAttempts, 24) : 12;
+const configuredTwitchClipAttempts = Number(process.env.TWITCH_CLIP_MAX_AUTO_ATTEMPTS);
+const twitchClipMaxAutoAttempts = Number.isSafeInteger(configuredTwitchClipAttempts) && configuredTwitchClipAttempts > 0
+  ? Math.min(configuredTwitchClipAttempts, 24) : 8;
 
 async function autoAssignPlaylist(metadata) {
   try {
@@ -430,13 +434,15 @@ async function processTwitchClipDraft(id) {
     if (latest && latest.youtubeVideoId) {
       await store.updateDraft(id, { status: 'awaiting_owner_approval',
         productionState: 'ready', error: null, nextClipAttemptAt: null }).catch(() => {});
-    } else if (uploadInProgress && uploadLimitRejected) {
+    } else if (uploadInProgress && uploadLimitRejected &&
+        Number(latest?.clipAttemptCount || 0) < twitchClipMaxAutoAttempts) {
       await store.updateDraft(id, {
         status: 'clip_retry_wait', productionState: 'retry_scheduled',
         nextClipAttemptAt: new Date(Date.now() + YOUTUBE_UPLOAD_LIMIT_RETRY_MS).toISOString(),
         error: 'YouTube rejected this upload because the channel upload limit was reached. A retry is queued after a conservative 24-hour wait.'
       }).catch(() => {});
-    } else if (uploadInProgress && definiteUploadRejection && retryableUploadRejection) {
+    } else if (uploadInProgress && definiteUploadRejection && retryableUploadRejection &&
+        Number(latest?.clipAttemptCount || 0) < twitchClipMaxAutoAttempts) {
       const delay = Math.max(Number(error.retryAfterMs) || 0, clipRetryDelayMs(
         Math.max(1, Number(latest.clipAttemptCount) || 1), id));
       await store.updateDraft(id, {
@@ -455,7 +461,7 @@ async function processTwitchClipDraft(id) {
         error: cleanText(error.message, 500), nextClipAttemptAt: null
       }).catch(() => {});
     } else if (latest && latest.discoverySource === 'twitch_community_clip' &&
-        Number(latest.clipAttemptCount) < 8 && isRetryableCommunityClipError(error)) {
+        Number(latest.clipAttemptCount || 0) < twitchClipMaxAutoAttempts && isRetryableCommunityClipError(error)) {
       const attempt = Math.max(1, Number(latest.clipAttemptCount) || 1);
       const delay = Math.max(Number(error.retryAfterMs) || 0, clipRetryDelayMs(attempt, id));
       const nextClipAttemptAt = new Date(Date.now() + delay).toISOString();
@@ -463,7 +469,7 @@ async function processTwitchClipDraft(id) {
         status: 'clip_retry_wait', productionState: 'retry_scheduled', nextClipAttemptAt,
         error: cleanText(error.message, 500)
       }).catch(() => {});
-    } else if (latest && Number(latest.clipAttemptCount) < 8 && isTransientError(error)) {
+    } else if (latest && Number(latest.clipAttemptCount || 0) < twitchClipMaxAutoAttempts && isTransientError(error)) {
       const attempt = Math.max(1, Number(latest.clipAttemptCount) || 1);
       const delay = Math.max(Number(error.retryAfterMs) || 0, clipRetryDelayMs(attempt, id));
       await store.updateDraft(id, {
@@ -527,10 +533,21 @@ async function scheduleDueHighlightRetries() {
   try {
     const drafts = await store.listDrafts();
     const timestamp = Date.now();
-    const dueTwitchVodRetries = new Set(findDueTwitchVodRetries(drafts, timestamp).map((draft) => draft.id));
-    const dueShortRetryParents = new Set(
-      findDueTwitchHighlightRetryParents(drafts, timestamp).map((draft) => draft.id)
+    const dueTwitchVodRetries = new Set(
+      findDueTwitchVodRetries(drafts, timestamp, twitchClipMaxAutoAttempts).map((draft) => draft.id)
     );
+    const potentialShortRetryParentIds = new Set(
+      findDueTwitchHighlightRetryParents(drafts, timestamp, highlightMaxAutoAttempts)
+        .map((draft) => draft.id)
+    );
+    const claimedShortRetryParents = await claimDueTwitchHighlightRetryParents(
+      drafts,
+      (id, patch) => store.updateDraft(id, patch),
+      { now: timestamp, maxAttempts: highlightMaxAutoAttempts,
+        onError: (error, parent) => console.error(
+          'Failed to persist retry lease for highlight batch ' + parent.id + ': ' + error.message) }
+    );
+    const dueShortRetryParents = new Set(claimedShortRetryParents.map((draft) => draft.id));
     for (const draft of drafts) {
       if (dueTwitchVodRetries.has(draft.id)) {
         enqueueClipProcessing(draft.id);
@@ -578,7 +595,10 @@ async function scheduleDueHighlightRetries() {
       console.info('Moved Twitch metadata retry for batch ' + draft.id + ' forward to ' + nextClipAttemptAt);
     }
     const dueHighlightBatchIds = new Set([
-      ...findDueHighlightRetries(drafts, timestamp).map((draft) => draft.id),
+      ...findDueHighlightRetries(drafts, timestamp, highlightMaxAutoAttempts)
+        .filter((draft) => !potentialShortRetryParentIds.has(draft.id) ||
+          dueShortRetryParents.has(draft.id))
+        .map((draft) => draft.id),
       ...dueShortRetryParents
     ]);
     dueHighlightBatchIds.forEach((id) => enqueueHighlightBatch(id));
@@ -1476,7 +1496,10 @@ initializeWithRetry(() => store.init(), {
           'clip_retry_wait'
         ]);
         drafts.filter((draft) => draft.sourceType === 'twitch_vod' && resumable.has(draft.status) &&
-          (draft.status !== 'clip_retry_wait' || Date.parse(draft.nextClipAttemptAt || '') <= Date.now()))
+          (draft.status !== 'clip_retry_wait' ||
+            Date.parse(draft.nextClipAttemptAt || '') <= Date.now()) &&
+          (draft.status !== 'clip_retry_wait' ||
+            Number(draft.clipAttemptCount || 0) < twitchClipMaxAutoAttempts))
           .forEach((draft) => enqueueClipProcessing(draft.id));
         drafts.filter((draft) => draft.sourceType === 'twitch_highlight_batch'
           && ['clip_queued', 'creating_twitch_clips', 'assembling_highlight_video', 'creating_shorts'].includes(draft.status))
