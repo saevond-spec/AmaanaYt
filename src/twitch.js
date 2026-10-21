@@ -120,6 +120,28 @@ async function accessToken() {
   return current.access_token;
 }
 
+function retryAfterDetails(headers, now = Date.now()) {
+  const delays = [];
+  const retryHeader = headers?.get?.('retry-after');
+  if (retryHeader !== null && retryHeader !== undefined && String(retryHeader).trim() !== '') {
+    const seconds = Number(retryHeader);
+    const parsed = Number.isFinite(seconds) && seconds >= 0
+      ? seconds * 1000 : Date.parse(retryHeader) - now;
+    if (Number.isFinite(parsed) && parsed >= 0) delays.push(Math.ceil(parsed));
+  }
+  const resetHeader = headers?.get?.('ratelimit-reset');
+  if (resetHeader !== null && resetHeader !== undefined && String(resetHeader).trim() !== '') {
+    const resetEpochSeconds = Number(resetHeader);
+    if (Number.isFinite(resetEpochSeconds) && resetEpochSeconds >= 0) {
+      delays.push(Math.max(0, Math.ceil(resetEpochSeconds * 1000 - now)));
+    }
+  }
+  return {
+    retryAfterPresent: delays.length > 0,
+    retryAfterMs: delays.length ? Math.max(...delays) : 0
+  };
+}
+
 async function helix(pathname, { method = 'GET', query } = {}) {
   const url = new URL(`${HELIX_BASE}${pathname}`);
   if (query) {
@@ -140,6 +162,11 @@ async function helix(pathname, { method = 'GET', query } = {}) {
   if (!response.ok) {
     const error = new Error(payload.message || payload.error || `Twitch API failed (${response.status})`);
     error.status = response.status;
+    const retry = retryAfterDetails(response.headers);
+    if (retry.retryAfterPresent) {
+      error.retryAfterPresent = true;
+      error.retryAfterMs = retry.retryAfterMs;
+    }
     throw error;
   }
   return payload;
@@ -391,6 +418,7 @@ async function downloadClip(urlValue, destination) {
 module.exports = {
   isConfigured,
   isConnected,
+  retryAfterDetails,
   connectionStatus,
   authorizationUrl,
   exchangeCode,
