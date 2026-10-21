@@ -3,6 +3,7 @@ const { hasProtectedPublication } = require('./gameplay-intake-guard');
 const { Pool } = require('pg');
 const { prioritizeSeoAutoCandidates } = require('./seo-priority');
 const SEO_AUTOPILOT_VERSION = require('./seo-autopilot-version');
+const { createRetryableInitializer } = require('./retryable-initializer');
 
 function databaseConnectionString(value, production = false) {
   if (!production || !value) return value;
@@ -23,11 +24,7 @@ const pool = new Pool({
   connectionTimeoutMillis: 10000
 });
 
-let initialized;
-
-function init() {
-  if (!initialized) {
-    initialized = pool.query(`
+const init = createRetryableInitializer(() => pool.query(`
       CREATE TABLE IF NOT EXISTS amaana_state (
         key TEXT PRIMARY KEY,
         value JSONB NOT NULL,
@@ -107,10 +104,7 @@ function init() {
       );
       CREATE INDEX IF NOT EXISTS amaana_youtube_search_snapshots_recent_idx
         ON amaana_youtube_search_snapshots (video_id, period_end DESC);
-    `);
-  }
-  return initialized;
-}
+    `));
 
 function key() {
   const value = process.env.TOKEN_ENCRYPTION_KEY || '';
@@ -747,6 +741,15 @@ async function markVideoAnalysisFailure(videoId, failure) {
     String(failure.message || '').slice(0, 240), retryAfter.toISOString()]);
 }
 
+async function getVideoAnalysisFailure(videoId) {
+  await init();
+  const result = await pool.query(`SELECT status, provider_code AS "providerCode", message,
+    retry_after AS "retryAfter" FROM amaana_video_analysis_failures
+    WHERE video_id = $1 AND retry_after > NOW()`, [videoId]);
+  const row = result.rows[0];
+  return row ? { ...row, retryAfter: new Date(row.retryAfter).toISOString() } : null;
+}
+
 async function seoCounts() {
   await init();
   const results = await Promise.all([
@@ -999,6 +1002,7 @@ module.exports = {
   getVideoAnalysis,
   saveVideoAnalysis,
   markVideoAnalysisFailure,
+  getVideoAnalysisFailure,
   seoCounts,
   requeueLegacySeoTagFailures,
   updateSeoContext,
