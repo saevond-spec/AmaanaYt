@@ -93,7 +93,7 @@ test('finds only the connected broadcaster’s active archive VOD', async (t) =>
   assert.deepEqual(archivedVods.map((vod) => vod.id), ['8001', '6001']);
   assert.deepEqual(vodClips.map((clip) => clip.id), ['historical-vod-clip']);
   const vodClipWindowCalls = calls.filter((call) =>
-    call.startsWith('/helix/clips?') && call.includes('started_at='));
+    call.startsWith('/helix/clips?') && call.includes('first=100') && call.includes('started_at='));
   assert.equal(vodClipWindowCalls.length, 2);
   assert.ok(vodClipWindowCalls.some((call) => call.includes('started_at=2024-12-31T00%3A00%3A00.000Z') &&
     call.includes('ended_at=2025-01-02T02%3A00%3A00.000Z')));
