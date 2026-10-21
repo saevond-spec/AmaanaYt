@@ -241,8 +241,9 @@ async function claimHighlightRetryParent(id, options = {}) {
     const leaseUntil = Date.parse(leaseValue || '');
     const allowedStatuses = ['clip_queued', 'creating_twitch_clips',
       'assembling_highlight_video', 'creating_shorts', 'clip_partial', 'clip_retry_wait'];
+    const requiresVideoId = ['clip_partial', 'creating_shorts'].includes(parent?.status);
     let eligible = Boolean(parent && parent.sourceType === 'twitch_highlight_batch' &&
-      parent.youtubeVideoId && allowedStatuses.includes(parent.status) &&
+      (!requiresVideoId || parent.youtubeVideoId) && allowedStatuses.includes(parent.status) &&
       Number(parent.clipAttemptCount || 0) < maxAttempts &&
       parent.productionState !== 'published' && parent.publicationStatus !== 'published' &&
       !(leaseValue != null && leaseValue !== '' && !Number.isFinite(leaseUntil)) &&
