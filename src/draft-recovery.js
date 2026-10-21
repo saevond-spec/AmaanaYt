@@ -74,10 +74,14 @@ function isUploadRetryCoolingDown(draft, now = Date.now()) {
 }
 
 function canRetryTwitchDraft(draft, now = Date.now()) {
+  const leaseValue = draft?.retryLeaseUntil;
+  const leaseUntil = Date.parse(leaseValue || '');
   if (!draft || !['twitch_vod', 'twitch_highlight_batch'].includes(draft.sourceType) ||
       ['excluded_by_owner', 'completed', 'clip_upload_uncertain',
         'uploading_private_to_youtube'].includes(draft.status) ||
       draft.productionState === 'published' || draft.publicationStatus === 'published' ||
+      leaseValue != null && leaseValue !== '' && !Number.isFinite(leaseUntil) ||
+      Number.isFinite(leaseUntil) && leaseUntil > Number(now) ||
       isUploadRetryCoolingDown(draft, now)) return false;
   return ['clip_failed', 'clip_partial', 'clip_retry_wait'].includes(draft.status);
 }
