@@ -160,18 +160,36 @@ async function getVod(vodId) {
   return requireArchivedTwitchVod(vod, vodId, user.id);
 }
 
-async function listRecentArchivedVods({ first = 20 } = {}) {
+async function listRecentArchivedVods({ first = 100, maxPages = 10 } = {}) {
   const user = await currentUser();
   const requestedFirst = Math.floor(Number(first));
   const pageSize = Number.isFinite(requestedFirst) && requestedFirst > 0
-    ? Math.min(100, Math.max(1, requestedFirst)) : 20;
-  const [videosPayload, streamsPayload] = await Promise.all([
+    ? Math.min(100, Math.max(1, requestedFirst)) : 100;
+  const requestedPages = Math.floor(Number(maxPages));
+  const pageLimit = Number.isFinite(requestedPages) && requestedPages > 0
+    ? Math.min(10, Math.max(1, requestedPages)) : 10;
+  const [firstPage, streamsPayload] = await Promise.all([
     helix('/videos', { query: { user_id: user.id, type: 'archive', first: pageSize } }),
     helix('/streams', { query: { user_id: user.id, first: 100 } })
   ]);
+  const videos = [...(firstPage.data || [])];
+  const seenCursors = new Set();
+  let cursor = firstPage.pagination && firstPage.pagination.cursor;
+  for (let page = 1; page < pageLimit && cursor && !seenCursors.has(cursor); page += 1) {
+    seenCursors.add(cursor);
+    const nextPage = await helix('/videos', {
+      query: { user_id: user.id, type: 'archive', first: pageSize, after: cursor }
+    });
+    videos.push(...(nextPage.data || []));
+    cursor = nextPage.pagination && nextPage.pagination.cursor;
+  }
   const activeStreamIds = new Set((streamsPayload.data || [])
     .map((stream) => String(stream.id || '')).filter(Boolean));
-  return (videosPayload.data || [])
+  const uniqueVideos = new Map();
+  for (const vod of videos) {
+    if (vod?.id && !uniqueVideos.has(String(vod.id))) uniqueVideos.set(String(vod.id), vod);
+  }
+  return [...uniqueVideos.values()]
     .filter((vod) => vod && vod.type === 'archive' && String(vod.user_id || '') === String(user.id))
     .filter((vod) => !activeStreamIds.has(String(vod.stream_id || '')) &&
       !activeStreamIds.has(String(vod.id || '')))
