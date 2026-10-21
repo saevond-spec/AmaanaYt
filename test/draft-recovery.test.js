@@ -32,7 +32,10 @@ test('recovers interrupted private uploads without retrying ambiguous ones', asy
   const drafts = [
     { id: 'ambiguous', sourceType: 'twitch_vod', status: 'uploading_private_to_youtube' },
     { id: 'saved', sourceType: 'twitch_vod', status: 'uploading_private_to_youtube', youtubeVideoId: 'yt-1' },
-    { id: 'other', sourceType: 'twitch_highlight_batch', status: 'uploading_private_to_youtube' },
+    { id: 'batch-ambiguous', sourceType: 'twitch_highlight_batch', status: 'uploading_private_to_youtube' },
+    { id: 'short-ambiguous', sourceType: 'twitch_highlight_short', status: 'uploading_private_to_youtube', parentId: 'batch-1', highlightIndex: 2 },
+    { id: 'batch-saved', sourceType: 'twitch_highlight_batch', status: 'uploading_private_to_youtube', youtubeVideoId: 'yt-batch' },
+    { id: 'short-saved', sourceType: 'twitch_highlight_short', status: 'uploading_private_to_youtube', youtubeVideoId: 'yt-short' },
     { id: 'queued', sourceType: 'twitch_vod', status: 'clip_queued' }
   ];
   const updates = [];
@@ -41,12 +44,20 @@ test('recovers interrupted private uploads without retrying ambiguous ones', asy
     return { ...drafts.find((draft) => draft.id === id), ...patch };
   });
 
-  assert.deepEqual(updates.map(({ id }) => id), ['ambiguous', 'saved']);
+  assert.deepEqual(updates.map(({ id }) => id),
+    ['ambiguous', 'saved', 'batch-ambiguous', 'short-ambiguous', 'batch-saved', 'short-saved']);
   assert.equal(recovered[0].status, 'clip_upload_uncertain');
   assert.equal(recovered[0].productionState, 'manual_reconciliation');
   assert.match(recovered[0].error, /check the channel for a private upload before retrying/i);
   assert.equal(recovered[1].status, 'awaiting_owner_approval');
   assert.equal(recovered[1].youtubeVideoId, 'yt-1');
-  assert.equal(recovered[2], drafts[2]);
-  assert.equal(recovered[3], drafts[3]);
+  assert.equal(recovered[2].status, 'clip_upload_uncertain');
+  assert.equal(recovered[2].productionState, 'manual_reconciliation');
+  assert.equal(recovered[3].status, 'clip_upload_uncertain');
+  assert.equal(recovered[3].productionState, 'manual_reconciliation');
+  assert.equal(recovered[4].youtubeVideoId, 'yt-batch');
+  assert.equal(recovered[4].status, 'creating_shorts');
+  assert.equal(recovered[5].youtubeVideoId, 'yt-short');
+  assert.equal(recovered[5].status, 'clip_partial');
+  assert.equal(recovered[6], drafts[6]);
 });
