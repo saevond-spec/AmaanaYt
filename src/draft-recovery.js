@@ -61,6 +61,14 @@ function isUploadRetryCoolingDown(draft, now = Date.now()) {
   return Number.isFinite(retryAt) && retryAt > Number(now);
 }
 
+function canRetryTwitchDraft(draft, now = Date.now()) {
+  if (!draft || !['twitch_vod', 'twitch_highlight_batch'].includes(draft.sourceType) ||
+      ['clip_upload_uncertain', 'uploading_private_to_youtube'].includes(draft.status) ||
+      isUploadRetryCoolingDown(draft, now)) return false;
+  return ['clip_failed', 'clip_partial', 'clip_retry_wait'].includes(draft.status) ||
+    draft.sourceType === 'twitch_highlight_batch' && Boolean(draft.error);
+}
+
 function isOwnedPrivateYouTubeVideo(video, channel, expectedVideoId) {
   return Boolean(video && channel && expectedVideoId &&
     video.id === expectedVideoId &&
@@ -155,6 +163,7 @@ async function recoverInterruptedYouTubeUploads(drafts, updateDraft, onError = (
 
 module.exports = { isYouTubeUploadLimitError, isDefiniteYouTubeUploadRejection,
   isRetryableYouTubeUploadRejection, youtubeUploadHttpStatus,
-  isUploadRetryCoolingDown, isOwnedPrivateYouTubeVideo, buildUploadReconciliationPatch,
+  isUploadRetryCoolingDown, canRetryTwitchDraft,
+  isOwnedPrivateYouTubeVideo, buildUploadReconciliationPatch,
   findDueTwitchVodRetries, findDueTwitchHighlightRetryParents,
   recoverInterruptedYouTubeUploads, YOUTUBE_UPLOAD_LIMIT_RETRY_MS };
