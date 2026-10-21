@@ -115,7 +115,7 @@ function isTransientError(error) {
 
 async function waitForVerifiedClipMetadata({
   getClip, moment, vodId, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  pollIntervalMs = 5000, maxAttempts = 72
+  pollIntervalMs = 5000, maxAttempts = 72, maxInlineRetryAfterMs = 30000
 }) {
   if (typeof getClip !== 'function') throw new Error('Twitch clip metadata lookup is unavailable');
   const parsedAttempts = Math.floor(Number(maxAttempts));
@@ -124,9 +124,12 @@ async function waitForVerifiedClipMetadata({
   const parsedInterval = Number(pollIntervalMs);
   const interval = Number.isFinite(parsedInterval) && parsedInterval >= 0
     ? Math.min(30000, parsedInterval) : 5000;
+  const inlineValue = Number(maxInlineRetryAfterMs);
+  const maxInline = Number.isFinite(inlineValue) ? Math.max(0, inlineValue) : 30000;
+  let nextPollDelay = interval;
   let lastError;
   for (let attempt = 0; attempt < attemptLimit; attempt += 1) {
-    if (attempt > 0 && interval > 0) await sleep(interval);
+    if (attempt > 0 && nextPollDelay > 0) await sleep(nextPollDelay);
     let lastClip = null;
     try {
       lastClip = await getClip();
@@ -144,6 +147,9 @@ async function waitForVerifiedClipMetadata({
         }
         throw error;
       }
+      const retryAfterMs = Number(error.retryAfterMs);
+      if (Number.isFinite(retryAfterMs) && retryAfterMs > maxInline) throw error;
+      nextPollDelay = Math.max(interval, Number.isFinite(retryAfterMs) ? retryAfterMs : 0);
     }
   }
   throw lastError || new Error('Twitch clip metadata did not become available');
