@@ -30,7 +30,7 @@ test('reads only active per-video analysis cooldowns', async (t) => {
 test('stale owner-excluded drafts cannot be restored by a retry transition', async (t) => {
   const originalConnect = store.pool.connect;
   const originalQuery = store.pool.query;
-  const current = {
+  let current = {
     id: 'draft-1', sourceType: 'twitch_vod', status: 'excluded_by_owner',
     productionState: 'excluded', publicationStatus: 'excluded',
     excludedAt: '2026-10-21T18:00:01.000Z', updatedAt: '2026-10-21T18:00:01.000Z'
@@ -42,6 +42,9 @@ test('stale owner-excluded drafts cannot be restored by a retry transition', asy
       calls.push({ sql: String(sql), parameters });
       if (/SELECT payload FROM amaana_drafts WHERE id = \$1 FOR UPDATE/.test(String(sql))) {
         return { rows: [{ payload: { ...current } }] };
+      }
+      if (/UPDATE amaana_drafts SET payload = \$2::jsonb/.test(String(sql))) {
+        current = JSON.parse(parameters[1]);
       }
       return { rows: [] };
     },
@@ -61,4 +64,19 @@ test('stale owner-excluded drafts cannot be restored by a retry transition', asy
   assert.equal(current.status, 'excluded_by_owner');
   assert.ok(calls.some((call) => call.sql === 'ROLLBACK'));
   assert.equal(calls.some((call) => call.sql.startsWith('UPDATE amaana_drafts')), false);
+
+  const rejectedGenericUpdate = await store.updateDraft('draft-1', { status: 'clip_queued' });
+  assert.equal(rejectedGenericUpdate, null);
+  assert.equal(current.status, 'excluded_by_owner');
+
+  current = {
+    id: 'draft-1', sourceType: 'twitch_vod', status: 'clip_upload_uncertain',
+    productionState: 'manual_reconciliation', updatedAt: '2026-10-21T18:01:00.000Z'
+  };
+  const attached = await store.updateDraftIfUnchanged('draft-1', { ...current }, {
+    status: 'awaiting_owner_approval', productionState: 'ready', youtubeVideoId: 'abcdefghijk'
+  });
+  assert.equal(attached.status, 'awaiting_owner_approval');
+  assert.equal(attached.youtubeVideoId, 'abcdefghijk');
+  assert.equal(current.status, 'awaiting_owner_approval');
 });
