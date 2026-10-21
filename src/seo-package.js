@@ -439,7 +439,7 @@ DATA: ${JSON.stringify(payload)}`;
     // OpenAI uses HTTP 429 for both temporary rate limits and exhausted credits.
     // Keep the machine-readable code so the worker can distinguish provider quota failures.
     if (response.status === 429) {
-      const body = await response.json().catch(() => null);
+      const body = typeof response.json === 'function' ? await response.json().catch(() => null) : null;
       const apiError = body?.error && typeof body.error === 'object' ? body.error : {};
       error.code = apiError.code;
       error.providerCode = String(apiError.status || '').slice(0, 80);
