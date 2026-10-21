@@ -137,7 +137,9 @@ test('private-video reconciliation verifies ID, connected channel ownership, and
 
 test('uncertain uploads require explicit reconciliation and never attach an unverified ID', () => {
   const now = Date.parse('2026-10-21T12:00:00Z');
-  const parent = { id: 'batch-1', sourceType: 'twitch_highlight_batch', status: 'clip_upload_uncertain' };
+  const parent = { id: 'batch-1', sourceType: 'twitch_highlight_batch', status: 'clip_upload_uncertain',
+    retryLeaseUntil: '2026-10-21T12:15:00Z', retryLeaseClaimedAt: '2026-10-21T12:00:00Z',
+    retryLeaseClaimToken: '00000000-0000-4000-8000-000000000001' };
   assert.throws(() => buildUploadReconciliationPatch(parent, {}, now), /Provide a verified private/);
   assert.throws(() => buildUploadReconciliationPatch({ ...parent, status: 'clip_partial' },
     { confirmNoUpload: true }, now), /Only an uncertain/);
@@ -145,10 +147,16 @@ test('uncertain uploads require explicit reconciliation and never attach an unve
   assert.equal(attached.youtubeVideoId, 'abcdefghijk');
   assert.equal(attached.status, 'creating_shorts');
   assert.equal(attached.manualReconciliationAction, 'private_video_attached');
+  assert.equal(attached.retryLeaseUntil, null);
+  assert.equal(attached.retryLeaseClaimedAt, null);
+  assert.equal(attached.retryLeaseClaimToken, null);
   const confirmedAbsent = buildUploadReconciliationPatch(parent, { confirmNoUpload: true }, now);
   assert.equal(confirmedAbsent.status, 'clip_queued');
   assert.equal(confirmedAbsent.manualReconciliationAction, 'owner_confirmed_no_upload');
   assert.equal(confirmedAbsent.nextClipAttemptAt, null);
+  assert.equal(confirmedAbsent.retryLeaseUntil, null);
+  assert.equal(confirmedAbsent.retryLeaseClaimedAt, null);
+  assert.equal(confirmedAbsent.retryLeaseClaimToken, null);
 });
 
 test('manual retry cannot bypass a future provider backoff', () => {
