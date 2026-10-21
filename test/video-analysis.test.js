@@ -1,7 +1,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { analyzeVideo, videoIdFromUrl, analyzeGameplayFrames, validateGameplayAssessment } = require('../src/video-analysis');
-const { createModelCircuitBreaker, validatePackage, normalizeContext } = require('../src/seo-package');
+const { createModelCircuitBreaker, validatePackage, normalizeContext,
+  nextPacificMidnight } = require('../src/seo-package');
 const { createSeoWorker } = require('../src/seo-worker');
 
 const videoId = 'AbCdEfGhI12';
@@ -336,8 +337,8 @@ test('a shared Gemini 429 pauses both analysis and SEO requests for the run', as
       SEO_AI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
       VIDEO_ANALYSIS_API_KEY: 'analysis-key', ENABLE_VIDEO_ANALYSIS: 'true' },
     analyze: async () => {
-      throw Object.assign(new Error('Gemini rate limit'), {
-        status: 429, retryAfterPresent: true, retryAfterMs: 60000
+      throw Object.assign(new Error('Gemini daily quota exhausted'), {
+        status: 429, providerReason: 'QUOTA_EXCEEDED'
       });
     },
     generate: async () => { seoCalls += 1; return packageDraft; },
@@ -349,8 +350,11 @@ test('a shared Gemini 429 pauses both analysis and SEO requests for the run', as
   assert.equal(seoCalls, 0, 'the shared Gemini project must not receive a second request after 429');
   assert.equal(completion.pkg, null);
   assert.equal(completion.error.retry, true);
-  assert.ok(Date.parse(state.videoAnalysisBlockedUntil) > Date.now());
-  assert.ok(Date.parse(state.providerBlockedUntil) > Date.now());
+  const expectedReset = nextPacificMidnight(Date.now());
+  assert.ok(Math.abs(Date.parse(state.videoAnalysisBlockedUntil) - expectedReset) < 5000,
+    'analysis resumes at Google Gemini daily quota reset');
+  assert.ok(Math.abs(Date.parse(state.providerBlockedUntil) - expectedReset) < 5000,
+    'SEO generation resumes at Google Gemini daily quota reset');
 });
 
 test('private uploads skip YouTube URL analysis', async () => {
