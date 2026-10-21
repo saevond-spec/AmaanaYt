@@ -438,8 +438,9 @@ async function excludeDrafts(ids, reason = 'owner_excluded_non_gameplay_test') {
     if (hasProtectedPublication(lockedDrafts)) {
       throw Object.assign(new Error('A related video is published or scheduled; exclusion left the group unchanged.'), { status: 409 });
     }
-    if (lockedDrafts.some((draft) => draft.status === 'uploading_private_to_youtube')) {
-      throw Object.assign(new Error('A private YouTube upload is in progress; wait for it to finish before excluding this group.'), { status: 409 });
+    if (lockedDrafts.some((draft) =>
+      ['creating_twitch_clip', 'uploading_private_to_youtube'].includes(draft.status))) {
+      throw Object.assign(new Error('A Twitch clip or private YouTube upload is in progress; wait for it to finish before excluding this group.'), { status: 409 });
     }
     const excludedAt = new Date().toISOString();
     const updated = [];
