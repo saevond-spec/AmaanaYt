@@ -568,7 +568,58 @@ function renderDraft(draft, draftsById = new Map()) {
     card.append(element('p', 'draft-error', 'This highlight is not verified against the 12-minute target or the legacy 15-minute target. Publishing is disabled; keep it private.'));
   }
 
-  if (draft.status === 'clip_failed' || (isHighlight && draft.error)) {
+  if (draft.status === 'clip_upload_uncertain') {
+    const reconciliation = element('section', 'draft-reconciliation');
+    reconciliation.append(element('p', 'draft-error',
+      'The YouTube response was interrupted. Check the connected channel for the matching private upload before retrying.'));
+    const videoIdInput = element('input', 'draft-reconcile-video-id');
+    videoIdInput.type = 'text';
+    videoIdInput.maxLength = 11;
+    videoIdInput.autocomplete = 'off';
+    videoIdInput.placeholder = 'Private YouTube video ID';
+    videoIdInput.setAttribute('aria-label', 'Private YouTube video ID');
+    const attach = element('button', 'ghost', 'Attach matching private video');
+    attach.type = 'button';
+    attach.addEventListener('click', async () => {
+      const youtubeVideoId = videoIdInput.value.trim();
+      attach.disabled = true;
+      try {
+        await api(`/api/drafts/${encodeURIComponent(draft.id)}/reconcile-upload`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ youtubeVideoId })
+        });
+        showNotice('Private video attached to this draft. Visibility was not changed.');
+        await loadDrafts();
+      } catch (error) {
+        showNotice(error.message, true);
+        attach.disabled = false;
+      }
+    });
+    const confirmAbsent = element('button', 'ghost', 'I checked: no upload exists');
+    confirmAbsent.type = 'button';
+    confirmAbsent.addEventListener('click', async () => {
+      if (!window.confirm('Confirm that you checked the connected channel and found no matching private upload. Amaana will then retry the upload.')) return;
+      confirmAbsent.disabled = true;
+      try {
+        await api(`/api/drafts/${encodeURIComponent(draft.id)}/reconcile-upload`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ confirmNoUpload: true })
+        });
+        showNotice('The owner-confirmed retry was queued. Any new upload starts private.');
+        await loadDrafts();
+      } catch (error) {
+        showNotice(error.message, true);
+        confirmAbsent.disabled = false;
+      }
+    });
+    reconciliation.append(videoIdInput, attach, confirmAbsent);
+    card.append(reconciliation);
+  }
+
+  const retryCoolingDown = draft.status === 'clip_retry_wait' &&
+    Date.parse(draft.nextClipAttemptAt || '') > Date.now();
+  if (!retryCoolingDown && draft.status !== 'clip_upload_uncertain' &&
+      (draft.status === 'clip_failed' || (isHighlight && draft.error))) {
     const retry = element('button', 'ghost', 'Retry processing');
     retry.type = 'button';
     retry.addEventListener('click', async () => {
@@ -585,6 +636,10 @@ function renderDraft(draft, draftsById = new Map()) {
       }
     });
     card.append(retry);
+  }
+  if (retryCoolingDown) {
+    card.append(element('p', 'draft-meta', 'Retry is scheduled for ' +
+      new Date(draft.nextClipAttemptAt).toLocaleString() + '.'));
   }
   if ((isHighlight || draft.sourceType === 'twitch_vod') && isNonGameplayTestDraft(draft)) {
     card.append(element('p', 'draft-error',
