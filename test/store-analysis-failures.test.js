@@ -26,3 +26,39 @@ test('reads only active per-video analysis cooldowns', async (t) => {
   assert.match(queries.at(-1).sql, /retry_after > NOW()/);
   assert.deepEqual(queries.at(-1).parameters, ['video-1']);
 });
+
+test('stale owner-excluded drafts cannot be restored by a retry transition', async (t) => {
+  const originalConnect = store.pool.connect;
+  const originalQuery = store.pool.query;
+  const current = {
+    id: 'draft-1', sourceType: 'twitch_vod', status: 'excluded_by_owner',
+    productionState: 'excluded', publicationStatus: 'excluded',
+    excludedAt: '2026-10-21T18:00:01.000Z', updatedAt: '2026-10-21T18:00:01.000Z'
+  };
+  const calls = [];
+  store.pool.query = async () => ({ rows: [] });
+  store.pool.connect = async () => ({
+    async query(sql, parameters) {
+      calls.push({ sql: String(sql), parameters });
+      if (/SELECT payload FROM amaana_drafts WHERE id = \$1 FOR UPDATE/.test(String(sql))) {
+        return { rows: [{ payload: { ...current } }] };
+      }
+      return { rows: [] };
+    },
+    release() {}
+  });
+  t.after(() => {
+    store.pool.connect = originalConnect;
+    store.pool.query = originalQuery;
+  });
+
+  const updated = await store.updateDraftIfUnchanged('draft-1', {
+    id: 'draft-1', sourceType: 'twitch_vod', status: 'clip_failed',
+    updatedAt: '2026-10-21T17:59:59.000Z'
+  }, { status: 'clip_queued', productionState: 'queued' });
+
+  assert.equal(updated, null);
+  assert.equal(current.status, 'excluded_by_owner');
+  assert.ok(calls.some((call) => call.sql === 'ROLLBACK'));
+  assert.equal(calls.some((call) => call.sql.startsWith('UPDATE amaana_drafts')), false);
+});
