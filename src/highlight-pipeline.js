@@ -6,7 +6,8 @@ const path = require('path');
 const { validateHighlightMoments, verifyCreatedClip, verifyClipCreationRequest } = require('./highlight-validation');
 const { buildHighlightTitle: defaultBuildHighlightTitle, buildShortTitle: defaultBuildShortTitle,
   buildShortDescription: defaultBuildShortDescription } = require('./highlight-metadata');
-const { isYouTubeUploadLimitError, YOUTUBE_UPLOAD_LIMIT_RETRY_MS } = require('./draft-recovery');
+const { isYouTubeUploadLimitError, isDefiniteYouTubeUploadRejection,
+  isRetryableYouTubeUploadRejection, YOUTUBE_UPLOAD_LIMIT_RETRY_MS } = require('./draft-recovery');
 
 function createBatchQueue(processJob, options = {}) {
   const schedule = options.schedule || setImmediate;
@@ -656,6 +657,13 @@ function createHighlightProcessor(dependencies) {
           }
         } catch (error) {
           const uploadLimitRejected = isYouTubeUploadLimitError(error);
+          const definiteUploadRejection = isDefiniteYouTubeUploadRejection(error);
+          const retryableUploadRejection = isRetryableYouTubeUploadRejection(error);
+          const retryDelayMs = Math.max(
+            uploadLimitRejected ? YOUTUBE_UPLOAD_LIMIT_RETRY_MS : 0,
+            Number(error?.retryAfterMs) > 0 ? Number(error.retryAfterMs) : 0,
+            Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attemptCount - 1)))
+          );
           if (shortDraft && acceptedShortId) {
             await store.updateDraft(shortDraft.id, {
               youtubeVideoId: acceptedShortId, status: 'clip_partial',
@@ -665,28 +673,54 @@ function createHighlightProcessor(dependencies) {
               status: 'clip_partial', productionState: 'processing' };
             shortsByIndex.set(index, shortDraft);
           } else if (shortDraft && shortDraft.status === 'uploading_private_to_youtube') {
-            if (uploadLimitRejected) {
+            if (uploadLimitRejected || retryableUploadRejection) {
+              const nextClipAttemptAt = new Date(now() + retryDelayMs).toISOString();
+              const errorMessage = uploadLimitRejected
+                ? 'uploadLimitExceeded: YouTube rejected this Short because the channel upload limit was reached; retry is queued after a conservative 24-hour wait.'
+                : cleanText(error.message || 'YouTube rejected the Short upload; retry is scheduled', 300);
               await store.updateDraft(shortDraft.id, {
                 status: 'clip_retry_wait', productionState: 'retry_scheduled',
-                nextClipAttemptAt: new Date(now() + YOUTUBE_UPLOAD_LIMIT_RETRY_MS).toISOString(),
-                error: 'uploadLimitExceeded: YouTube rejected this Short because the channel upload limit was reached; retry is queued after a conservative 24-hour wait.'
+                nextClipAttemptAt, error: errorMessage
               }).catch(() => {});
               shortDraft = { ...shortDraft, status: 'clip_retry_wait',
-                productionState: 'retry_scheduled',
-                nextClipAttemptAt: new Date(now() + YOUTUBE_UPLOAD_LIMIT_RETRY_MS).toISOString() };
+                productionState: 'retry_scheduled', nextClipAttemptAt, error: errorMessage };
+            } else if (definiteUploadRejection) {
+              const errorMessage = cleanText(error.message || 'YouTube rejected the Short upload', 300);
+              await store.updateDraft(shortDraft.id, {
+                status: 'clip_failed', productionState: 'failed',
+                nextClipAttemptAt: null, error: errorMessage
+              }).catch(() => {});
+              shortDraft = { ...shortDraft, status: 'clip_failed',
+                productionState: 'failed', nextClipAttemptAt: null, error: errorMessage };
             } else {
+              const errorMessage = 'Short upload may have been accepted without a saved YouTube ID. Check the channel for a private upload before retrying.';
               await store.updateDraft(shortDraft.id, {
                 status: 'clip_upload_uncertain', productionState: 'manual_reconciliation',
-                nextClipAttemptAt: null,
-                error: 'Short upload may have been accepted without a saved YouTube ID. Check the channel for a private upload before retrying.'
+                nextClipAttemptAt: null, error: errorMessage
               }).catch(() => {});
               shortDraft = { ...shortDraft, status: 'clip_upload_uncertain',
-                productionState: 'manual_reconciliation', nextClipAttemptAt: null };
+                productionState: 'manual_reconciliation', nextClipAttemptAt: null, error: errorMessage };
             }
             shortsByIndex.set(index, shortDraft);
+          } else if (shortDraft && shortDraft.status === 'clip_retry_wait') {
+            // A due retry can fail before reaching YouTube (for example during
+            // rendering/validation). Move its deadline forward to avoid a 30s hot loop.
+            const retryable = isTransientError(error);
+            const nextClipAttemptAt = retryable ? new Date(now() + retryDelayMs).toISOString() : null;
+            const nextStatus = retryable ? 'clip_retry_wait' : 'clip_failed';
+            const errorMessage = cleanText(error.message || 'Short production failed', 300);
+            await store.updateDraft(shortDraft.id, {
+              status: nextStatus, productionState: retryable ? 'retry_scheduled' : 'failed',
+              nextClipAttemptAt, error: errorMessage
+            }).catch(() => {});
+            shortDraft = { ...shortDraft, status: nextStatus,
+              productionState: retryable ? 'retry_scheduled' : 'failed', nextClipAttemptAt, error: errorMessage };
+            shortsByIndex.set(index, shortDraft);
           }
-          noteFailure('Short ' + (index + 1), error, 150,
-            { forcePermanent: !uploadLimitRejected && !acceptedShortId });
+          noteFailure('Short ' + (index + 1), error, 150, {
+            forcePermanent: !acceptedShortId &&
+              ['clip_upload_uncertain', 'clip_failed'].includes(shortDraft?.status)
+          });
         }
         offset += durations[index];
       }
@@ -865,6 +899,8 @@ function createHighlightProcessor(dependencies) {
       let message = cleanText(error.message || 'Highlight production failed', 500);
       const attemptCount = (Number(batch && batch.clipAttemptCount) || 0) + 1;
       const uploadLimitRejected = isYouTubeUploadLimitError(error);
+      const definiteUploadRejection = isDefiniteYouTubeUploadRejection(error);
+      const retryableUploadRejection = isRetryableYouTubeUploadRejection(error);
       const maxAttemptsAllowed = Number.isSafeInteger(maxAutoAttempts) && maxAutoAttempts > 0 ? maxAutoAttempts : 12;
       let latest = await store.getDraft(id).catch(() => null);
       if (!latest?.youtubeVideoId && (acceptedHighlightId || error.youtubeVideoId)) {
@@ -881,13 +917,13 @@ function createHighlightProcessor(dependencies) {
           Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attemptCount - 1))),
         Number(error.retryAfterMs) > 0 ? Number(error.retryAfterMs) : 0
       );
-      const canAutoRetry = (uploadLimitRejected ||
+      const canAutoRetry = (uploadLimitRejected || retryableUploadRejection ||
         !uploadingWithoutId && isTransientError(error)) && attemptCount < maxAttemptsAllowed;
       if (uploadLimitRejected) {
         message = 'YouTube rejected the upload because the channel upload limit was reached. Retry is queued after a conservative 24-hour wait.';
       }
       logError(id, error);
-      if (uploadingWithoutId && !uploadLimitRejected) {
+      if (uploadingWithoutId && !uploadLimitRejected && !definiteUploadRejection) {
         await store.updateDraft(id, {
           status: 'clip_upload_uncertain', productionState: 'manual_reconciliation',
           error: 'YouTube upload may have been accepted before its video ID was saved. Check the channel for a private upload before retrying.',
