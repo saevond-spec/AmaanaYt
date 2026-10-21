@@ -72,6 +72,7 @@ async function providerError(response) {
   if (error.status === 429) {
     error.code = apiError.code;
     error.retryAfterPresent = retry.retryAfterPresent;
+    error.retryAfterMs = retry.retryAfterMs;
     error.retryAfterMs = geminiRetryAfterMs(error);
   } else if (retry.retryAfterPresent) {
     error.retryAfterPresent = true;
