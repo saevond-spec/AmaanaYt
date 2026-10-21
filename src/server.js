@@ -32,7 +32,9 @@ const { createSessionStore } = require('./session-store');
 const { canAddVideoToPlaylist } = require('./youtube-playlists');
 const { parseGoogleSearchConsoleCsv } = require('./google-search-console');
 const { createPlaylistAutoAssigner } = require('./playlist-auto');
-const { isYouTubeUploadLimitError, recoverInterruptedYouTubeUploads } = require('./draft-recovery');
+const { isYouTubeUploadLimitError, recoverInterruptedYouTubeUploads,
+  YOUTUBE_UPLOAD_LIMIT_RETRY_MS } = require('./draft-recovery');
+const { initializeWithRetry } = require('./retryable-initializer');
 
 for (const name of ['BASE_URL', 'DATABASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SESSION_SECRET', 'TOKEN_ENCRYPTION_KEY', 'AGENT_KEY', 'ADMIN_KEY']) {
   if (!process.env[name]) throw new Error(`Missing required environment variable: ${name}`);
@@ -1332,8 +1334,11 @@ app.use((error, _req, res, _next) => {
   res.status(status).json({ error: error.message || 'Unexpected server error' });
 });
 
-store.init()
-  .then(async () => {
+initializeWithRetry(() => store.init(), {
+  maxAttempts: 4,
+  onRetry: (_error, attempt, delayMs) =>
+    console.warn(`Database initialization retry ${attempt}/3 in ${delayMs}ms`)
+}).then(async () => {
     const sessionStore = await createSessionStore({ pool: store.pool, redisUrl: process.env.REDIS_URL });
     sessionMiddleware = session({
       store: sessionStore,
