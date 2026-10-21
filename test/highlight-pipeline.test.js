@@ -8,7 +8,7 @@ const path = require('node:path');
 const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
   findHighlightBatchByVodId, isTransientError, shouldPullForwardTwitchMetadataRetry,
   shouldRequeueUnexpectedTwitchDownloadHost, shouldPullForwardAllowedTwitchDownloadHost,
-  shouldRequeueTwitchSegmentDurationFailure } = require('../src/highlight-pipeline');
+  shouldRequeueTwitchSegmentDurationFailure, waitForVerifiedClipMetadata } = require('../src/highlight-pipeline');
 const { buildHighlightTimeline, buildHighlightDescription } = require('../src/highlight-metadata');
 const { downloadClip } = require('../src/twitch');
 
@@ -906,3 +906,21 @@ test('permanent publication permission failure stops with owner review and leave
   assert.equal(h.counters.publications.length, 1);
 });
 
+
+test('metadata polling yields long Twitch Retry-After windows to the durable retry queue', async () => {
+  const sleeps = [];
+  let calls = 0;
+  const error = Object.assign(new Error('Twitch rate limit'), {
+    status: 429, retryAfterMs: 60 * 60 * 1000
+  });
+  await assert.rejects(waitForVerifiedClipMetadata({
+    getClip: async () => { calls += 1; throw error; },
+    moment: { startSeconds: 30, endSeconds: 60, duration: 30 },
+    vodId: '1234567890',
+    sleep: async (ms) => { sleeps.push(ms); },
+    pollIntervalMs: 5000,
+    maxAttempts: 10
+  }), (caught) => caught === error);
+  assert.equal(calls, 1, 'the poller must not call Twitch before the one-hour reset');
+  assert.deepEqual(sleeps, []);
+});
