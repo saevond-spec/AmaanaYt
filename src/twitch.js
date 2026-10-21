@@ -166,6 +166,9 @@ async function helix(pathname, { method = 'GET', query } = {}) {
     if (retry.retryAfterPresent) {
       error.retryAfterPresent = true;
       error.retryAfterMs = retry.retryAfterMs;
+    } else if (response.status === 429) {
+      // A missing rate-limit header must not trigger a tight polling loop.
+      error.retryAfterMs = 60 * 1000;
     }
     throw error;
   }
@@ -361,22 +364,34 @@ async function createClipFromVod({ vodId, vodOffset, duration, title }) {
 }
 
 async function waitForClipDownload({ clipId, broadcasterId, editorId, maxAttempts = 31,
-  pollIntervalMs = 2000 }) {
+  pollIntervalMs = 2000, maxInlineRetryAfterMs = 30000, helixRequest = helix,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   let lastError;
+  let nextPollDelay = 0;
   const attemptsValue = Math.floor(Number(maxAttempts));
   const attempts = Number.isFinite(attemptsValue) ? Math.max(1, Math.min(40, attemptsValue)) : 31;
   const intervalValue = Math.floor(Number(pollIntervalMs));
   const interval = Number.isFinite(intervalValue) ? Math.max(250, Math.min(5000, intervalValue)) : 2000;
+  const inlineValue = Number(maxInlineRetryAfterMs);
+  const maxInline = Number.isFinite(inlineValue) ? Math.max(0, inlineValue) : 30000;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    if (attempt) await new Promise((resolve) => setTimeout(resolve, interval));
+    if (attempt) await sleep(Math.max(interval, nextPollDelay));
     try {
-      const payload = await helix('/clips/downloads', {
+      const payload = await helixRequest('/clips/downloads', {
         query: { broadcaster_id: broadcasterId, editor_id: editorId, clip_id: clipId }
       });
       const item = payload.data?.[0];
       if (item?.portrait_download_url || item?.landscape_download_url) return item;
     } catch (error) {
       lastError = error;
+      const status = Number(error?.status || error?.statusCode || error?.response?.status);
+      const transient = [408, 425, 429].includes(status) || status >= 500 && status <= 599 ||
+        ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND',
+          'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT'].includes(
+          String(error?.code || error?.cause?.code || '').toUpperCase());
+      if (!transient) throw error;
+      nextPollDelay = Number(error.retryAfterMs) > 0 ? Number(error.retryAfterMs) : 0;
+      if (nextPollDelay > maxInline) throw error;
     }
   }
   throw lastError || new Error('Twitch clip media was not ready in time');
