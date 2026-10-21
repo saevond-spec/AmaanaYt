@@ -766,5 +766,8 @@ test('live Twitch 429 preserves the failed offset and waits for the provider res
   assert.equal(h.calls.liveClipCreates[1].vodOffset, firstOffset);
   assert.equal(h.state.liveSessions['7777'].pendingCaptureOffset, null);
   assert.equal(h.state.liveSessions['7777'].lastCaptureOffset, firstOffset);
-  assert.equal(h.state.liveSessions['7777'].candidates.length, 1);
+  assert.equal(retried.batchesQueued, 1,
+    'the verified retry should be consumed into the configured highlight batch');
+  assert.equal(h.drafts.filter((draft) => draft.sourceType === 'twitch_highlight_batch').length, 1);
+  assert.equal(h.state.liveSessions['7777'].candidates.length, 0);
 });
