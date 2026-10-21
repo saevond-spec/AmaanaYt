@@ -300,12 +300,10 @@ async function processTwitchClipDraft(id) {
         productionState: 'ready', error: null, nextClipAttemptAt: null });
       return;
     }
-    if (draft.discoverySource === 'twitch_community_clip') {
-      draft = await store.updateDraft(id, {
-        clipAttemptCount: (Number(draft.clipAttemptCount) || 0) + 1,
-        lastClipAttemptAt: new Date().toISOString()
-      });
-    }
+    draft = await store.updateDraft(id, {
+      clipAttemptCount: (Number(draft.clipAttemptCount) || 0) + 1,
+      lastClipAttemptAt: new Date().toISOString()
+    });
     if (draft.discoverySource === 'twitch_live_capture' && !hasVerifiedLiveGameplayClip(draft)) {
       throw new Error('Live Twitch clip did not pass gameplay verification; no YouTube upload was made');
     }
