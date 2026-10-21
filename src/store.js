@@ -218,6 +218,40 @@ async function updateDraft(id, patch) {
   }
 }
 
+async function updateDraftIfUnchanged(id, expected, patch) {
+  await init();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query('SELECT payload FROM amaana_drafts WHERE id = $1 FOR UPDATE', [id]);
+    const current = result.rows[0]?.payload;
+    const unchanged = Boolean(current && expected &&
+      current.status === expected.status &&
+      current.sourceType === expected.sourceType &&
+      String(current.updatedAt || '') === String(expected.updatedAt || '') &&
+      current.status !== 'excluded_by_owner' &&
+      current.productionState !== 'excluded' &&
+      !current.excludedAt &&
+      !hasProtectedPublication([current]));
+    if (!unchanged) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    const updated = { ...current, ...patch, updatedAt: new Date().toISOString() };
+    await client.query(
+      'UPDATE amaana_drafts SET payload = $2::jsonb, updated_at = NOW() WHERE id = $1',
+      [id, JSON.stringify(updated)]
+    );
+    await client.query('COMMIT');
+    return updated;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function claimHighlightRetryParent(id, options = {}) {
   const timestamp = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
   const leaseMs = Number.isFinite(Number(options.leaseMs)) && Number(options.leaseMs) > 0
@@ -1074,6 +1108,7 @@ module.exports = {
   getDraft,
   addDraft,
   updateDraft,
+  updateDraftIfUnchanged,
   claimHighlightRetryParent,
   extendHighlightRetryLease,
   releaseHighlightRetryLease,
