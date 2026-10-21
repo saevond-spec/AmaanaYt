@@ -1,5 +1,7 @@
 'use strict';
 
+const crypto = require('crypto');
+
 const YOUTUBE_UPLOAD_LIMIT_RETRY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_TWITCH_VOD_MAX_ATTEMPTS = 8;
 const DEFAULT_HIGHLIGHT_MAX_ATTEMPTS = 12;
@@ -133,42 +135,73 @@ function findDueTwitchHighlightRetryParents(drafts, now = Date.now(),
   for (const short of drafts) {
     if (!isDueRetryableHighlightShort(short, timestamp)) continue;
     const parent = byId.get(short.parentId);
-    const parentRetryAt = Date.parse(parent?.nextClipAttemptAt || '');
-    const retryLeaseUntil = Date.parse(parent?.retryLeaseUntil || '');
+    const retryValue = parent?.nextClipAttemptAt;
+    const parentRetryAt = Date.parse(retryValue || '');
+    const leaseValue = parent?.retryLeaseUntil;
+    const retryLeaseUntil = Date.parse(leaseValue || '');
     if (!parent || parent.sourceType !== 'twitch_highlight_batch' ||
         !parent.youtubeVideoId ||
         !['clip_partial', 'clip_retry_wait'].includes(parent.status) ||
         Number(parent.clipAttemptCount) >= attemptLimit ||
+        parent.status === 'clip_retry_wait' &&
+          (!Number.isFinite(parentRetryAt) || parentRetryAt > timestamp) ||
+        retryValue != null && retryValue !== '' && !Number.isFinite(parentRetryAt) ||
         Number.isFinite(parentRetryAt) && parentRetryAt > timestamp ||
+        leaseValue != null && leaseValue !== '' && !Number.isFinite(retryLeaseUntil) ||
         Number.isFinite(retryLeaseUntil) && retryLeaseUntil > timestamp) continue;
     parentIds.add(parent.id);
   }
   return drafts.filter((draft) => parentIds.has(draft?.id));
 }
 
-async function claimDueTwitchHighlightRetryParents(drafts, updateDraft, options = {}) {
-  if (!Array.isArray(drafts) || typeof updateDraft !== 'function') {
-    throw new TypeError('Drafts and an update function are required to claim retry parents');
+async function claimDueTwitchHighlightRetryParents(drafts, claimParent, options = {}) {
+  if (!Array.isArray(drafts) || typeof claimParent !== 'function') {
+    throw new TypeError('Drafts and an atomic claim function are required to claim retry parents');
   }
   const timestamp = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
   const leaseMs = Number.isFinite(Number(options.leaseMs)) && Number(options.leaseMs) > 0
     ? Number(options.leaseMs) : DEFAULT_HIGHLIGHT_RETRY_LEASE_MS;
-  const candidates = findDueTwitchHighlightRetryParents(drafts, timestamp, options.maxAttempts);
-  const claimed = new Set();
-  const leaseUntil = new Date(timestamp + leaseMs).toISOString();
-  for (const parent of candidates) {
+  const attemptLimit = Number.isSafeInteger(options.maxAttempts) && options.maxAttempts > 0
+    ? options.maxAttempts : DEFAULT_HIGHLIGHT_MAX_ATTEMPTS;
+  const candidatesById = new Map();
+  for (const parent of findDueTwitchHighlightRetryParents(drafts, timestamp, attemptLimit)) {
+    candidatesById.set(parent.id, parent);
+  }
+  for (const parent of drafts) {
+    const retryValue = parent?.nextClipAttemptAt;
+    const retryAt = Date.parse(retryValue || '');
+    const leaseValue = parent?.retryLeaseUntil;
+    const leaseUntil = Date.parse(leaseValue || '');
+    const resumable = ['clip_queued', 'creating_twitch_clips',
+      'assembling_highlight_video', 'creating_shorts'].includes(parent?.status);
+    if (parent?.sourceType === 'twitch_highlight_batch' && resumable &&
+        Number(parent.clipAttemptCount || 0) < attemptLimit &&
+        !(retryValue != null && retryValue !== '' && !Number.isFinite(retryAt)) &&
+        !(leaseValue != null && leaseValue !== '' && !Number.isFinite(leaseUntil)) &&
+        !(Number.isFinite(leaseUntil) && leaseUntil > timestamp)) {
+      candidatesById.set(parent.id, parent);
+    }
+    if (parent?.sourceType === 'twitch_highlight_batch' &&
+        parent.status === 'clip_retry_wait' &&
+        Number(parent.clipAttemptCount || 0) < attemptLimit &&
+        Number.isFinite(retryAt) && retryAt <= timestamp &&
+        !(leaseValue != null && leaseValue !== '' && !Number.isFinite(leaseUntil)) &&
+        !(Number.isFinite(leaseUntil) && leaseUntil > timestamp)) {
+      candidatesById.set(parent.id, parent);
+    }
+  }
+  const claimed = new Map();
+  for (const parent of candidatesById.values()) {
     try {
-      const updated = await updateDraft(parent.id, {
-        retryLeaseUntil: leaseUntil,
-        retryLeaseClaimedAt: new Date(timestamp).toISOString()
+      const updated = await claimParent(parent.id, {
+        now: timestamp, leaseMs, maxAttempts: attemptLimit, claimToken: crypto.randomUUID()
       });
-      if (updated === null || updated === false) continue;
-      claimed.add(parent.id);
+      if (updated && updated !== false) claimed.set(parent.id, updated);
     } catch (error) {
       if (typeof options.onError === 'function') options.onError(error, parent);
     }
   }
-  return drafts.filter((draft) => claimed.has(draft?.id));
+  return [...claimed.values()];
 }
 
 function findDueTwitchVodRetries(drafts, now = Date.now(),
@@ -176,11 +209,15 @@ function findDueTwitchVodRetries(drafts, now = Date.now(),
   if (!Array.isArray(drafts)) return [];
   const attemptLimit = Number.isSafeInteger(maxAttempts) && maxAttempts > 0
     ? maxAttempts : DEFAULT_TWITCH_VOD_MAX_ATTEMPTS;
-  return drafts.filter((draft) => draft?.sourceType === 'twitch_vod' &&
-    draft.status === 'clip_retry_wait' &&
-    Number(draft.clipAttemptCount || 0) < attemptLimit &&
-    Number.isFinite(Date.parse(draft.nextClipAttemptAt || '')) &&
-    Date.parse(draft.nextClipAttemptAt) <= Number(now));
+  return drafts.filter((draft) => {
+    const retryLeaseUntil = Date.parse(draft.retryLeaseUntil || '');
+    return draft?.sourceType === 'twitch_vod' &&
+      draft.status === 'clip_retry_wait' &&
+      Number(draft.clipAttemptCount || 0) < attemptLimit &&
+      !(Number.isFinite(retryLeaseUntil) && retryLeaseUntil > Number(now)) &&
+      Number.isFinite(Date.parse(draft.nextClipAttemptAt || '')) &&
+      Date.parse(draft.nextClipAttemptAt) <= Number(now);
+  });
 }
 
 async function recoverInterruptedYouTubeUploads(drafts, updateDraft, onError = () => {}) {
