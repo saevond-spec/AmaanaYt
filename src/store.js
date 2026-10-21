@@ -521,7 +521,7 @@ async function releaseHighlightRetryLease(id, claimToken) {
 async function excludeDrafts(ids, reason = 'owner_excluded_non_gameplay_test', rootId = null) {
   if (!Array.isArray(ids) || ids.some((id) =>
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(id))) ||
-      (rootId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i.test(String(rootId)))) {
+      (rootId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{2}-[0-9a-f]{12}$/i.test(String(rootId)))) {
     throw Object.assign(new Error('Valid draft IDs are required for exclusion'), { status: 400 });
   }
   const uniqueIds = new Set(ids.map(String));
