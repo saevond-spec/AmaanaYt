@@ -143,6 +143,7 @@ async function harness(t, options = {}) {
   let shortFailureUsed = false;
   let seoFailureUsed = false;
   let idCounter = 0;
+  let leaseCounter = 0;
 
   const copy = (value) => value && structuredClone(value);
   const store = {
@@ -161,8 +162,41 @@ async function harness(t, options = {}) {
     },
     async updateDraft(id, patch) {
       const current = drafts.get(id);
-      if (!current) return null;
+      if (!current || current.status === 'excluded_by_owner' ||
+          current.productionState === 'excluded' || current.excludedAt) return null;
       const next = { ...current, ...copy(patch), updatedAt: new Date().toISOString() };
+      drafts.set(id, next);
+      return copy(next);
+    },
+    async claimHighlightRetryParent(id, claimOptions = {}) {
+      const current = drafts.get(id);
+      const now = Number.isFinite(Number(claimOptions.now)) ? Number(claimOptions.now) : Date.now();
+      const leaseUntil = Date.parse(current?.retryLeaseUntil || '');
+      if (!current || current.status === 'excluded_by_owner' ||
+          current.productionState === 'excluded' || current.excludedAt ||
+          current.status === 'completed' ||
+          current.status === 'awaiting_owner_approval' && current.productionState === 'ready' ||
+          current.retryLeaseClaimToken && Number.isFinite(leaseUntil) && leaseUntil > now) return null;
+      const token = '00000000-0000-4000-8000-' + String(++leaseCounter).padStart(12, '0');
+      const claimed = { ...current, retryLeaseClaimToken: token,
+        retryLeaseClaimedAt: new Date(now).toISOString(),
+        retryLeaseUntil: new Date(now + (Number(claimOptions.leaseMs) || 900000)).toISOString() };
+      drafts.set(id, claimed);
+      return copy(claimed);
+    },
+    async extendHighlightRetryLease(id, token, leaseMs = 900000) {
+      const current = drafts.get(id);
+      if (!current || current.retryLeaseClaimToken !== token ||
+          current.status === 'excluded_by_owner' || current.productionState === 'excluded') return null;
+      const next = { ...current, retryLeaseUntil: new Date(Date.now() + leaseMs).toISOString() };
+      drafts.set(id, next);
+      return copy(next);
+    },
+    async releaseHighlightRetryLease(id, token) {
+      const current = drafts.get(id);
+      if (!current || current.retryLeaseClaimToken !== token) return null;
+      const next = { ...current, retryLeaseUntil: null, retryLeaseClaimedAt: null,
+        retryLeaseClaimToken: null };
       drafts.set(id, next);
       return copy(next);
     }
@@ -353,6 +387,27 @@ test('legacy Twitch-discovered batches without a target duration cannot create u
 
   assert.equal(h.drafts.get(h.batch.id).status, 'clip_failed');
   assert.match(h.drafts.get(h.batch.id).error, /no measured target duration/);
+  assert.equal(h.counters.uploads.length, 0);
+  assert.equal(h.counters.publications.length, 0);
+});
+
+test('owner exclusion during upload reservation prevents a private YouTube upload', async (t) => {
+  const h = await harness(t);
+  const updateDraft = h.store.updateDraft.bind(h.store);
+  h.store.updateDraft = async (id, patch) => {
+    if (patch.status === 'uploading_private_to_youtube') {
+      const current = h.drafts.get(id);
+      h.drafts.set(id, { ...current, status: 'excluded_by_owner',
+        productionState: 'excluded', publicationStatus: 'excluded', excludedAt: new Date().toISOString(),
+        retryLeaseUntil: null, retryLeaseClaimedAt: null, retryLeaseClaimToken: null });
+      return null;
+    }
+    return updateDraft(id, patch);
+  };
+
+  await h.processor(h.batch.id);
+
+  assert.equal(h.drafts.get(h.batch.id).status, 'excluded_by_owner');
   assert.equal(h.counters.uploads.length, 0);
   assert.equal(h.counters.publications.length, 0);
 });
