@@ -203,7 +203,12 @@ async function updateDraft(id, patch) {
       await client.query('ROLLBACK');
       return null;
     }
-    const updated = { ...result.rows[0].payload, ...patch, updatedAt: new Date().toISOString() };
+    const current = result.rows[0].payload;
+    if (current.status === 'excluded_by_owner' || current.productionState === 'excluded' || current.excludedAt) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    const updated = { ...current, ...patch, updatedAt: new Date().toISOString() };
     await client.query(
       'UPDATE amaana_drafts SET payload = $2::jsonb, updated_at = NOW() WHERE id = $1',
       [id, JSON.stringify(updated)]
@@ -373,6 +378,9 @@ async function excludeDrafts(ids, reason = 'owner_excluded_non_gameplay_test') {
     if (hasProtectedPublication(lockedDrafts)) {
       throw Object.assign(new Error('A related video is published or scheduled; exclusion left the group unchanged.'), { status: 409 });
     }
+    if (lockedDrafts.some((draft) => draft.status === 'uploading_private_to_youtube')) {
+      throw Object.assign(new Error('A private YouTube upload is in progress; wait for it to finish before excluding this group.'), { status: 409 });
+    }
     const excludedAt = new Date().toISOString();
     const updated = [];
     for (const row of result.rows) {
@@ -383,6 +391,9 @@ async function excludeDrafts(ids, reason = 'owner_excluded_non_gameplay_test') {
         publicationStatus: 'excluded',
         autoPublishEligible: false,
         nextClipAttemptAt: null,
+        retryLeaseUntil: null,
+        retryLeaseClaimedAt: null,
+        retryLeaseClaimToken: null,
         excludedAt,
         exclusionReason: String(reason || 'owner_excluded_non_gameplay_test').slice(0, 80),
         updatedAt: excludedAt
