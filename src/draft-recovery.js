@@ -101,6 +101,7 @@ function buildUploadReconciliationPatch(draft, { youtubeVideoId, confirmNoUpload
   }
   const common = {
     error: null, productionFailures: [], nextClipAttemptAt: null,
+    retryLeaseUntil: null, retryLeaseClaimedAt: null, retryLeaseClaimToken: null,
     manualReconciledAt: new Date(Number(now)).toISOString()
   };
   if (youtubeVideoId) {
