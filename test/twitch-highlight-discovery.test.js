@@ -46,7 +46,8 @@ function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], live
   liveClips = [],
   startAt = Date.parse('2026-10-18T15:00:00.000Z'),
   now = () => startAt, getVodError, listError, clipErrorByVod = {}, onClipsRead,
-  targetDurationSeconds = 15, visualGameplayVerificationAvailable = true } = {}) {
+  targetDurationSeconds = 15, visualGameplayVerificationAvailable = true,
+  liveCreateError = null } = {}) {
   let clock = startAt;
   let persistedState = null;
   const drafts = [...initialDrafts];
@@ -56,6 +57,7 @@ function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], live
     liveLookups: 0, liveClipCreates: [], liveCommunityClipLookups: 0 };
   const liveClipRequests = new Map();
   let liveClipNumber = 0;
+  let liveCreateErrorUsed = false;
   const twitch = {
     async listRecentArchivedVods(options) {
       calls.vodList += 1;
@@ -86,6 +88,10 @@ function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], live
     },
     async createClipFromVod(request) {
       calls.liveClipCreates.push(request);
+      if (liveCreateError && !liveCreateErrorUsed) {
+        liveCreateErrorUsed = true;
+        throw liveCreateError;
+      }
       const clip = {
         id: 'live-clip-' + (++liveClipNumber),
         broadcasterId: '1001',
@@ -716,3 +722,45 @@ test('five-year daily rescan projection stays bounded for old VODs', async () =>
   assert.equal(scanIntervalForVod(vod, startAt + numberOfDays * DAY), DAY);
 });
 
+
+test('live Twitch 429 preserves the failed offset and waits for the provider reset before retrying', async () => {
+  let clock = Date.parse('2026-10-19T15:00:00.000Z');
+  const streamStartedAt = clock - 60 * MINUTE;
+  const h = harness({
+    liveBroadcast: () => makeLiveBroadcast(clock, streamStartedAt),
+    liveCreateError: Object.assign(new Error('Twitch rate limit'), {
+      status: 429, retryAfterMs: 120_000
+    }),
+    video: {
+      async inspectMedia() { return { durationSeconds: 60, width: 1280, height: 720 }; },
+      async verifyGameplay() {
+        return { verified: true, totalFrames: 5, activeGameplayFrames: 5,
+          confidence: 0.95, gameName: 'Test Game', model: 'fixture' };
+      }
+    },
+    startAt: clock, now: () => clock, targetDurationSeconds: 60
+  });
+
+  const first = await h.discovery.runLive();
+  const firstOffset = h.calls.liveClipCreates[0].vodOffset;
+  assert.equal(first.status, 'capture_failed');
+  assert.equal(h.state.liveSessions['7777'].pendingCaptureOffset, firstOffset);
+  assert.equal(h.state.liveSessions['7777'].lastCaptureOffset, null);
+  assert.equal(Date.parse(h.state.liveSessions['7777'].nextCaptureAttemptAt) - clock, 120_000);
+
+  clock += 119_999;
+  h.setNow(clock);
+  const waiting = await h.discovery.runLive();
+  assert.equal(waiting.status, 'waiting_for_capture_retry');
+  assert.equal(h.calls.liveClipCreates.length, 1);
+
+  clock += 1;
+  h.setNow(clock);
+  const retried = await h.discovery.runLive();
+  assert.equal(retried.captureAccepted, true);
+  assert.equal(h.calls.liveClipCreates.length, 2);
+  assert.equal(h.calls.liveClipCreates[1].vodOffset, firstOffset);
+  assert.equal(h.state.liveSessions['7777'].pendingCaptureOffset, null);
+  assert.equal(h.state.liveSessions['7777'].lastCaptureOffset, firstOffset);
+  assert.equal(h.state.liveSessions['7777'].candidates.length, 1);
+});
