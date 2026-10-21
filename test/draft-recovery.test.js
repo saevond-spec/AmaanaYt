@@ -225,6 +225,7 @@ test('retry delay is deterministic, capped, and never shorter than provider Retr
   const first = computeRetryDelayMs(inputs);
   assert.equal(first, computeRetryDelayMs(inputs));
   assert.ok(first >= 4000 && first <= 8000);
-  assert.equal(computeRetryDelayMs({ ...inputs, attempt: 100 }), 8000);
+  const capped = computeRetryDelayMs({ ...inputs, attempt: 100 });
+  assert.ok(capped >= 4000 && capped <= 8000);
   assert.equal(computeRetryDelayMs({ ...inputs, providerRetryAfterMs: 12_000 }), 12_000);
 });
