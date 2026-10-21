@@ -255,14 +255,15 @@ function createHighlightProcessor(dependencies) {
       let hasRetryableFailure = false;
       let hasPermanentFailure = false;
       let providerRetryAfterMs = 0;
-      const noteFailure = (label, error, maxLength = 250) => {
+      const noteFailure = (label, error, maxLength = 250, options = {}) => {
         const retryAfterMs = Number(error && error.retryAfterMs);
         if (Number.isFinite(retryAfterMs) && retryAfterMs > providerRetryAfterMs) {
           providerRetryAfterMs = retryAfterMs;
         }
         const reason = cleanText(error && error.message || 'Production step failed', maxLength);
         failures.push(label + ': ' + reason);
-        if (isYouTubeUploadLimitError(error)) {
+        if (options.forcePermanent) hasPermanentFailure = true;
+        else if (isYouTubeUploadLimitError(error)) {
           hasRetryableFailure = true;
           providerRetryAfterMs = Math.max(providerRetryAfterMs, YOUTUBE_UPLOAD_LIMIT_RETRY_MS,
             Number(error.retryAfterMs) || 0);
@@ -575,7 +576,11 @@ function createHighlightProcessor(dependencies) {
             offset += durations[index];
             continue;
           }
-          if (!['clip_queued', 'clip_retry_wait'].includes(existingShort.status)) {
+          const existingShortRetryDue = existingShort.status === 'clip_retry_wait' &&
+            isYouTubeUploadLimitError({ message: existingShort.error }) &&
+            Number.isFinite(Date.parse(existingShort.nextClipAttemptAt || '')) &&
+            Date.parse(existingShort.nextClipAttemptAt) <= now();
+          if (existingShort.status !== 'clip_queued' && !existingShortRetryDue) {
             noteFailure('Short ' + (index + 1),
               new Error('Short has no saved YouTube ID and is not in a safe-to-upload state'),
               150, { forcePermanent: true });
@@ -664,7 +669,7 @@ function createHighlightProcessor(dependencies) {
               await store.updateDraft(shortDraft.id, {
                 status: 'clip_retry_wait', productionState: 'retry_scheduled',
                 nextClipAttemptAt: new Date(now() + YOUTUBE_UPLOAD_LIMIT_RETRY_MS).toISOString(),
-                error: 'YouTube rejected this Short because the channel upload limit was reached; retry is queued after a conservative 24-hour wait.'
+                error: 'uploadLimitExceeded: YouTube rejected this Short because the channel upload limit was reached; retry is queued after a conservative 24-hour wait.'
               }).catch(() => {});
               shortDraft = { ...shortDraft, status: 'clip_retry_wait',
                 productionState: 'retry_scheduled',
@@ -745,9 +750,11 @@ function createHighlightProcessor(dependencies) {
         const error = failures.slice(0, 8).join('; ') || 'Production checks did not pass';
         for (const short of finalShorts) {
           const ambiguousUpload = ['clip_upload_uncertain', 'uploading_private_to_youtube'].includes(short.status);
+          const notYetUploaded = short.status === 'clip_queued' && !short.youtubeVideoId;
           const scheduledUploadLimitRetry = short.status === 'clip_retry_wait' &&
             Date.parse(short.nextClipAttemptAt || '') > now();
-          if (short.publicationStatus !== 'published' && !ambiguousUpload && !scheduledUploadLimitRetry) {
+          if (short.publicationStatus !== 'published' && !ambiguousUpload &&
+              !notYetUploaded && !scheduledUploadLimitRetry) {
             await store.updateDraft(short.id, {
               status: 'clip_partial',
               productionState: canAutoRetry ? 'processing' : 'partial',
