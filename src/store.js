@@ -531,17 +531,25 @@ async function excludeDrafts(ids, reason = 'owner_excluded_non_gameplay_test', r
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    let groupRoot = null;
+    let groupParentIds = [];
     if (rootId) {
-      const root = await client.query(
-        'SELECT id FROM amaana_drafts WHERE id = $1 FOR UPDATE', [rootId]);
-      if (!root.rowCount) {
+      const rootResult = await client.query(
+        'SELECT id, payload FROM amaana_drafts WHERE id = $1 FOR UPDATE', [rootId]);
+      groupRoot = rootResult.rows[0]?.payload;
+      if (!groupRoot) {
         throw Object.assign(new Error('The Twitch VOD no longer exists; refresh and retry.'), { status: 409 });
       }
-      // Short creation and upload reservation lock the parent before the child. Use
-      // the same order and discover children only after owning the parent lock.
+      const parents = await client.query(
+        "SELECT id FROM amaana_drafts WHERE payload->>'sourceType' = 'twitch_highlight_batch' AND payload->>'vodId' = $1 ORDER BY id FOR UPDATE",
+        [String(groupRoot.vodId || '')]);
+      groupParentIds = [...new Set([String(rootId), ...parents.rows.map((row) => String(row.id))])];
+      // Worker Short creation and reservation lock a highlight parent before a
+      // child. Lock every batch parent first, then discover its children.
       const children = await client.query(
-        'SELECT id FROM amaana_drafts WHERE payload->>\'parentId\' = $1 ORDER BY id FOR UPDATE',
-        [String(rootId)]);
+        "SELECT id FROM amaana_drafts WHERE payload->>'parentId' = ANY($1::text[]) ORDER BY id FOR UPDATE",
+        [groupParentIds]);
+      for (const row of parents.rows) uniqueIds.add(String(row.id));
       for (const row of children.rows) uniqueIds.add(String(row.id));
     }
     const expandedIds = [...uniqueIds];
@@ -553,7 +561,8 @@ async function excludeDrafts(ids, reason = 'owner_excluded_non_gameplay_test', r
       throw Object.assign(new Error('One or more related drafts no longer exist; refresh and retry.'), { status: 409 });
     }
     if (rootId && result.rows.some((row) => String(row.id) !== String(rootId) &&
-        row.payload.parentId !== String(rootId))) {
+        row.payload.vodId !== groupRoot?.vodId &&
+        !groupParentIds.includes(String(row.payload.parentId || '')))) {
       throw Object.assign(new Error('Exclusion included a draft outside this VOD group.'), { status: 409 });
     }
     const lockedDrafts = result.rows.map((row) => row.payload);
