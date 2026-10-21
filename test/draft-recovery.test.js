@@ -6,7 +6,8 @@ const { isYouTubeUploadLimitError, isDefiniteYouTubeUploadRejection,
   isRetryableYouTubeUploadRejection, isUploadRetryCoolingDown,
   canRetryTwitchDraft, isOwnedPrivateYouTubeVideo, buildUploadReconciliationPatch,
   findDueTwitchVodRetries, findDueTwitchHighlightRetryParents,
-  recoverInterruptedYouTubeUploads } = require('../src/draft-recovery');
+  claimDueTwitchHighlightRetryParents, recoverInterruptedYouTubeUploads,
+  computeRetryDelayMs } = require('../src/draft-recovery');
 
 test('identifies a definite YouTube channel upload-limit rejection', () => {
   assert.equal(isYouTubeUploadLimitError({
@@ -110,7 +111,16 @@ test('only schedules due upload-limit Shorts whose parent is safely resumable', 
     { ...due, id: 'excluded-child', parentId: 'excluded-parent' },
     { id: 'no-id-parent', sourceType: 'twitch_highlight_batch',
       status: 'clip_partial' },
-    { ...due, id: 'no-id-child', parentId: 'no-id-parent' }
+    { ...due, id: 'no-id-child', parentId: 'no-id-parent' },
+    { id: 'cooling-parent', sourceType: 'twitch_highlight_batch', status: 'clip_retry_wait',
+      youtubeVideoId: 'abcdefghijk', nextClipAttemptAt: '2026-10-21T12:01:00Z' },
+    { ...due, id: 'cooling-child', parentId: 'cooling-parent' },
+    { id: 'leased-parent', sourceType: 'twitch_highlight_batch', status: 'clip_partial',
+      youtubeVideoId: 'abcdefghijk', retryLeaseUntil: '2026-10-21T12:01:00Z' },
+    { ...due, id: 'leased-child', parentId: 'leased-parent' },
+    { id: 'capped-parent', sourceType: 'twitch_highlight_batch', status: 'clip_partial',
+      youtubeVideoId: 'abcdefghijk', clipAttemptCount: 12 },
+    { ...due, id: 'capped-child', parentId: 'capped-parent' }
   ];
   assert.deepEqual(findDueTwitchHighlightRetryParents(candidates, now).map((draft) => draft.id), ['parent']);
 });
@@ -164,4 +174,57 @@ test('cannot blindly retry uncertain uploads or bypass a future upload-limit dea
     nextClipAttemptAt: '2026-10-21T11:59:00Z' }, now), true);
   assert.equal(canRetryTwitchDraft({ sourceType: 'twitch_vod',
     status: 'clip_failed' }, now), true);
+});
+
+test('Twitch VOD retry selector enforces attempt limits and retry deadlines', () => {
+  const now = Date.parse('2026-10-21T12:00:00Z');
+  const candidates = [
+    { id: 'last-attempt', sourceType: 'twitch_vod', status: 'clip_retry_wait',
+      clipAttemptCount: 7, nextClipAttemptAt: '2026-10-21T11:59:00Z' },
+    { id: 'capped', sourceType: 'twitch_vod', status: 'clip_retry_wait',
+      clipAttemptCount: 8, nextClipAttemptAt: '2026-10-21T11:59:00Z' },
+    { id: 'future', sourceType: 'twitch_vod', status: 'clip_retry_wait',
+      clipAttemptCount: 1, nextClipAttemptAt: '2026-10-21T12:01:00Z' }
+  ];
+  assert.deepEqual(findDueTwitchVodRetries(candidates, now, 8).map((draft) => draft.id), ['last-attempt']);
+});
+
+test('retryable Short parent claims require a durable lease and defer to parent backoff', async () => {
+  const now = Date.parse('2026-10-21T12:00:00Z');
+  const parent = { id: 'parent', sourceType: 'twitch_highlight_batch',
+    status: 'clip_partial', youtubeVideoId: 'abcdefghijk' };
+  const short = { id: 'short', sourceType: 'twitch_highlight_short', parentId: 'parent',
+    status: 'clip_retry_wait', error: 'retry upload', uploadRejectionStatus: 429,
+    nextClipAttemptAt: '2026-10-21T11:59:00Z' };
+  const errors = [];
+  const failedClaim = await claimDueTwitchHighlightRetryParents([parent, short],
+    async () => { throw new Error('database write failed'); },
+    { now, onError: (error, draft) => errors.push([error.message, draft.id]) });
+  assert.deepEqual(failedClaim, []);
+  assert.deepEqual(errors, [['database write failed', 'parent']]);
+
+  let persistedParent = { ...parent };
+  const claimed = await claimDueTwitchHighlightRetryParents([persistedParent, short],
+    async (_id, patch) => (persistedParent = { ...persistedParent, ...patch }),
+    { now, leaseMs: 60_000 });
+  assert.deepEqual(claimed.map((draft) => draft.id), ['parent']);
+  assert.equal(Date.parse(persistedParent.retryLeaseUntil), now + 60_000);
+  assert.deepEqual(findDueTwitchHighlightRetryParents([persistedParent, short], now), []);
+  assert.deepEqual(findDueTwitchHighlightRetryParents([persistedParent, short], now + 60_001)
+    .map((draft) => draft.id), ['parent']);
+
+  persistedParent = { ...persistedParent, status: 'clip_retry_wait',
+    nextClipAttemptAt: '2026-10-21T12:02:00Z', retryLeaseUntil: null };
+  assert.deepEqual(findDueTwitchHighlightRetryParents([persistedParent, short], now + 60_001), [],
+    'the parent-level backoff prevents a Short from bypassing the retry window');
+});
+
+test('retry delay is deterministic, capped, and never shorter than provider Retry-After', () => {
+  const inputs = { attempt: 4, baseDelayMs: 1000, maxDelayMs: 8000,
+    minimumDelayMs: 250, seed: 'stable-job-id' };
+  const first = computeRetryDelayMs(inputs);
+  assert.equal(first, computeRetryDelayMs(inputs));
+  assert.ok(first >= 4000 && first <= 8000);
+  assert.equal(computeRetryDelayMs({ ...inputs, attempt: 100 }), 8000);
+  assert.equal(computeRetryDelayMs({ ...inputs, providerRetryAfterMs: 12_000 }), 12_000);
 });
