@@ -306,6 +306,18 @@ async function processTwitchClipDraft(id, queueOptions = {}) {
       current.retryLeaseClaimToken === claimToken &&
       Number.isFinite(leaseUntil) && leaseUntil > Date.now());
   };
+  const updateClaimedDraft = async (patch) => {
+    if (!claimToken || typeof store.updateDraftWithRetryLease !== 'function') {
+      throw Object.assign(new Error('Claimed Twitch VOD updates are unavailable'), {
+        code: 'HIGHLIGHT_RETRY_LEASE_LOST'
+      });
+    }
+    const updated = await store.updateDraftWithRetryLease(id, claimToken, patch);
+    if (!updated) throw Object.assign(new Error('Twitch VOD retry lease was lost'), {
+      code: 'HIGHLIGHT_RETRY_LEASE_LOST'
+    });
+    return updated;
+  };
   try {
     let draft = await store.getDraft(id);
     if (!draft || draft.sourceType !== 'twitch_vod' || draft.status === 'awaiting_owner_approval' ||
@@ -345,13 +357,13 @@ async function processTwitchClipDraft(id, queueOptions = {}) {
     leaseHeartbeat.unref?.();
 
     if (draft.status === 'creating_twitch_clip' && !draft.twitchClipId) {
-      await store.updateDraft(id, {
+      await updateClaimedDraft( {
         status: 'clip_failed', productionState: 'manual_review', nextClipAttemptAt: null,
         error: 'Twitch clip creation may have completed before this worker stopped. Check Twitch clips before retrying.'
       });
       return;
     }
-    draft = await store.updateDraft(id, {
+    draft = await updateClaimedDraft( {
       clipAttemptCount: (Number(draft.clipAttemptCount) || 0) + 1,
       lastClipAttemptAt: new Date().toISOString()
     });
@@ -362,7 +374,7 @@ async function processTwitchClipDraft(id, queueOptions = {}) {
     if (!await twitch.isConnected()) throw new Error('Connect Twitch in Amaana before processing VOD highlights');
 
     if (!draft.twitchClipId) {
-      draft = await store.updateDraft(id, { status: 'creating_twitch_clip', error: null });
+      draft = await updateClaimedDraft( { status: 'creating_twitch_clip', error: null });
       if (!draft || !await ownsLease()) return;
       const clip = await twitch.createClipFromVod({
         vodId: draft.vodId,
@@ -370,7 +382,7 @@ async function processTwitchClipDraft(id, queueOptions = {}) {
         duration: draft.duration,
         title: draft.title
       });
-      draft = await store.updateDraft(id, {
+      draft = await updateClaimedDraft( {
         status: 'waiting_for_clip_media',
         twitchClipId: clip.id,
         twitchEditUrl: clip.edit_url,
@@ -394,7 +406,7 @@ async function processTwitchClipDraft(id, queueOptions = {}) {
       fs.promises.rm(sourcePath, { force: true }),
       fs.promises.rm(shortPath, { force: true })
     ]);
-    await store.updateDraft(id, { status: 'downloading_twitch_clip' });
+    await updateClaimedDraft( { status: 'downloading_twitch_clip' });
     await twitch.downloadClip(landscapeUrl, sourcePath);
     if (draft.discoverySource === 'twitch_community_clip') {
       const reusableGameplay = isVerifiedGameplayResult(draft.visualGameplayVerification);
@@ -414,19 +426,19 @@ async function processTwitchClipDraft(id, queueOptions = {}) {
       const { gameplay, reused } = await reuseOrVerifyGameplay(
         draft.visualGameplayVerification, () => video.verifyGameplay(sourcePath));
       if (!reused) {
-        draft = await store.updateDraft(id, {
+        draft = await updateClaimedDraft( {
           visualGameplayVerification: { ...gameplay, media, verifiedAt: new Date().toISOString() }
         });
       }
     }
-    await store.updateDraft(id, { status: 'formatting_vertical_short' });
+    await updateClaimedDraft( { status: 'formatting_vertical_short' });
     await video.convertLandscapeToShort(sourcePath, shortPath);
     if (typeof video.validateShort !== 'function') {
       throw new Error('Rendered Twitch Short cannot be validated; no YouTube upload was made');
     }
     await video.validateShort(shortPath, draft.duration);
 
-    const uploadReservation = await store.updateDraft(id, { status: 'uploading_private_to_youtube' });
+    const uploadReservation = await updateClaimedDraft( { status: 'uploading_private_to_youtube' });
     if (!uploadReservation || !await ownsLease()) return;
     const hasVodTimestamp = /^\d+$/.test(String(draft.vodId || '')) && Number.isFinite(Number(draft.startSeconds));
     const sourceUrl = hasVodTimestamp
@@ -448,7 +460,7 @@ async function processTwitchClipDraft(id, queueOptions = {}) {
       tags: ['@saevond', 'gaming', 'livestream highlights', 'Shorts'],
       madeForKids: false
     });
-    await store.updateDraft(id, {
+    await updateClaimedDraft( {
       youtubeVideoId: uploaded.id,
       status: 'awaiting_owner_approval',
       error: null,
@@ -459,7 +471,7 @@ async function processTwitchClipDraft(id, queueOptions = {}) {
       tags: ['@saevond', 'gaming', 'livestream highlights', 'Shorts'],
       context: { topic: draft.reason || draft.title, takeaways: draft.reason || draft.title, videoType: 'Gameplay' }
     });
-    await store.updateDraft(id, {
+    await updateClaimedDraft( {
       playlistAssignment,
       youtubeVideoId: uploaded.id,
       status: 'awaiting_owner_approval',
@@ -475,6 +487,7 @@ async function processTwitchClipDraft(id, queueOptions = {}) {
       playlistAssignment
     }).catch((error) => console.error('Short SEO registration failed:', error.message));
   } catch (error) {
+    if (error?.code === 'HIGHLIGHT_RETRY_LEASE_LOST') return;
     console.error(`Twitch clip job ${id} failed:`, error.message);
     const latest = await store.getDraft(id).catch(() => null);
     const uploadInProgress = latest?.status === 'uploading_private_to_youtube';
@@ -482,11 +495,11 @@ async function processTwitchClipDraft(id, queueOptions = {}) {
     const definiteUploadRejection = isDefiniteYouTubeUploadRejection(error);
     const retryableUploadRejection = isRetryableYouTubeUploadRejection(error);
     if (latest && latest.youtubeVideoId) {
-      await store.updateDraft(id, { status: 'awaiting_owner_approval',
+      await updateClaimedDraft( { status: 'awaiting_owner_approval',
         productionState: 'ready', error: null, nextClipAttemptAt: null }).catch(() => {});
     } else if (uploadInProgress && uploadLimitRejected &&
         Number(latest?.clipAttemptCount || 0) < twitchClipMaxAutoAttempts) {
-      await store.updateDraft(id, {
+      await updateClaimedDraft( {
         status: 'clip_retry_wait', productionState: 'retry_scheduled',
         nextClipAttemptAt: new Date(Date.now() + YOUTUBE_UPLOAD_LIMIT_RETRY_MS).toISOString(),
         error: 'YouTube rejected this upload because the channel upload limit was reached. A retry is queued after a conservative 24-hour wait.'
@@ -495,18 +508,18 @@ async function processTwitchClipDraft(id, queueOptions = {}) {
         Number(latest?.clipAttemptCount || 0) < twitchClipMaxAutoAttempts) {
       const delay = Math.max(Number(error.retryAfterMs) || 0, clipRetryDelayMs(
         Math.max(1, Number(latest.clipAttemptCount) || 1), id));
-      await store.updateDraft(id, {
+      await updateClaimedDraft( {
         status: 'clip_retry_wait', productionState: 'retry_scheduled',
         nextClipAttemptAt: new Date(Date.now() + delay).toISOString(),
         error: cleanText(error.message, 500)
       }).catch(() => {});
     } else if (uploadInProgress && definiteUploadRejection) {
-      await store.updateDraft(id, {
+      await updateClaimedDraft( {
         status: 'clip_failed', productionState: 'failed', nextClipAttemptAt: null,
         error: cleanText(error.message, 500)
       }).catch(() => {});
     } else if (uploadInProgress) {
-      await store.updateDraft(id, {
+      await updateClaimedDraft( {
         status: 'clip_upload_uncertain', productionState: 'manual_reconciliation',
         error: cleanText(error.message, 500), nextClipAttemptAt: null
       }).catch(() => {});
@@ -515,20 +528,20 @@ async function processTwitchClipDraft(id, queueOptions = {}) {
       const attempt = Math.max(1, Number(latest.clipAttemptCount) || 1);
       const delay = Math.max(Number(error.retryAfterMs) || 0, clipRetryDelayMs(attempt, id));
       const nextClipAttemptAt = new Date(Date.now() + delay).toISOString();
-      await store.updateDraft(id, {
+      await updateClaimedDraft( {
         status: 'clip_retry_wait', productionState: 'retry_scheduled', nextClipAttemptAt,
         error: cleanText(error.message, 500)
       }).catch(() => {});
     } else if (latest && Number(latest.clipAttemptCount || 0) < twitchClipMaxAutoAttempts && isTransientError(error)) {
       const attempt = Math.max(1, Number(latest.clipAttemptCount) || 1);
       const delay = Math.max(Number(error.retryAfterMs) || 0, clipRetryDelayMs(attempt, id));
-      await store.updateDraft(id, {
+      await updateClaimedDraft( {
         status: 'clip_retry_wait', productionState: 'retry_scheduled',
         nextClipAttemptAt: new Date(Date.now() + delay).toISOString(),
         error: cleanText(error.message, 500)
       }).catch(() => {});
     } else {
-      await store.updateDraft(id, { status: 'clip_failed', error: cleanText(error.message, 500) }).catch(() => {});
+      await updateClaimedDraft( { status: 'clip_failed', error: cleanText(error.message, 500) }).catch(() => {});
     }
   } finally {
     if (leaseHeartbeat) clearInterval(leaseHeartbeat);
@@ -614,9 +627,13 @@ async function scheduleDueHighlightRetries() {
     }
     for (const draft of claimedTwitchVodRetries) {
       const claimToken = draft.retryLeaseClaimToken;
-      const accepted = enqueueClipProcessing(draft.id, { retryLeaseClaimToken: claimToken });
-      if (!accepted && typeof store.releaseHighlightRetryLease === 'function') {
-        await store.releaseHighlightRetryLease(draft.id, claimToken);
+      try {
+        const accepted = enqueueClipProcessing(draft.id, { retryLeaseClaimToken: claimToken });
+        if (!accepted && typeof store.releaseHighlightRetryLease === 'function') {
+          await store.releaseHighlightRetryLease(draft.id, claimToken);
+        }
+      } catch (error) {
+        console.error('Failed to queue or release Twitch VOD retry ' + draft.id + ': ' + error.message);
       }
     }
     const claimedShortRetryParents = await claimDueTwitchHighlightRetryParents(
@@ -628,12 +645,16 @@ async function scheduleDueHighlightRetries() {
     );
     for (const parent of claimedShortRetryParents) {
       const claimToken = parent.retryLeaseClaimToken;
-      const accepted = enqueueHighlightBatch(parent.id, {
-        retryLeaseClaimToken: claimToken
-      });
-      if (!accepted && typeof store.releaseHighlightRetryLease === 'function') {
-        await store.releaseHighlightRetryLease(parent.id, claimToken);
-        console.warn('Released highlight retry lease after an active queue duplicate: ' + parent.id);
+      try {
+        const accepted = enqueueHighlightBatch(parent.id, {
+          retryLeaseClaimToken: claimToken
+        });
+        if (!accepted && typeof store.releaseHighlightRetryLease === 'function') {
+          await store.releaseHighlightRetryLease(parent.id, claimToken);
+          console.warn('Released highlight retry lease after an active queue duplicate: ' + parent.id);
+        }
+      } catch (error) {
+        console.error('Failed to queue or release highlight retry ' + parent.id + ': ' + error.message);
       }
     }
     for (const draft of drafts) {
@@ -1379,7 +1400,7 @@ app.post('/api/drafts/:id/exclude-test-vod', admin, async (req, res, next) => {
       return res.status(409).json({ error: 'Only a test-titled Twitch highlight VOD can be excluded this way.' });
     }
     const updated = await store.excludeDrafts(
-      relatedDrafts.map((item) => item.id), 'non_gameplay_test_stream'
+      relatedDrafts.map((item) => item.id), 'non_gameplay_test_stream', draft.id
     );
     res.json({ excludedCount: updated.length, youtubeVisibilityChanged: false });
   } catch (error) {
@@ -1491,8 +1512,10 @@ app.post('/api/drafts/:id/approve', admin, async (req, res, next) => {
     }
     if (draft.sourceType === 'twitch_highlight_short') {
       const parent = await store.getDraft(draft.parentId);
-      if (!parent || !hasVerifiedGameplayHighlight(parent)) {
-        return res.status(409).json({ error: 'This Short does not belong to a verified gameplay highlight and cannot be published. Keep it private.' });
+      if (!parent || parent.status === 'excluded_by_owner' ||
+          parent.productionState === 'excluded' || parent.excludedAt ||
+          !hasVerifiedGameplayHighlight(parent)) {
+        return res.status(409).json({ error: 'This Short does not belong to a verified, included gameplay highlight and cannot be published. Keep it private.' });
       }
     }
     const published = await youtube.publish(draft.youtubeVideoId, req.body.publishAt || null);
