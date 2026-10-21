@@ -238,6 +238,47 @@ function retryAfterDetails(response, now = Date.now) {
     retryAfterMs: Number.isFinite(delay) && delay >= 0 ? Math.ceil(delay) : 60000 };
 }
 
+const pacificDateFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+});
+
+function pacificDateParts(timestamp) {
+  return Object.fromEntries(pacificDateFormatter.formatToParts(new Date(timestamp))
+    .filter((part) => part.type !== 'literal').map((part) => [part.type, Number(part.value)]));
+}
+
+function pacificZoneOffset(timestamp) {
+  const parts = pacificDateParts(timestamp);
+  const zonedAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day,
+    parts.hour, parts.minute, parts.second);
+  return zonedAsUtc - Math.floor(timestamp / 1000) * 1000;
+}
+
+function nextPacificMidnight(timestamp = Date.now()) {
+  const { year, month, day } = pacificDateParts(timestamp);
+  const nextLocalMidnightAsUtc = Date.UTC(year, month - 1, day + 1);
+  const firstEstimate = nextLocalMidnightAsUtc - pacificZoneOffset(timestamp);
+  return nextLocalMidnightAsUtc - pacificZoneOffset(firstEstimate);
+}
+
+function isGeminiDailyQuotaError(error) {
+  const detail = [error?.providerReason, error?.providerCode, error?.providerMessage,
+    error?.code, error?.message].filter(Boolean).join(' ').toLowerCase();
+  return /\bquota[_ -]*exceeded\b|\bdaily\s+quota\b|\bquota\b.{0,100}\bper[- ]day\b|\brequests?\s+per\s+day\b/.test(detail);
+}
+
+function geminiRetryAfterMs(error, timestamp = Date.now()) {
+  const provided = Number(error?.retryAfterMs);
+  const hasProviderDelay = error?.retryAfterPresent && Number.isFinite(provided) && provided >= 0;
+  if (isGeminiDailyQuotaError(error)) {
+    const untilReset = Math.max(0, nextPacificMidnight(timestamp) - timestamp);
+    return Math.max(untilReset, hasProviderDelay ? Math.ceil(provided) : 0);
+  }
+  if (hasProviderDelay) return Math.ceil(provided);
+  return Number.isFinite(provided) && provided >= 0 ? Math.ceil(provided) : 60000;
+}
+
 function createModelCircuitBreaker({ now = Date.now } = {}) {
   const failures = new Map();
   return {
@@ -248,12 +289,20 @@ function createModelCircuitBreaker({ now = Date.now } = {}) {
       failures.delete(model);
       return 0;
     },
-    record(model, status) {
+    record(model, status, retryAfterMs) {
       const previous = failures.get(model);
+      const delay = Number(retryAfterMs);
+      if (status === 429) {
+        const blockedUntil = Number.isFinite(delay) && delay >= 0 ? now() + delay : now() + 60000;
+        if (blockedUntil > now()) failures.set(model, { consecutive: 0, blockedUntil });
+        else failures.delete(model);
+        return;
+      }
       if (status !== 503) { failures.delete(model); return; }
       const consecutive = (previous?.consecutive || 0) + 1;
-      failures.set(model, { consecutive,
-        blockedUntil: consecutive >= 3 ? now() + 30 * 60 * 1000 : 0 });
+      const retryBlock = Number.isFinite(delay) && delay > 0 ? now() + delay : 0;
+      const circuitBlock = consecutive >= 3 ? now() + 30 * 60 * 1000 : 0;
+      failures.set(model, { consecutive, blockedUntil: Math.max(retryBlock, circuitBlock) });
     }
   };
 }
@@ -338,15 +387,11 @@ DATA: ${JSON.stringify(payload)}`;
     if (remaining) return { ok: false, status: 503, circuitOpen: true, retryAfterMs: remaining };
     const send = nativeRoute ? requestNative : request;
     let result = await send(requestedModel);
-    if (result.status === 429) {
-      const { retryAfterMs } = retryAfterDetails(result);
-      // Long Retry-After periods belong to the worker queue, not an in-flight request.
-      if (retryAfterMs <= 60000) {
-        await sleep(retryAfterMs);
-        result = await send(requestedModel);
-      }
-    }
-    circuitBreaker.record(requestedModel, result.status);
+    const retry = retryAfterDetails(result);
+    // Let the durable worker queue schedule 429/503 retries; avoid burning request
+    // budget with an in-flight retry while provider limits are active.
+    circuitBreaker.record(requestedModel, result.status,
+      retry.retryAfterPresent ? retry.retryAfterMs : undefined);
     return result;
   };
   let response = await checkedRequest(model);
@@ -385,13 +430,24 @@ DATA: ${JSON.stringify(payload)}`;
     error.status = response.status;
     error.route = native ? 'native' : 'compatible';
     error.contentType = response.headers?.get?.('content-type') || null;
-    if (response.circuitOpen) error.retryAfterMs = response.retryAfterMs;
-    // OpenAI uses HTTP 429 for both temporary rate limits and exhausted credits.
-    // Keep the machine-readable code so the worker can pause only quota failures.
-    if (response.status === 429) {
+    if (response.circuitOpen) {
+      error.retryAfterMs = response.retryAfterMs;
+      error.retryAfterPresent = Number.isFinite(Number(response.retryAfterMs));
+    } else if ([429, 503].includes(response.status)) {
       Object.assign(error, retryAfterDetails(response));
-      const body = await response.json().catch(() => null);
-      error.code = body?.error?.code;
+    }
+    // OpenAI uses HTTP 429 for both temporary rate limits and exhausted credits.
+    // Keep the machine-readable code so the worker can distinguish provider quota failures.
+    if (response.status === 429) {
+      const body = typeof response.json === 'function' ? await response.json().catch(() => null) : null;
+      const apiError = body?.error && typeof body.error === 'object' ? body.error : {};
+      error.code = apiError.code;
+      error.providerCode = String(apiError.status || '').slice(0, 80);
+      error.providerReason = Array.isArray(apiError.details)
+        ? apiError.details.map((item) => item?.reason || item?.metadata?.quota_metric)
+          .filter(Boolean).join(' ').slice(0, 160) : '';
+      error.providerMessage = String(apiError.message || '').replace(/\s+/g, ' ').slice(0, 240);
+      error.retryAfterMs = geminiRetryAfterMs(error);
     }
     throw error;
   }
@@ -405,4 +461,5 @@ DATA: ${JSON.stringify(payload)}`;
 
 module.exports = { clean, clock, secondsFromIso, normalizeSource, normalizeContext,
   descriptionChapters, evidenceFor, validatePackage, generatePackage,
-  retryAfterDetails, createModelCircuitBreaker };
+  retryAfterDetails, nextPacificMidnight, isGeminiDailyQuotaError, geminiRetryAfterMs,
+  createModelCircuitBreaker };

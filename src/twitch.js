@@ -120,6 +120,28 @@ async function accessToken() {
   return current.access_token;
 }
 
+function retryAfterDetails(headers, now = Date.now()) {
+  const delays = [];
+  const retryHeader = headers?.get?.('retry-after');
+  if (retryHeader !== null && retryHeader !== undefined && String(retryHeader).trim() !== '') {
+    const seconds = Number(retryHeader);
+    const parsed = Number.isFinite(seconds) && seconds >= 0
+      ? seconds * 1000 : Date.parse(retryHeader) - now;
+    if (Number.isFinite(parsed) && parsed >= 0) delays.push(Math.ceil(parsed));
+  }
+  const resetHeader = headers?.get?.('ratelimit-reset');
+  if (resetHeader !== null && resetHeader !== undefined && String(resetHeader).trim() !== '') {
+    const resetEpochSeconds = Number(resetHeader);
+    if (Number.isFinite(resetEpochSeconds) && resetEpochSeconds >= 0) {
+      delays.push(Math.max(0, Math.ceil(resetEpochSeconds * 1000 - now)));
+    }
+  }
+  return {
+    retryAfterPresent: delays.length > 0,
+    retryAfterMs: delays.length ? Math.max(...delays) : 0
+  };
+}
+
 async function helix(pathname, { method = 'GET', query } = {}) {
   const url = new URL(`${HELIX_BASE}${pathname}`);
   if (query) {
@@ -140,6 +162,14 @@ async function helix(pathname, { method = 'GET', query } = {}) {
   if (!response.ok) {
     const error = new Error(payload.message || payload.error || `Twitch API failed (${response.status})`);
     error.status = response.status;
+    const retry = retryAfterDetails(response.headers);
+    if (retry.retryAfterPresent) {
+      error.retryAfterPresent = true;
+      error.retryAfterMs = retry.retryAfterMs;
+    } else if (response.status === 429) {
+      // A missing rate-limit header must not trigger a tight polling loop.
+      error.retryAfterMs = 60 * 1000;
+    }
     throw error;
   }
   return payload;
@@ -160,18 +190,36 @@ async function getVod(vodId) {
   return requireArchivedTwitchVod(vod, vodId, user.id);
 }
 
-async function listRecentArchivedVods({ first = 20 } = {}) {
+async function listRecentArchivedVods({ first = 100, maxPages = 10 } = {}) {
   const user = await currentUser();
   const requestedFirst = Math.floor(Number(first));
   const pageSize = Number.isFinite(requestedFirst) && requestedFirst > 0
-    ? Math.min(100, Math.max(1, requestedFirst)) : 20;
-  const [videosPayload, streamsPayload] = await Promise.all([
+    ? Math.min(100, Math.max(1, requestedFirst)) : 100;
+  const requestedPages = Math.floor(Number(maxPages));
+  const pageLimit = Number.isFinite(requestedPages) && requestedPages > 0
+    ? Math.min(10, Math.max(1, requestedPages)) : 10;
+  const [firstPage, streamsPayload] = await Promise.all([
     helix('/videos', { query: { user_id: user.id, type: 'archive', first: pageSize } }),
     helix('/streams', { query: { user_id: user.id, first: 100 } })
   ]);
+  const videos = [...(firstPage.data || [])];
+  const seenCursors = new Set();
+  let cursor = firstPage.pagination && firstPage.pagination.cursor;
+  for (let page = 1; page < pageLimit && cursor && !seenCursors.has(cursor); page += 1) {
+    seenCursors.add(cursor);
+    const nextPage = await helix('/videos', {
+      query: { user_id: user.id, type: 'archive', first: pageSize, after: cursor }
+    });
+    videos.push(...(nextPage.data || []));
+    cursor = nextPage.pagination && nextPage.pagination.cursor;
+  }
   const activeStreamIds = new Set((streamsPayload.data || [])
     .map((stream) => String(stream.id || '')).filter(Boolean));
-  return (videosPayload.data || [])
+  const uniqueVideos = new Map();
+  for (const vod of videos) {
+    if (vod?.id && !uniqueVideos.has(String(vod.id))) uniqueVideos.set(String(vod.id), vod);
+  }
+  return [...uniqueVideos.values()]
     .filter((vod) => vod && vod.type === 'archive' && String(vod.user_id || '') === String(user.id))
     .filter((vod) => !activeStreamIds.has(String(vod.stream_id || '')) &&
       !activeStreamIds.has(String(vod.id || '')))
@@ -241,31 +289,54 @@ async function listClipsForVod(vod, { maxPages = 10 } = {}) {
   const now = Date.now();
   const createdAt = Date.parse(archive.created_at || '');
   const weekAgo = now - 7 * 24 * 60 * 60 * 1000;
-  const startedAt = Math.max(Number.isFinite(createdAt) ? createdAt - 24 * 60 * 60 * 1000 : weekAgo, weekAgo);
-  if (startedAt >= now) return [];
+  const durationMatch = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/i.exec(String(archive.duration || ''));
+  const durationSeconds = durationMatch
+    ? Number(durationMatch[1] || 0) * 3600 + Number(durationMatch[2] || 0) * 60 + Number(durationMatch[3] || 0)
+    : 0;
+  const windows = [];
+  if (Number.isFinite(createdAt)) {
+    const historicalStart = createdAt - 24 * 60 * 60 * 1000;
+    const historicalEnd = Math.min(now,
+      createdAt + (durationSeconds > 0 ? durationSeconds : 24 * 60 * 60) * 1000 + 24 * 60 * 60 * 1000);
+    if (historicalStart < historicalEnd) windows.push({ start: historicalStart, end: historicalEnd });
+    const recentStart = weekAgo;
+    if (recentStart < now) windows.push({ start: recentStart, end: now });
+  } else if (weekAgo < now) {
+    windows.push({ start: weekAgo, end: now });
+  }
   const pageLimitValue = Math.floor(Number(maxPages));
   const pageLimit = Number.isFinite(pageLimitValue) && pageLimitValue > 0
     ? Math.min(10, pageLimitValue) : 10;
   const clips = [];
-  const seenCursors = new Set();
-  let after;
-  for (let page = 0; page < pageLimit; page += 1) {
-    const payload = await helix('/clips', {
-      query: {
-        broadcaster_id: user.id,
-        started_at: new Date(startedAt).toISOString(),
-        ended_at: new Date(now).toISOString(),
-        first: 100,
-        after
-      }
-    });
-    clips.push(...(payload.data || []).filter((clip) => String(clip.video_id || '') === String(archive.id)));
-    const cursor = payload.pagination && payload.pagination.cursor;
-    if (!cursor || seenCursors.has(cursor)) break;
-    seenCursors.add(cursor);
-    after = cursor;
+  let pagesRemaining = pageLimit;
+  for (let windowIndex = 0; windowIndex < windows.length && pagesRemaining > 0; windowIndex += 1) {
+    const window = windows[windowIndex];
+    const windowsAfterThis = windows.length - windowIndex - 1;
+    const fairShare = Math.max(1, Math.floor(pageLimit / windows.length));
+    const windowBudget = windowsAfterThis === 0 ? pagesRemaining
+      : Math.max(1, Math.min(fairShare, pagesRemaining - windowsAfterThis));
+    const seenCursors = new Set();
+    let after;
+    for (let windowPages = 0; windowPages < windowBudget && pagesRemaining > 0; windowPages += 1) {
+      const payload = await helix('/clips', {
+        query: {
+          broadcaster_id: user.id,
+          started_at: new Date(window.start).toISOString(),
+          ended_at: new Date(window.end).toISOString(),
+          first: 100,
+          after
+        }
+      });
+      pagesRemaining -= 1;
+      clips.push(...(payload.data || []).filter((clip) => String(clip.video_id || '') === String(archive.id)));
+      const cursor = payload.pagination && payload.pagination.cursor;
+      if (!cursor || seenCursors.has(cursor)) break;
+      seenCursors.add(cursor);
+      after = cursor;
+    }
   }
-  return clips;
+  return [...new Map(clips.filter((clip) => clip && clip.id)
+    .map((clip) => [String(clip.id), clip])).values()];
 }
 
 async function getClip(clipId) {
@@ -316,22 +387,34 @@ async function createClipFromVod({ vodId, vodOffset, duration, title }) {
 }
 
 async function waitForClipDownload({ clipId, broadcasterId, editorId, maxAttempts = 31,
-  pollIntervalMs = 2000 }) {
+  pollIntervalMs = 2000, maxInlineRetryAfterMs = 30000, helixRequest = helix,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   let lastError;
+  let nextPollDelay = 0;
   const attemptsValue = Math.floor(Number(maxAttempts));
   const attempts = Number.isFinite(attemptsValue) ? Math.max(1, Math.min(40, attemptsValue)) : 31;
   const intervalValue = Math.floor(Number(pollIntervalMs));
   const interval = Number.isFinite(intervalValue) ? Math.max(250, Math.min(5000, intervalValue)) : 2000;
+  const inlineValue = Number(maxInlineRetryAfterMs);
+  const maxInline = Number.isFinite(inlineValue) ? Math.max(0, inlineValue) : 30000;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    if (attempt) await new Promise((resolve) => setTimeout(resolve, interval));
+    if (attempt) await sleep(Math.max(interval, nextPollDelay));
     try {
-      const payload = await helix('/clips/downloads', {
+      const payload = await helixRequest('/clips/downloads', {
         query: { broadcaster_id: broadcasterId, editor_id: editorId, clip_id: clipId }
       });
       const item = payload.data?.[0];
       if (item?.portrait_download_url || item?.landscape_download_url) return item;
     } catch (error) {
       lastError = error;
+      const status = Number(error?.status || error?.statusCode || error?.response?.status);
+      const transient = [408, 425, 429].includes(status) || status >= 500 && status <= 599 ||
+        ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND',
+          'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT'].includes(
+          String(error?.code || error?.cause?.code || '').toUpperCase());
+      if (!transient) throw error;
+      nextPollDelay = Number(error.retryAfterMs) > 0 ? Number(error.retryAfterMs) : 0;
+      if (nextPollDelay > maxInline) throw error;
     }
   }
   throw lastError || new Error('Twitch clip media was not ready in time');
@@ -373,6 +456,7 @@ async function downloadClip(urlValue, destination) {
 module.exports = {
   isConfigured,
   isConnected,
+  retryAfterDetails,
   connectionStatus,
   authorizationUrl,
   exchangeCode,

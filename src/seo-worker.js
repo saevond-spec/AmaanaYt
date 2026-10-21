@@ -1,4 +1,19 @@
-const { normalizeSource, normalizeContext, generatePackage, createModelCircuitBreaker } = require('./seo-package');
+const { normalizeSource, normalizeContext, generatePackage, createModelCircuitBreaker,
+  isGeminiDailyQuotaError, nextPacificMidnight } = require('./seo-package');
+
+function geminiQuotaIsShared(env = {}) {
+  const seoUsesGemini = String(env.SEO_AI_BASE_URL || '')
+    .startsWith('https://generativelanguage.googleapis.com/');
+  const seoKey = String(env.SEO_AI_API_KEY || '').trim();
+  const analysisKey = String(env.VIDEO_ANALYSIS_API_KEY || (seoUsesGemini ? seoKey : '')).trim();
+  if (!seoUsesGemini || !seoKey || !analysisKey) return false;
+  if (analysisKey === seoKey) return true;
+  const seoProject = String(env.SEO_AI_PROJECT_ID || env.GEMINI_SEO_PROJECT_ID || '').trim();
+  const analysisProject = String(env.VIDEO_ANALYSIS_PROJECT_ID || env.GEMINI_VIDEO_PROJECT_ID || '').trim();
+  // Gemini usage limits are project-scoped. Different keys are still shared unless
+  // the deployment explicitly identifies two different Google Cloud projects.
+  return !(seoProject && analysisProject && seoProject !== analysisProject);
+}
 const { analyzeVideo } = require('./video-analysis');
 const { createSeoPublisher } = require('./seo-publish');
 const { isYouTubeAuthorizationError } = require('./channel-tags');
@@ -48,9 +63,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   const analysisEnabled = env.ENABLE_VIDEO_ANALYSIS === 'true';
   const VIDEO_ANALYSIS_FAILURE_RETRY_MS = 24 * 60 * 60 * 1000;
   const seoUsesGemini = (env.SEO_AI_BASE_URL || '').startsWith('https://generativelanguage.googleapis.com/');
-  const configuredAnalysisApiKey = env.VIDEO_ANALYSIS_API_KEY || (seoUsesGemini ? env.SEO_AI_API_KEY : null);
-  const analysisSharesSeoQuota = Boolean(seoUsesGemini && configuredAnalysisApiKey &&
-    configuredAnalysisApiKey === env.SEO_AI_API_KEY);
+  const analysisSharesSeoQuota = geminiQuotaIsShared(env);
   const autoPublishEnabled = env.SEO_AUTO_PUBLISH === 'true' &&
     typeof store.listSeoAutoCandidates === 'function' && typeof youtube.updateVideoSeo === 'function';
   const publisher = autoPublishEnabled ? createSeoPublisher({ store, youtube, logger }) : null;
@@ -67,6 +80,13 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       if (cached?.analysis) {
         logger.info?.(`analysis_skipped ${id}: cached`);
         return cached.analysis;
+      }
+      if (typeof store.getVideoAnalysisFailure === 'function') {
+        const failure = await store.getVideoAnalysisFailure(id);
+        if (Date.parse(failure?.retryAfter || '') > Date.now()) {
+          logger.info?.(`analysis_skipped ${id}: per-video provider failure is cooling down`);
+          return null;
+        }
       }
       if (Date.parse(state.videoAnalysisBlockedUntil) > Date.now()) {
         logger.info?.(`analysis_skipped ${id}: provider cooling down`);
@@ -91,9 +111,11 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       });
       await store.saveVideoAnalysis(id, analysis, analysis.model);
       logger.info?.(`analysis_completed ${id}: model=${analysis.model}`);
-      if (state.videoAnalysisBlockedUntil || state.consecutiveAnalysis503s) {
+      if (state.videoAnalysisBlockedUntil || state.consecutiveAnalysis503s ||
+          state.consecutiveAnalysis429s) {
         state.videoAnalysisBlockedUntil = null;
         state.consecutiveAnalysis503s = 0;
+        state.consecutiveAnalysis429s = 0;
         await store.saveSeoSyncState(state);
       }
       return analysis;
@@ -102,11 +124,19 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       logger.warn?.(`analysis_failed ${id}: ${error.status ? 'HTTP ' + error.status : error.message}` +
         (providerDetail ? ` (${providerDetail})` : ''));
       if ([429, 503].includes(error.status)) {
+        const now = Date.now();
         state.consecutiveAnalysis503s = error.status === 503 ? (state.consecutiveAnalysis503s || 0) + 1 : 0;
+        state.consecutiveAnalysis429s = error.status === 429 ? (state.consecutiveAnalysis429s || 0) + 1 : 0;
+        const retryAfter = Number(error.retryAfterMs);
+        const hasRetryAfter = error.retryAfterPresent && Number.isFinite(retryAfter) && retryAfter >= 0;
+        const quotaPause = seoUsesGemini && isGeminiDailyQuotaError(error)
+          ? Math.max(0, nextPacificMidnight(now) - now) : 0;
         const pauseMs = error.status === 429
-          ? error.retryAfterPresent ? error.retryAfterMs : 60 * 60 * 1000
-          : Math.min(120, 15 * 2 ** state.consecutiveAnalysis503s) * 60 * 1000;
-        state.videoAnalysisBlockedUntil = new Date(Date.now() + pauseMs).toISOString();
+          ? Math.max(quotaPause, hasRetryAfter ? retryAfter :
+            Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, state.consecutiveAnalysis429s - 1))))
+          : Math.max(hasRetryAfter ? retryAfter : 0,
+            Math.min(120, 15 * 2 ** state.consecutiveAnalysis503s) * 60 * 1000);
+        state.videoAnalysisBlockedUntil = new Date(now + pauseMs).toISOString();
         await store.saveSeoSyncState(state);
       } else if ([400, 401, 403, 404].includes(Number(error.status)) &&
           typeof store.markVideoAnalysisFailure === 'function') {
@@ -464,10 +494,11 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
               channelUpdatedAfterPublish = true;
             }
           }
-          if (state.providerBlockedUntil || state.consecutive503s) {
+          if (state.providerBlockedUntil || state.consecutive503s || state.consecutive429s) {
             state.providerBlockedUntil = null;
             state.providerError = null;
             state.consecutive503s = 0;
+            state.consecutive429s = 0;
             await store.saveSeoSyncState(state);
           }
         } catch (error) {
@@ -481,12 +512,20 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
             retry: balanceBlocked || transientProviderError || sharedProviderBlock || job.attempts < 3
           });
           if (balanceBlocked || transientProviderError || sharedProviderBlock) {
+            const now = Date.now();
             state.consecutive503s = error.status === 503 ? (state.consecutive503s || 0) + 1 : 0;
+            state.consecutive429s = error.status === 429 ? (state.consecutive429s || 0) + 1 : 0;
+            const retryAfter = Number(error.retryAfterMs);
+            const hasRetryAfter = error.retryAfterPresent && Number.isFinite(retryAfter) && retryAfter >= 0;
+            const quotaPause = seoUsesGemini && isGeminiDailyQuotaError(error)
+              ? Math.max(0, nextPacificMidnight(now) - now) : 0;
             const pauseMs = balanceBlocked ? 120 * 60 * 1000 : error.status === 429
-              ? error.retryAfterPresent ? error.retryAfterMs : 60 * 60 * 1000
-              : error.status === 503 ? Math.min(120, 15 * 2 ** state.consecutive503s) * 60 * 1000
+              ? Math.max(quotaPause, hasRetryAfter ? retryAfter :
+                Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, state.consecutive429s - 1))))
+              : error.status === 503 ? Math.max(hasRetryAfter ? retryAfter : 0,
+                Math.min(120, 15 * 2 ** state.consecutive503s) * 60 * 1000)
                 : 15 * 60 * 1000;
-            state.providerBlockedUntil = new Date(Date.now() + pauseMs).toISOString();
+            state.providerBlockedUntil = new Date(now + pauseMs).toISOString();
             state.providerError = balanceBlocked ? 'AI provider balance is insufficient (HTTP 402)' :
               `AI provider temporarily unavailable (HTTP ${error.status}); queued videos will retry`;
             await store.saveSeoSyncState(state);
@@ -622,4 +661,4 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   return { schedule, run, registerUpload, status, setBackfill, resumeAfterYouTubeReconnect };
 }
 
-module.exports = { createSeoWorker };
+module.exports = { createSeoWorker, geminiQuotaIsShared };

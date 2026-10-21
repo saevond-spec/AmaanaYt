@@ -1,7 +1,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { analyzeVideo, videoIdFromUrl, analyzeGameplayFrames, validateGameplayAssessment } = require('../src/video-analysis');
-const { createModelCircuitBreaker, validatePackage, normalizeContext } = require('../src/seo-package');
+const { createModelCircuitBreaker, validatePackage, normalizeContext,
+  nextPacificMidnight } = require('../src/seo-package');
 const { createSeoWorker } = require('../src/seo-worker');
 
 const videoId = 'AbCdEfGhI12';
@@ -98,6 +99,29 @@ test('Gemini gameplay screening sends sampled frames as images and returns a str
   assert.equal(result.verified, true);
   assert.equal(result.activeGameplayFrames, 5);
   assert.equal(result.gameName, 'Example game');
+});
+
+test('gameplay frame analysis obeys provider cooldown and avoids another request', async () => {
+  const breaker = createModelCircuitBreaker();
+  const frames = Array.from({ length: 3 }, () => ({ mimeType: 'image/jpeg', data: 'aGVsbG8=' }));
+  let calls = 0;
+  const options = {
+    apiKey: 'test-key', model: 'gemini-3.8-flash', circuitBreaker: breaker,
+    fetchImpl: async () => {
+      calls += 1;
+      return {
+        ok: false, status: 429,
+        headers: { get: (name) => name.toLowerCase() === 'retry-after' ? '3600' : null },
+        json: async () => ({ error: { status: 'RESOURCE_EXHAUSTED',
+          message: 'rate limit exceeded', details: [{ reason: 'RATE_LIMIT_EXCEEDED' }] } })
+      };
+    }
+  };
+  await assert.rejects(analyzeGameplayFrames(frames, options), (error) =>
+    error.status === 429 && error.retryAfterMs === 3_600_000);
+  assert.ok(breaker.remaining('gemini-3.8-flash') > 3_599_000);
+  await assert.rejects(analyzeGameplayFrames(frames, options), /paused by the provider cooldown/);
+  assert.equal(calls, 1, 'the cooldown prevents another provider request');
 });
 
 test('analysis retries 503 on a fallback model and honors short 429 Retry-After', async () => {
@@ -235,18 +259,27 @@ test('analysis 503 pauses only analysis while metadata SEO generation continues'
 test('permanent video-analysis failures are cooled down per video instead of requeued every scan', async () => {
   let state = { channelId: 'channel-1', recentAt: new Date().toISOString(),
     completed: true, viewPriorityScanVersion: 1, enabled: true };
-  let claimed = false;
+  let claims = 0;
+  let failureRecorded = false;
+  let analysisCalls = 0;
   const failures = [];
   const finished = [];
   const store = {
     getSeoSyncState: async () => state,
     saveSeoSyncState: async (next) => { state = next; },
     seoCounts: async () => ({ attemptedToday: 0 }),
-    claimSeoVideo: async () => claimed ? null : (claimed = true, {
-      videoId, claimToken: 'claim-403', source, context: {}, attempts: 1
-    }),
+    claimSeoVideo: async () => {
+      if (claims >= 2) return null;
+      claims += 1;
+      return { videoId, claimToken: 'claim-403-' + claims, source, context: {}, attempts: claims };
+    },
     getVideoAnalysis: async () => null,
-    markVideoAnalysisFailure: async (id, failure) => failures.push({ id, failure }),
+    getVideoAnalysisFailure: async () => failureRecorded
+      ? { status: 403, retryAfter: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() } : null,
+    markVideoAnalysisFailure: async (id, failure) => {
+      failureRecorded = true;
+      failures.push({ id, failure });
+    },
     finishSeoVideo: async (_id, _token, pkg) => { finished.push(pkg); }
   };
   const youtube = { isConnected: async () => true,
@@ -256,6 +289,7 @@ test('permanent video-analysis failures are cooled down per video instead of req
     env: { SEO_AI_API_KEY: 'seo-key', SEO_AI_MODEL: 'test-model',
       VIDEO_ANALYSIS_API_KEY: 'analysis-key', ENABLE_VIDEO_ANALYSIS: 'true' },
     analyze: async () => {
+      analysisCalls += 1;
       throw Object.assign(new Error('Video analysis provider returned HTTP 403'), {
         status: 403, providerCode: 'PERMISSION_DENIED', providerMessage: 'Access to this video was denied'
       });
@@ -265,14 +299,17 @@ test('permanent video-analysis failures are cooled down per video instead of req
   });
 
   await worker.run();
+  await worker.run();
 
   assert.equal(failures.length, 1);
+  assert.equal(analysisCalls, 1, 'the persisted per-video failure suppresses another provider request');
+  assert.equal(finished.length, 2, 'SEO metadata generation still runs while video analysis is cooling down');
   assert.equal(failures[0].id, videoId);
   assert.equal(failures[0].failure.status, 403);
   assert.equal(failures[0].failure.providerCode, 'PERMISSION_DENIED');
   assert.match(failures[0].failure.message, /Access to this video was denied/);
   assert.ok(Date.parse(failures[0].failure.retryAfter) - Date.now() > 23 * 60 * 60 * 1000);
-  assert.equal(finished.length, 1, 'SEO metadata generation can continue without footage analysis');
+  assert.equal(finished.length, 2, 'SEO metadata generation can continue without footage analysis');
   assert.equal(state.videoAnalysisBlockedUntil, undefined, 'one video permission failure must not block other videos');
 });
 
@@ -298,10 +335,10 @@ test('a shared Gemini 429 pauses both analysis and SEO requests for the run', as
     store, youtube,
     env: { SEO_AI_API_KEY: 'shared-key', SEO_AI_MODEL: 'gemini-3.8-flash',
       SEO_AI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
-      VIDEO_ANALYSIS_API_KEY: 'shared-key', ENABLE_VIDEO_ANALYSIS: 'true' },
+      VIDEO_ANALYSIS_API_KEY: 'analysis-key', ENABLE_VIDEO_ANALYSIS: 'true' },
     analyze: async () => {
-      throw Object.assign(new Error('Gemini rate limit'), {
-        status: 429, retryAfterPresent: true, retryAfterMs: 60000
+      throw Object.assign(new Error('Gemini daily quota exhausted'), {
+        status: 429, providerReason: 'QUOTA_EXCEEDED'
       });
     },
     generate: async () => { seoCalls += 1; return packageDraft; },
@@ -313,8 +350,11 @@ test('a shared Gemini 429 pauses both analysis and SEO requests for the run', as
   assert.equal(seoCalls, 0, 'the shared Gemini project must not receive a second request after 429');
   assert.equal(completion.pkg, null);
   assert.equal(completion.error.retry, true);
-  assert.ok(Date.parse(state.videoAnalysisBlockedUntil) > Date.now());
-  assert.ok(Date.parse(state.providerBlockedUntil) > Date.now());
+  const expectedReset = nextPacificMidnight(Date.now());
+  assert.ok(Math.abs(Date.parse(state.videoAnalysisBlockedUntil) - expectedReset) < 5000,
+    'analysis resumes at Google Gemini daily quota reset');
+  assert.ok(Math.abs(Date.parse(state.providerBlockedUntil) - expectedReset) < 5000,
+    'SEO generation resumes at Google Gemini daily quota reset');
 });
 
 test('private uploads skip YouTube URL analysis', async () => {

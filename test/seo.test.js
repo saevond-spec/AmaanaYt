@@ -320,7 +320,7 @@ test('parses Retry-After seconds and dates, with a 60 second request default', (
   assert.deepEqual(retryAfterDetails(response(null)), { retryAfterPresent: false, retryAfterMs: 60000 });
 });
 
-test('exposes provider 429 Retry-After and machine-readable quota code', async () => {
+test('defers provider 429 Retry-After to the durable queue', async () => {
   const delays = [];
   let requests = 0;
   await assert.rejects(generatePackage(source, context, {
@@ -331,31 +331,31 @@ test('exposes provider 429 Retry-After and machine-readable quota code', async (
       json: async () => ({ error: { code: 'rate_limit_exceeded' } }) }; }
   }), (error) => error.status === 429 && error.retryAfterPresent &&
     error.retryAfterMs === 25000 && error.code === 'rate_limit_exceeded');
-  assert.equal(requests, 2);
-  assert.deepEqual(delays, [25000]);
+  assert.equal(requests, 1, '429 is not retried inside the request');
+  assert.deepEqual(delays, [], 'the worker schedules the provider delay');
 });
 
-test('429 without a header retries once after 60 seconds; long headers defer to the queue', async () => {
+test('429 delays are returned to the durable queue without in-flight retries', async () => {
   const delays = [];
   let requests = 0;
   const options = { apiKey: 'unit-test-key', model: 'rate-default-test',
     circuitBreaker: createModelCircuitBreaker(), sleep: async (ms) => { delays.push(ms); },
-    fetchImpl: async () => ++requests === 1 ? { ok: false, status: 429,
-      headers: { get: () => null } } : { ok: true,
-      json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) } };
-  const pkg = await generatePackage(source, context, options);
-  assert.equal(pkg.primaryKeyword, keyword);
-  assert.equal(requests, 2);
-  assert.deepEqual(delays, [60000]);
+    fetchImpl: async () => { requests += 1; return { ok: false, status: 429,
+      headers: { get: () => null },
+      json: async () => ({ error: { code: 'rate_limit_exceeded' } }) }; } };
+  await assert.rejects(generatePackage(source, context, options), (error) =>
+    error.status === 429 && error.retryAfterMs === 60000 && !error.retryAfterPresent);
+  assert.equal(requests, 1);
+  assert.deepEqual(delays, []);
   requests = 0;
   await assert.rejects(generatePackage(source, context, {
-    ...options, fetchImpl: async () => {
+    ...options, circuitBreaker: createModelCircuitBreaker(), fetchImpl: async () => {
       requests += 1;
       return { ok: false, status: 429, headers: { get: () => '120' }, json: async () => null };
     }
   }), (error) => error.retryAfterMs === 120000 && error.retryAfterPresent);
   assert.equal(requests, 1);
-  assert.deepEqual(delays, [60000]);
+  assert.deepEqual(delays, []);
 });
 
 test('opens a model circuit after three 503s and closes it after 30 minutes', async () => {
@@ -390,7 +390,7 @@ test('uses SEO_AI_TIMEOUT_MS for model request signals', async () => {
   }
 });
 
-test('worker uses Retry-After on 429 and pauses 60 minutes when absent', async () => {
+test('worker uses Retry-After on 429 and starts exponential backoff at 60 seconds', async () => {
   const originalFetch = global.fetch;
   try {
     for (const header of ['45', null]) {
@@ -413,7 +413,7 @@ test('worker uses Retry-After on 429 and pauses 60 minutes when absent', async (
         sleep: async () => {}, logger: { error() {} } });
       await worker.run();
       const pause = Date.parse(state.providerBlockedUntil) - Date.now();
-      assert.ok(Math.abs(pause - (header ? 45000 : 60 * 60 * 1000)) < 2000);
+      assert.ok(Math.abs(pause - (header ? 45000 : 60 * 1000)) < 2000);
       assert.equal(state.consecutive503s, 0);
     }
   } finally {

@@ -8,9 +8,10 @@ const path = require('node:path');
 const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
   findHighlightBatchByVodId, isTransientError, shouldPullForwardTwitchMetadataRetry,
   shouldRequeueUnexpectedTwitchDownloadHost, shouldPullForwardAllowedTwitchDownloadHost,
-  shouldRequeueTwitchSegmentDurationFailure } = require('../src/highlight-pipeline');
+  shouldRequeueTwitchSegmentDurationFailure, waitForVerifiedClipMetadata } = require('../src/highlight-pipeline');
 const { buildHighlightTimeline, buildHighlightDescription } = require('../src/highlight-metadata');
 const { downloadClip } = require('../src/twitch');
+const { computeRetryDelayMs } = require('../src/draft-recovery');
 
 test('one-time diagnostic retry is limited to failed Twitch download-host batches', () => {
   const failed = {
@@ -136,16 +137,25 @@ async function harness(t, options = {}) {
   };
   const processingChecks = new Map();
   let listFailureUsed = false;
+  let getDraftFailureUsed = false;
   let clipFailureUsed = false;
   let thumbnailUploadFailureUsed = false;
   let thumbnailCreateFailureUsed = false;
   let shortFailureUsed = false;
   let seoFailureUsed = false;
   let idCounter = 0;
+  let leaseCounter = 0;
+  let clipSaveFailureUsed = false;
 
   const copy = (value) => value && structuredClone(value);
   const store = {
-    async getDraft(id) { return copy(drafts.get(id)); },
+    async getDraft(id) {
+      if (options.failGetDraftOnce && !getDraftFailureUsed) {
+        getDraftFailureUsed = true;
+        throw Object.assign(new Error('database connection reset before draft read'), { code: 'ECONNRESET' });
+      }
+      return copy(drafts.get(id));
+    },
     async listDrafts() {
       if (options.failListDraftsOnce && !listFailureUsed) {
         listFailureUsed = true;
@@ -160,8 +170,79 @@ async function harness(t, options = {}) {
     },
     async updateDraft(id, patch) {
       const current = drafts.get(id);
-      if (!current) return null;
+      if (!current || current.status === 'excluded_by_owner' ||
+          current.productionState === 'excluded' || current.excludedAt) return null;
       const next = { ...current, ...copy(patch), updatedAt: new Date().toISOString() };
+      drafts.set(id, next);
+      return copy(next);
+    },
+    async updateDraftWithRetryLease(id, token, patch) {
+      const current = drafts.get(id);
+      const until = Date.parse(current?.retryLeaseUntil || '');
+      if (!current || current.retryLeaseClaimToken !== token || !Number.isFinite(until) ||
+          until <= Date.now() || current.status === 'excluded_by_owner' ||
+          current.productionState === 'excluded' || current.excludedAt) return null;
+      if (options.failClipSaveOnce && patch.pendingTwitchClipIntentIndex === null &&
+          Array.isArray(patch.twitchClips) && !clipSaveFailureUsed) {
+        clipSaveFailureUsed = true;
+        throw Object.assign(new Error('database connection reset after Twitch accepted clip'), { code: 'ECONNRESET' });
+      }
+      const next = { ...current, ...copy(patch), updatedAt: new Date().toISOString() };
+      drafts.set(id, next);
+      return copy(next);
+    },
+    async addHighlightShortDraft(parentId, token, draft) {
+      const parent = drafts.get(parentId);
+      const until = Date.parse(parent?.retryLeaseUntil || '');
+      if (!parent || parent.status !== 'creating_shorts' || !parent.youtubeVideoId ||
+          parent.retryLeaseClaimToken !== token || !Number.isFinite(until) || until <= Date.now() ||
+          parent.productionState === 'excluded' || parent.excludedAt) return null;
+      if (drafts.has(draft.id)) throw new Error('duplicate draft id');
+      drafts.set(draft.id, copy(draft));
+      return copy(draft);
+    },
+    async reserveHighlightShortUpload(parentId, token, shortId, patch) {
+      const parent = drafts.get(parentId);
+      const child = drafts.get(shortId);
+      const until = Date.parse(parent?.retryLeaseUntil || '');
+      if (!parent || parent.status !== 'creating_shorts' || !parent.youtubeVideoId ||
+          parent.retryLeaseClaimToken !== token || !Number.isFinite(until) || until <= Date.now() ||
+          parent.productionState === 'excluded' || parent.excludedAt || !child ||
+          child.status === 'excluded_by_owner' || child.productionState === 'excluded' || child.excludedAt ||
+          child.parentId !== parentId) return null;
+      const updated = { ...child, ...copy(patch), updatedAt: new Date().toISOString() };
+      drafts.set(shortId, updated);
+      return copy(updated);
+    },
+    async claimHighlightRetryParent(id, claimOptions = {}) {
+      const current = drafts.get(id);
+      const now = Number.isFinite(Number(claimOptions.now)) ? Number(claimOptions.now) : Date.now();
+      const leaseUntil = Date.parse(current?.retryLeaseUntil || '');
+      if (!current || current.status === 'excluded_by_owner' ||
+          current.productionState === 'excluded' || current.excludedAt ||
+          current.status === 'completed' ||
+          current.status === 'awaiting_owner_approval' && current.productionState === 'ready' ||
+          current.retryLeaseClaimToken && Number.isFinite(leaseUntil) && leaseUntil > now) return null;
+      const token = '00000000-0000-4000-8000-' + String(++leaseCounter).padStart(12, '0');
+      const claimed = { ...current, retryLeaseClaimToken: token,
+        retryLeaseClaimedAt: new Date(now).toISOString(),
+        retryLeaseUntil: new Date(now + (Number(claimOptions.leaseMs) || 900000)).toISOString() };
+      drafts.set(id, claimed);
+      return copy(claimed);
+    },
+    async extendHighlightRetryLease(id, token, leaseMs = 900000) {
+      const current = drafts.get(id);
+      if (!current || current.retryLeaseClaimToken !== token ||
+          current.status === 'excluded_by_owner' || current.productionState === 'excluded') return null;
+      const next = { ...current, retryLeaseUntil: new Date(Date.now() + leaseMs).toISOString() };
+      drafts.set(id, next);
+      return copy(next);
+    },
+    async releaseHighlightRetryLease(id, token) {
+      const current = drafts.get(id);
+      if (!current || current.retryLeaseClaimToken !== token) return null;
+      const next = { ...current, retryLeaseUntil: null, retryLeaseClaimedAt: null,
+        retryLeaseClaimToken: null };
       drafts.set(id, next);
       return copy(next);
     }
@@ -243,12 +324,22 @@ async function harness(t, options = {}) {
       const call = { kind: isShort ? 'short' : 'highlight', title: request.title,
         privacyStatus: 'private', succeeded: false };
       counters.uploads.push(call);
+      if (isShort && options.failShort403 && !shortFailureUsed) {
+        shortFailureUsed = true;
+        throw Object.assign(new Error('YouTube upload forbidden'), { status: 403 });
+      }
       if (isShort && request.title.startsWith(options.failShortTitle || '\u0000') && !shortFailureUsed) {
         shortFailureUsed = true;
-        throw Object.assign(new Error('YouTube upload quota exceeded'), { status: 429 });
+        throw Object.assign(new Error('YouTube request rate limited'), { status: 429 });
       }
       if (!isShort && options.failParentUpload403) {
         throw Object.assign(new Error('YouTube upload forbidden'), { status: 403 });
+      }
+      if (!isShort && options.failParentUpload429) {
+        throw Object.assign(new Error('YouTube upload rate limited'), { status: 429 });
+      }
+      if (!isShort && options.failParentUploadTimeout) {
+        throw Object.assign(new Error('YouTube upload response was lost'), { code: 'ECONNRESET' });
       }
       call.succeeded = true;
       let id = isShort ? 'yt-short-' + request.title.split(' | ')[0].toLowerCase().replaceAll(' ', '-') : 'yt-parent';
@@ -319,6 +410,7 @@ async function harness(t, options = {}) {
   const dependencies = {
     uploadDir, store, twitch, video, youtube, seo, autoAssignPlaylist,
     buildHighlightTimeline, buildHighlightDescription, cleanText,
+    now: options.now,
     autoPublish: options.autoPublish !== false,
     maxAutoAttempts: options.maxAutoAttempts,
     sleep: options.sleep || (async () => {}),
@@ -343,6 +435,55 @@ test('legacy Twitch-discovered batches without a target duration cannot create u
   assert.match(h.drafts.get(h.batch.id).error, /no measured target duration/);
   assert.equal(h.counters.uploads.length, 0);
   assert.equal(h.counters.publications.length, 0);
+});
+
+test('owner exclusion during upload reservation prevents a private YouTube upload', async (t) => {
+  const h = await harness(t);
+  const updateClaimed = h.store.updateDraftWithRetryLease.bind(h.store);
+  h.store.updateDraftWithRetryLease = async (id, token, patch) => {
+    if (patch.status === 'uploading_private_to_youtube') {
+      const current = h.drafts.get(id);
+      h.drafts.set(id, { ...current, status: 'excluded_by_owner',
+        productionState: 'excluded', publicationStatus: 'excluded', excludedAt: new Date().toISOString(),
+        retryLeaseUntil: null, retryLeaseClaimedAt: null, retryLeaseClaimToken: null });
+      return null;
+    }
+    return updateClaimed(id, token, patch);
+  };
+
+  await h.processor(h.batch.id);
+
+  assert.equal(h.drafts.get(h.batch.id).status, 'excluded_by_owner');
+  assert.equal(h.counters.uploads.length, 0);
+  assert.equal(h.counters.publications.length, 0);
+});
+
+test('a transient initial read releases a supplied durable retry lease after backoff is saved', async (t) => {
+  const h = await harness(t, { failGetDraftOnce: true });
+  const token = '00000000-0000-4000-8000-999999999999';
+  h.drafts.set(h.batch.id, { ...h.batch,
+    status: 'clip_retry_wait', nextClipAttemptAt: new Date(Date.now() - 1000).toISOString(),
+    retryLeaseClaimToken: token, retryLeaseClaimedAt: new Date().toISOString(),
+    retryLeaseUntil: new Date(Date.now() + 15 * 60 * 1000).toISOString()
+  });
+  await h.processor(h.batch.id, { retryLeaseClaimToken: token });
+  const parent = h.drafts.get(h.batch.id);
+  assert.equal(parent.status, 'clip_retry_wait');
+  assert.ok(Date.parse(parent.nextClipAttemptAt) > Date.now());
+  assert.equal(parent.retryLeaseClaimToken, null);
+  assert.equal(h.counters.clipCreates, 0);
+});
+
+test('ambiguous Twitch clip creation is held for review instead of repeated', async (t) => {
+  const h = await harness(t, { failClipSaveOnce: true });
+  await h.processor(h.batch.id);
+  const parent = h.drafts.get(h.batch.id);
+  assert.equal(h.counters.clipCreates, 1);
+  assert.equal(parent.status, 'clip_failed');
+  assert.equal(parent.productionState, 'manual_review');
+  assert.equal(parent.pendingTwitchClipIntentIndex, 0);
+  assert.match(parent.error, /may have succeeded/);
+  assert.equal(h.counters.uploads.length, 0);
 });
 
 test('12-minute batches assemble exactly 720 seconds across verified 60-second sources', async (t) => {
@@ -508,13 +649,28 @@ test('repeated moment labels produce unique titles and clip-specific description
   assert.ok(h.drafts.get(h.batch.id).title.includes('Highlights: Saevond ranked session — Same clutch moment'));
 });
 
-test('a transient Short upload failure schedules retry, then finishes without duplicate uploads', async (t) => {
-  const h = await harness(t, { failShortTitle: 'Moment two' });
+test('a definite Short 429 schedules a deterministic safe retry without duplicate uploads', async (t) => {
+  let clock = Date.now();
+  const h = await harness(t, { failShortTitle: 'Moment two', now: () => clock });
   await h.processor(h.batch.id);
-  assert.equal(h.drafts.get(h.batch.id).status, 'clip_retry_wait');
-  assert.ok(Date.parse(h.drafts.get(h.batch.id).nextClipAttemptAt) > Date.now());
-  assert.match(h.drafts.get(h.batch.id).error, /Short 2/);
-  assert.equal([...h.drafts.values()].filter((draft) => draft.sourceType === 'twitch_highlight_short').length, 2);
+  const parent = h.drafts.get(h.batch.id);
+  assert.equal(parent.status, 'clip_retry_wait');
+  assert.ok(Date.parse(parent.nextClipAttemptAt) > clock);
+  assert.match(parent.error, /Short 2/);
+  assert.equal([...h.drafts.values()].filter((draft) => draft.sourceType === 'twitch_highlight_short').length, 3,
+    'later Shorts in the batch continue after one definite rejection');
+  const retryableShort = [...h.drafts.values()].find((draft) =>
+    draft.sourceType === 'twitch_highlight_short' && draft.highlightIndex === 1);
+  assert.equal(retryableShort.uploadRejectionStatus, 429);
+  const expectedChildDelay = computeRetryDelayMs({
+    attempt: 1, providerRetryAfterMs: 0, minimumDelayMs: 1000,
+    baseDelayMs: 60 * 1000, maxDelayMs: 30 * 60 * 1000, seed: retryableShort.id
+  });
+  assert.equal(Date.parse(retryableShort.nextClipAttemptAt), clock + expectedChildDelay);
+  assert.deepEqual(findDueHighlightRetries([parent], clock), [],
+    'the parent selector does not schedule before the persisted backoff');
+  clock = Math.max(Date.parse(retryableShort.nextClipAttemptAt), Date.parse(parent.nextClipAttemptAt));
+  assert.deepEqual(findDueHighlightRetries([parent], clock).map((draft) => draft.id), [parent.id]);
   await h.processor(h.batch.id);
   assert.equal(h.drafts.get(h.batch.id).status, 'completed');
   assert.equal(h.drafts.get(h.batch.id).productionState, 'published');
@@ -592,6 +748,38 @@ test('permanent YouTube permission failure does not create an upload or mark the
   assert.equal(h.counters.visibilityMutations, 0);
 });
 
+test('explicit parent upload 429 is safely queued, but a lost response stays uncertain', async (t) => {
+  const rejected = await harness(t, { failParentUpload429: true });
+  await rejected.processor(rejected.batch.id);
+  assert.equal(rejected.drafts.get(rejected.batch.id).status, 'clip_retry_wait');
+  assert.ok(Date.parse(rejected.drafts.get(rejected.batch.id).nextClipAttemptAt) > Date.now());
+  assert.equal(rejected.counters.uploads.filter((upload) => upload.succeeded).length, 0);
+
+  const ambiguous = await harness(t, { failParentUploadTimeout: true });
+  await ambiguous.processor(ambiguous.batch.id);
+  assert.equal(ambiguous.drafts.get(ambiguous.batch.id).status, 'clip_upload_uncertain');
+  assert.equal(ambiguous.drafts.get(ambiguous.batch.id).productionState, 'manual_reconciliation');
+  assert.equal(ambiguous.drafts.get(ambiguous.batch.id).youtubeVideoId, undefined);
+  assert.equal(ambiguous.counters.uploads.filter((upload) => upload.succeeded).length, 0);
+});
+
+test('explicit Short 403 remains failed and can be retried after owner fixes access', async (t) => {
+  const h = await harness(t, { failShort403: true });
+  await h.processor(h.batch.id);
+  const short = [...h.drafts.values()].find((draft) => draft.sourceType === 'twitch_highlight_short');
+  assert.equal(short.status, 'clip_failed');
+  assert.equal(short.uploadRejectionStatus, 403);
+  assert.equal(h.drafts.get(h.batch.id).status, 'clip_partial');
+  assert.equal(short.youtubeVideoId, null);
+
+  // This second invocation models the owner explicitly retrying the parent after fixing OAuth.
+  await h.processor(h.batch.id);
+  const retried = h.drafts.get(short.id);
+  assert.equal(retried.uploadRejectionStatus, null);
+  assert.ok(retried.youtubeVideoId);
+  assert.equal(h.counters.uploads.filter((upload) => upload.kind === 'short' && upload.succeeded).length, 3);
+});
+
 test('transient failures use bounded backoff attempts, while authorization errors are permanent', async (t) => {
   const h = await harness(t, { failClipCreateAlways: true });
   for (let attempt = 1; attempt <= 12; attempt += 1) {
@@ -606,18 +794,23 @@ test('transient failures use bounded backoff attempts, while authorization error
   assert.equal(isTransientError({ status: 403 }), false);
 });
 
-test('duplicate VOD events resolve to the same batch and queue only one active job', async () => {
+test('duplicate VOD events merge a later retry lease into the pending queue job', async () => {
   const existing = { sourceType: 'twitch_highlight_batch', vodId: '1234567890', id: 'existing' };
   assert.equal(findHighlightBatchByVodId([existing], '1234567890'), existing);
   assert.equal(findHighlightBatchByVodId([existing], '1234567891'), null);
   const scheduled = [];
   const processed = [];
-  const queue = createBatchQueue(async (id) => { processed.push(id); }, { schedule: (fn) => scheduled.push(fn) });
+  const queue = createBatchQueue(async (id, options) => { processed.push({ id, options }); },
+    { schedule: (fn) => scheduled.push(fn) });
   assert.equal(queue.enqueue('existing'), true);
   assert.equal(queue.enqueue('existing'), false);
+  assert.equal(queue.enqueue('existing', { retryLeaseClaimToken: 'fresh-claim' }), true);
   assert.equal(queue.enqueue('second'), true);
   await queue.drain();
-  assert.deepEqual(processed, ['existing', 'second']);
+  assert.deepEqual(processed, [
+    { id: 'existing', options: { retryLeaseClaimToken: 'fresh-claim' } },
+    { id: 'second', options: null }
+  ]);
   assert.equal(queue.queuedCount, 0);
   assert.equal(scheduled.length, 1);
 });
@@ -865,3 +1058,21 @@ test('permanent publication permission failure stops with owner review and leave
   assert.equal(h.counters.publications.length, 1);
 });
 
+
+test('metadata polling yields long Twitch Retry-After windows to the durable retry queue', async () => {
+  const sleeps = [];
+  let calls = 0;
+  const error = Object.assign(new Error('Twitch rate limit'), {
+    status: 429, retryAfterMs: 60 * 60 * 1000
+  });
+  await assert.rejects(waitForVerifiedClipMetadata({
+    getClip: async () => { calls += 1; throw error; },
+    moment: { startSeconds: 30, endSeconds: 60, duration: 30 },
+    vodId: '1234567890',
+    sleep: async (ms) => { sleeps.push(ms); },
+    pollIntervalMs: 5000,
+    maxAttempts: 10
+  }), (caught) => caught === error);
+  assert.equal(calls, 1, 'the poller must not call Twitch before the one-hour reset');
+  assert.deepEqual(sleeps, []);
+});

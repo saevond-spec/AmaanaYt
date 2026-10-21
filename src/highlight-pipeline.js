@@ -6,6 +6,9 @@ const path = require('path');
 const { validateHighlightMoments, verifyCreatedClip, verifyClipCreationRequest } = require('./highlight-validation');
 const { buildHighlightTitle: defaultBuildHighlightTitle, buildShortTitle: defaultBuildShortTitle,
   buildShortDescription: defaultBuildShortDescription } = require('./highlight-metadata');
+const { isYouTubeUploadLimitError, isDefiniteYouTubeUploadRejection,
+  isRetryableYouTubeUploadRejection, youtubeUploadHttpStatus, computeRetryDelayMs,
+  YOUTUBE_UPLOAD_LIMIT_RETRY_MS, DEFAULT_HIGHLIGHT_RETRY_LEASE_MS } = require('./draft-recovery');
 
 function createBatchQueue(processJob, options = {}) {
   const schedule = options.schedule || setImmediate;
@@ -20,9 +23,10 @@ function createBatchQueue(processJob, options = {}) {
     draining = true;
     try {
       while (jobs.length) {
-        const id = jobs.shift();
+        const job = jobs.shift();
+        const id = job.id;
         try {
-          await processJob(id);
+          await processJob(id, job.options);
         } catch (error) {
           onError(id, error);
         } finally {
@@ -44,11 +48,19 @@ function createBatchQueue(processJob, options = {}) {
     });
   }
 
-  function enqueue(id) {
-    if (id === null || id === undefined || queuedIds.has(String(id))) return false;
+  function enqueue(id, options = null) {
+    if (id === null || id === undefined) return false;
     const value = String(id);
+    if (queuedIds.has(value)) {
+      const pending = jobs.find((job) => job.id === value);
+      if (pending && options && options.retryLeaseClaimToken) {
+        pending.options = { ...(pending.options || {}), ...options };
+        return true;
+      }
+      return false;
+    }
     queuedIds.add(value);
-    jobs.push(value);
+    jobs.push({ id: value, options });
     requestDrain();
     return true;
   }
@@ -66,9 +78,17 @@ function findHighlightBatchByVodId(drafts, vodId) {
     String(draft.vodId) === requestedId) || null;
 }
 
-function findDueHighlightRetries(drafts, now = Date.now()) {
-  return drafts.filter((draft) => draft.sourceType === 'twitch_highlight_batch' &&
-    draft.status === 'clip_retry_wait' && Date.parse(draft.nextClipAttemptAt || 0) <= now);
+function findDueHighlightRetries(drafts, now = Date.now(), maxAttempts = 12) {
+  const attemptLimit = Number.isSafeInteger(maxAttempts) && maxAttempts > 0 ? maxAttempts : 12;
+  return drafts.filter((draft) => {
+    const retryLeaseUntil = Date.parse(draft.retryLeaseUntil || '');
+    return draft?.sourceType === 'twitch_highlight_batch' &&
+      draft.status === 'clip_retry_wait' &&
+      Number(draft.clipAttemptCount || 0) < attemptLimit &&
+      !(Number.isFinite(retryLeaseUntil) && retryLeaseUntil > Number(now)) &&
+      Number.isFinite(Date.parse(draft.nextClipAttemptAt || '')) &&
+      Date.parse(draft.nextClipAttemptAt) <= Number(now);
+  });
 }
 
 function shouldRequeueUnexpectedTwitchDownloadHost(draft) {
@@ -112,7 +132,7 @@ function isTransientError(error) {
 
 async function waitForVerifiedClipMetadata({
   getClip, moment, vodId, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  pollIntervalMs = 5000, maxAttempts = 72
+  pollIntervalMs = 5000, maxAttempts = 72, maxInlineRetryAfterMs = 30000
 }) {
   if (typeof getClip !== 'function') throw new Error('Twitch clip metadata lookup is unavailable');
   const parsedAttempts = Math.floor(Number(maxAttempts));
@@ -121,9 +141,12 @@ async function waitForVerifiedClipMetadata({
   const parsedInterval = Number(pollIntervalMs);
   const interval = Number.isFinite(parsedInterval) && parsedInterval >= 0
     ? Math.min(30000, parsedInterval) : 5000;
+  const inlineValue = Number(maxInlineRetryAfterMs);
+  const maxInline = Number.isFinite(inlineValue) ? Math.max(0, inlineValue) : 30000;
+  let nextPollDelay = interval;
   let lastError;
   for (let attempt = 0; attempt < attemptLimit; attempt += 1) {
-    if (attempt > 0 && interval > 0) await sleep(interval);
+    if (attempt > 0 && nextPollDelay > 0) await sleep(nextPollDelay);
     let lastClip = null;
     try {
       lastClip = await getClip();
@@ -141,6 +164,9 @@ async function waitForVerifiedClipMetadata({
         }
         throw error;
       }
+      const retryAfterMs = Number(error.retryAfterMs);
+      if (Number.isFinite(retryAfterMs) && retryAfterMs > maxInline) throw error;
+      nextPollDelay = Math.max(interval, Number.isFinite(retryAfterMs) ? retryAfterMs : 0);
     }
   }
   throw lastError || new Error('Twitch clip metadata did not become available');
@@ -181,6 +207,21 @@ function requireCompletedYouTubeOutput(video, expectedVideoId, outputType = 'vid
   return video;
 }
 
+async function persistAcceptedYouTubeUpload(store, draftId, youtubeVideoId, patch) {
+  const accepted = { ...patch, youtubeVideoId };
+  try {
+    return await store.updateDraft(draftId, accepted);
+  } catch (firstError) {
+    try {
+      return await store.updateDraft(draftId, accepted);
+    } catch (secondError) {
+      secondError.youtubeVideoId = youtubeVideoId;
+      secondError.cause = secondError.cause || firstError;
+      throw secondError;
+    }
+  }
+}
+
 function createHighlightProcessor(dependencies) {
   const {
     uploadDir, store, twitch, video, youtube, seo, autoAssignPlaylist,
@@ -205,14 +246,98 @@ function createHighlightProcessor(dependencies) {
     }
   }
 
-  async function processHighlightBatch(id) {
+  async function ownsRetryLease(id, claimToken) {
+    if (!claimToken) return false;
+    const current = await store.getDraft(id);
+    return Boolean(current && current.status !== 'excluded_by_owner' &&
+      current.productionState !== 'excluded' && !current.excludedAt &&
+      current.retryLeaseClaimToken === claimToken &&
+      Date.parse(current.retryLeaseUntil || '') > now());
+  }
+
+  async function releaseRetryLeaseWhenDurable(parent, fallbackId, fallbackToken) {
+    const id = parent?.id || fallbackId;
+    const claimToken = parent?.retryLeaseClaimToken || fallbackToken;
+    if (!id || !claimToken) return;
+    try {
+      const current = await store.getDraft(id);
+      if (!current || current.retryLeaseClaimToken !== claimToken ||
+          parent?.retryLeaseClaimedAt && current.retryLeaseClaimedAt !== parent.retryLeaseClaimedAt) return;
+      const parentRetryAt = Date.parse(current.nextClipAttemptAt || '');
+      const parentBackoffIsDurable = current.status === 'clip_retry_wait' &&
+        Number.isFinite(parentRetryAt) && parentRetryAt > now();
+      const children = await store.listDrafts();
+      const retryChildren = children.filter((draft) =>
+        draft.parentId === id && draft.sourceType === 'twitch_highlight_short' &&
+        draft.status === 'clip_retry_wait' &&
+        (isYouTubeUploadLimitError({ message: draft.error }) ||
+          isRetryableYouTubeUploadRejection({ status: draft.uploadRejectionStatus })));
+      const everyChildHasFutureDeadline = retryChildren.every((draft) => {
+        const retryAt = Date.parse(draft.nextClipAttemptAt || '');
+        return Number.isFinite(retryAt) && retryAt > now();
+      });
+      const settled = ['clip_partial', 'clip_failed', 'completed',
+        'awaiting_owner_approval', 'excluded_by_owner'].includes(current.status);
+      if (!parentBackoffIsDurable && !(settled && everyChildHasFutureDeadline)) return;
+      if (typeof store.releaseHighlightRetryLease === 'function') {
+        await store.releaseHighlightRetryLease(id, claimToken);
+      } else {
+        await store.updateDraft(id, {
+          retryLeaseUntil: null, retryLeaseClaimedAt: null, retryLeaseClaimToken: null
+        });
+      }
+    } catch (error) {
+      logError(id, error);
+    }
+  }
+
+  async function processHighlightBatch(id, queueOptions = {}) {
     const directory = path.join(uploadDir, 'highlights-' + id);
     let batch;
+    let parentUploadStarted = false;
+    let acceptedHighlightId = null;
+    let retryLeaseHeartbeat = null;
+    let claimToken = String(queueOptions?.retryLeaseClaimToken || '');
+    const updateOwnedDraft = (patch) => claimToken &&
+      typeof store.updateDraftWithRetryLease === 'function'
+      ? store.updateDraftWithRetryLease(id, claimToken, patch) : Promise.resolve(null);
     try {
       batch = await store.getDraft(id);
       if (!batch || batch.sourceType !== 'twitch_highlight_batch' || batch.status === 'completed' ||
-          batch.status === 'excluded_by_owner' ||
+          batch.status === 'excluded_by_owner' || batch.productionState === 'excluded' || batch.excludedAt ||
           batch.status === 'awaiting_owner_approval' && batch.productionState === 'ready') return;
+      if (typeof store.claimHighlightRetryParent !== 'function') {
+        throw new Error('Durable highlight retry claims are unavailable; refusing to process this batch');
+      }
+      if (typeof store.claimHighlightRetryParent === 'function') {
+        const suppliedToken = claimToken;
+        if (suppliedToken) {
+          if (batch.retryLeaseClaimToken !== suppliedToken ||
+              Date.parse(batch.retryLeaseUntil || '') <= now()) return;
+        } else {
+          batch = await store.claimHighlightRetryParent(id, {
+            now: now(), maxAttempts: maxAutoAttempts, leaseMs: DEFAULT_HIGHLIGHT_RETRY_LEASE_MS
+          });
+          if (!batch) return;
+        }
+        claimToken = batch.retryLeaseClaimToken;
+        if (claimToken && typeof store.extendHighlightRetryLease === 'function') {
+          const heartbeatMs = Math.max(1000, Math.floor(DEFAULT_HIGHLIGHT_RETRY_LEASE_MS / 3));
+          retryLeaseHeartbeat = setInterval(() => {
+            store.extendHighlightRetryLease(id, claimToken, DEFAULT_HIGHLIGHT_RETRY_LEASE_MS)
+              .catch((error) => logError(id, error));
+          }, heartbeatMs);
+          retryLeaseHeartbeat.unref?.();
+        }
+      }
+      if (Number(batch.clipAttemptCount || 0) >= maxAutoAttempts) {
+        await updateOwnedDraft( {
+          status: 'clip_failed', productionState: 'manual_review',
+          error: 'Automatic highlight attempt limit reached; owner review is required.',
+          retryLeaseUntil: null, retryLeaseClaimedAt: null, retryLeaseClaimToken: null
+        });
+        return;
+      }
       if (['twitch_clips_api', 'twitch_live_capture'].includes(batch.discoverySource) &&
           !(Number.isFinite(Number(batch.targetHighlightDurationSeconds)) &&
             Number(batch.targetHighlightDurationSeconds) > 0)) {
@@ -236,27 +361,57 @@ function createHighlightProcessor(dependencies) {
       const failures = [];
       let hasRetryableFailure = false;
       let hasPermanentFailure = false;
-      const noteFailure = (label, error, maxLength = 250) => {
+      let providerRetryAfterMs = 0;
+      const noteFailure = (label, error, maxLength = 250, options = {}) => {
+        const retryAfterMs = Number(error && error.retryAfterMs);
+        if (Number.isFinite(retryAfterMs) && retryAfterMs > providerRetryAfterMs) {
+          providerRetryAfterMs = retryAfterMs;
+        }
         const reason = cleanText(error && error.message || 'Production step failed', maxLength);
         failures.push(label + ': ' + reason);
-        if (isTransientError(error)) hasRetryableFailure = true;
+        if (options.forcePermanent) hasPermanentFailure = true;
+        else if (isYouTubeUploadLimitError(error)) {
+          hasRetryableFailure = true;
+          providerRetryAfterMs = Math.max(providerRetryAfterMs, YOUTUBE_UPLOAD_LIMIT_RETRY_MS,
+            Number(error.retryAfterMs) || 0);
+        } else if (isTransientError(error)) hasRetryableFailure = true;
         else hasPermanentFailure = true;
         return reason;
       };
       await fs.promises.mkdir(directory, { recursive: true });
-      await store.updateDraft(id, {
+      const twitchClips = [...(batch.twitchClips || [])];
+      if (batch.status === 'creating_twitch_clips') {
+        const ambiguousIndex = batch.highlights.findIndex((_moment, index) => !twitchClips[index]?.id);
+        if (ambiguousIndex >= 0) {
+          await updateOwnedDraft({
+            status: 'clip_failed', productionState: 'manual_review',
+            error: 'Twitch may have accepted clip creation for highlight ' + (ambiguousIndex + 1) +
+              ' before the worker stopped. Check Twitch clips before retrying.',
+            nextClipAttemptAt: null
+          });
+          return;
+        }
+      }
+      const creating = await store.updateDraftWithRetryLease(id, claimToken, {
         status: 'creating_twitch_clips', productionState: 'processing',
         clipAttemptCount: attemptCount, nextClipAttemptAt: null, error: null, productionFailures: []
       });
+      if (!creating) return;
+      batch = { ...batch, ...creating };
 
       const sources = [];
-      const twitchClips = [...(batch.twitchClips || [])];
       for (let index = 0; index < batch.highlights.length; index += 1) {
         const moment = batch.highlights[index];
         let clip = twitchClips[index];
         if (!clip) {
           const requestedVodOffset = Math.round(moment.endSeconds);
           const requestedDuration = Number(moment.duration.toFixed(1));
+          const intent = await updateOwnedDraft({
+            pendingTwitchClipIntentIndex: index,
+            pendingTwitchClipIntentAt: new Date(now()).toISOString()
+          });
+          if (!intent) return;
+          batch = { ...batch, ...intent };
           const created = await twitch.createClipFromVod({
             vodId: batch.vodId, vodOffset: requestedVodOffset,
             duration: requestedDuration, title: moment.title
@@ -270,7 +425,11 @@ function createHighlightProcessor(dependencies) {
             requestProofReconstructed: false
           };
           twitchClips[index] = clip;
-          await store.updateDraft(id, { twitchClips });
+          const savedClip = await updateOwnedDraft({
+            twitchClips, pendingTwitchClipIntentIndex: null, pendingTwitchClipIntentAt: null
+          });
+          if (!savedClip) return;
+          batch = { ...batch, ...savedClip };
         } else if (['twitch_clips_api', 'twitch_live_capture'].includes(batch.discoverySource) &&
             clip.requestProofVersion !== 1) {
           // Older Amaana batches stored the clip ID but not the request fields. This pipeline
@@ -284,7 +443,7 @@ function createHighlightProcessor(dependencies) {
             requestProofReconstructed: true
           };
           twitchClips[index] = clip;
-          await store.updateDraft(id, { twitchClips });
+          await updateOwnedDraft( { twitchClips });
         }
         const download = await twitch.waitForClipDownload({
           clipId: clip.id, broadcasterId: clip.broadcasterId, editorId: clip.editorId
@@ -312,7 +471,7 @@ function createHighlightProcessor(dependencies) {
           });
         }
         twitchClips[index] = { ...twitchClips[index], timestampVerification: verifiedTimestamp };
-        await store.updateDraft(id, { twitchClips });
+        await updateOwnedDraft( { twitchClips });
         const url = download.landscape_download_url;
         if (!url) throw new Error('Twitch clip has no landscape gameplay source; portrait-only Twitch media is rejected');
         const source = path.join(directory, 'source-' + index + '.mp4');
@@ -340,12 +499,12 @@ function createHighlightProcessor(dependencies) {
             model: cleanText(visualGameplay.model || '', 80)
           }
         };
-        await store.updateDraft(id, { twitchClips });
+        await updateOwnedDraft( { twitchClips });
         sources.push(source);
       }
 
       const montage = path.join(directory, 'highlight.mp4');
-      await store.updateDraft(id, { status: 'assembling_highlight_video' });
+      await updateOwnedDraft( { status: 'assembling_highlight_video' });
       const durations = await video.assembleHighlights(sources, montage, directory,
         batch.highlights.map((moment) => Number(moment.duration)),
         Number.isFinite(targetHighlightDurationSeconds) ? targetHighlightDurationSeconds : null);
@@ -385,12 +544,33 @@ function createHighlightProcessor(dependencies) {
         }
       }
 
-      const highlight = batch.youtubeVideoId ? { id: batch.youtubeVideoId } : await youtube.uploadPrivate({
-        filePath: montage,
-        title: highlightTitle,
-        description,
-        tags: highlightTags
-      });
+      let highlight = batch.youtubeVideoId ? { id: batch.youtubeVideoId } : null;
+      if (!highlight) {
+        const uploadIntent = {
+          status: 'uploading_private_to_youtube', productionState: 'uploading',
+          title: highlightTitle, description, tags: highlightTags,
+          duration: Number.isFinite(targetHighlightDurationSeconds) ? targetHighlightDurationSeconds : timeline.durationSeconds,
+          mediaValidation: 'passed'
+        };
+        if (batch.pipelineVersion >= 2) Object.assign(uploadIntent, {
+          chapterTimestamps: timeline.timestamps.map(({ time, title }) => ({ time, title })),
+          chapters: timeline.chapters.map(({ time, title }) => ({ time, title })),
+          chapterStatus: timeline.chapters.length >= 3 ? 'chapters_added' : 'timestamps_only',
+          thumbnailStatus, thumbnailError, thumbnailHeadline
+        });
+        await updateOwnedDraft( uploadIntent);
+        if (!await ownsRetryLease(id, batch.retryLeaseClaimToken)) return;
+        parentUploadStarted = true;
+        highlight = await youtube.uploadPrivate({
+          filePath: montage, title: highlightTitle, description, tags: highlightTags
+        });
+        acceptedHighlightId = highlight?.id || null;
+        if (!acceptedHighlightId) {
+          const error = new Error('YouTube upload returned no video ID; check for a private upload before retrying');
+          error.code = 'YOUTUBE_UPLOAD_ID_MISSING';
+          throw error;
+        }
+      }
       const highlightPatch = {
         status: 'creating_shorts', productionState: 'processing', youtubeVideoId: highlight.id,
         title: highlightTitle, description, tags: highlightTags,
@@ -406,7 +586,11 @@ function createHighlightProcessor(dependencies) {
         });
       }
       // Persist the private parent ID before downstream work so a retry can reuse it.
-      await store.updateDraft(id, highlightPatch);
+      if (acceptedHighlightId) {
+        await persistAcceptedYouTubeUpload(store, id, acceptedHighlightId, highlightPatch);
+      } else {
+        await updateOwnedDraft( highlightPatch);
+      }
 
       const playlistAssignment = await autoAssignPlaylist({
         id: highlight.id, privacyStatus: 'private', title: highlightTitle, description,
@@ -414,7 +598,7 @@ function createHighlightProcessor(dependencies) {
         context: { topic: batch.streamTitle || '', takeaways: batch.highlights.map((moment) =>
           moment.title + ': ' + moment.reason).join('\n'), videoType: 'Gameplay' }
       });
-      await store.updateDraft(id, { playlistAssignment });
+      await updateOwnedDraft( { playlistAssignment });
 
       if (batch.pipelineVersion >= 2 && thumbnailReady) {
         try {
@@ -425,7 +609,7 @@ function createHighlightProcessor(dependencies) {
           thumbnailStatus = 'failed';
           thumbnailError = noteFailure('thumbnail', error, 300);
         }
-        await store.updateDraft(id, { thumbnailStatus, thumbnailError, thumbnailHeadline });
+        await updateOwnedDraft( { thumbnailStatus, thumbnailError, thumbnailHeadline });
       }
       if (batch.pipelineVersion >= 2 && thumbnailStatus !== 'applied') {
         if (!failures.some((failure) => failure.startsWith('thumbnail: '))) {
@@ -504,32 +688,106 @@ function createHighlightProcessor(dependencies) {
           continue;
         }
 
+        const unsafeUploadStates = new Set([
+          'clip_upload_uncertain', 'uploading_private_to_youtube'
+        ]);
+        if (existingShort && !existingShort.youtubeVideoId) {
+          if (unsafeUploadStates.has(existingShort.status)) {
+            noteFailure('Short ' + (index + 1),
+              new Error('Short upload is ambiguous; reconcile the private YouTube video before retrying'),
+              150, { forcePermanent: true });
+            offset += durations[index];
+            continue;
+          }
+          if (existingShort.status === 'clip_retry_wait' &&
+              Date.parse(existingShort.nextClipAttemptAt || '') > now()) {
+            const waitMs = Date.parse(existingShort.nextClipAttemptAt) - now();
+            providerRetryAfterMs = Math.max(providerRetryAfterMs, waitMs);
+            failures.push('Short ' + (index + 1) + ': upload retry is scheduled');
+            hasRetryableFailure = true;
+            offset += durations[index];
+            continue;
+          }
+          const retryableShortError = isYouTubeUploadLimitError({ message: existingShort.error }) ||
+            isRetryableYouTubeUploadRejection({ status: existingShort.uploadRejectionStatus });
+          const existingShortRetryDue = existingShort.status === 'clip_retry_wait' &&
+            retryableShortError &&
+            Number.isFinite(Date.parse(existingShort.nextClipAttemptAt || '')) &&
+            Date.parse(existingShort.nextClipAttemptAt) <= now();
+          // Permanent 4xx upload rejection requires an explicit owner retry of the parent.
+          const manualDefiniteRejectionRetry = existingShort.status === 'clip_failed' &&
+            isDefiniteYouTubeUploadRejection({ status: existingShort.uploadRejectionStatus });
+          if (existingShort.status !== 'clip_queued' && !existingShortRetryDue && !manualDefiniteRejectionRetry) {
+            noteFailure('Short ' + (index + 1),
+              new Error('Short has no saved YouTube ID and is not in a safe-to-upload state'),
+              150, { forcePermanent: true });
+            offset += durations[index];
+            continue;
+          }
+        }
+
         const shortPath = path.join(directory, 'short-' + index + '.mp4');
+        let shortDraft = existingShort || null;
+        let acceptedShortId = null;
         try {
+          if (!shortDraft) {
+            shortDraft = {
+              id: idFactory(), sourceType: 'twitch_highlight_short', parentId: id,
+              highlightIndex: index, vodId: batch.vodId, title: shortTitle,
+              description: shortDescription, tags: shortTags, youtubeVideoId: null,
+              mediaValidation: 'pending', playlistAssignment: { state: 'pending' },
+              status: 'clip_queued', productionState: 'queued',
+              seoRegistrationStatus: 'pending', publicationStatus: 'pending',
+              createdAt: new Date().toISOString()
+            };
+            // Serialize child creation with owner exclusion on the parent row.
+            if (typeof store.addHighlightShortDraft !== 'function') {
+              throw new Error('Atomic highlight Short creation is unavailable; no Short upload was made');
+            }
+            const savedShortDraft = await store.addHighlightShortDraft(id, claimToken, shortDraft);
+            if (!savedShortDraft) return;
+            shortDraft = savedShortDraft;
+            shortsByIndex.set(index, shortDraft);
+          }
           await video.shortFromHighlight(montage, offset, length, shortPath);
           await video.validateShort(shortPath, length);
+          if (typeof store.reserveHighlightShortUpload !== 'function') {
+            throw new Error('Atomic highlight Short upload reservation is unavailable; no Short upload was made');
+          }
+          const uploadReservation = await store.reserveHighlightShortUpload(id, claimToken, shortDraft.id, {
+            status: 'uploading_private_to_youtube', productionState: 'uploading',
+            mediaValidation: 'passed', title: shortTitle, description: shortDescription,
+            tags: shortTags, nextClipAttemptAt: null, error: null,
+            uploadRejectionStatus: null
+          });
+          if (!uploadReservation) return;
+          shortDraft = uploadReservation;
+          shortsByIndex.set(index, shortDraft);
           const uploaded = await youtube.uploadPrivate({
             filePath: shortPath, title: shortTitle, description: shortDescription, tags: shortTags
           });
-          const shortDraft = {
-            id: idFactory(), sourceType: 'twitch_highlight_short', parentId: id,
-            highlightIndex: index, vodId: batch.vodId, title: shortTitle,
-            description: shortDescription, tags: shortTags, youtubeVideoId: uploaded.id,
-            mediaValidation: 'passed', playlistAssignment: { state: 'pending' },
+          acceptedShortId = uploaded?.id || null;
+          if (!acceptedShortId) {
+            const error = new Error('YouTube Short upload returned no video ID; check for a private upload before retrying');
+            error.code = 'YOUTUBE_UPLOAD_ID_MISSING';
+            throw error;
+          }
+          const savedShort = await persistAcceptedYouTubeUpload(store, shortDraft.id, acceptedShortId, {
             status: 'clip_partial', productionState: 'processing',
-            seoRegistrationStatus: 'pending', publicationStatus: 'pending',
-            createdAt: new Date().toISOString()
-          };
-          // Record the YouTube ID before playlist and SEO work so a retry can reuse the Short.
-          await store.addDraft(shortDraft);
+            title: shortTitle, description: shortDescription, tags: shortTags,
+            mediaValidation: 'passed', playlistAssignment: { state: 'pending' },
+            seoRegistrationStatus: 'pending', publicationStatus: 'pending'
+          });
+          shortDraft = { ...shortDraft, ...(savedShort || {}), youtubeVideoId: acceptedShortId,
+            status: 'clip_partial', productionState: 'processing' };
           shortsByIndex.set(index, shortDraft);
           const playlist = await autoAssignPlaylist({
-            id: uploaded.id, privacyStatus: 'private', title: shortTitle,
+            id: acceptedShortId, privacyStatus: 'private', title: shortTitle,
             description: shortDescription, tags: shortTags,
             context: { takeaways: moment.reason || moment.title, videoType: 'Gameplay' }
           });
           await store.updateDraft(shortDraft.id, { playlistAssignment: playlist });
-          const registered = await registerSeo(shortDraft.id, uploaded.id, {
+          const registered = await registerSeo(shortDraft.id, acceptedShortId, {
             title: shortTitle, description: shortDescription, tags: shortTags,
             durationSeconds: length,
             context: { takeaways: moment.reason || moment.title, videoType: 'Gameplay' },
@@ -542,7 +800,78 @@ function createHighlightProcessor(dependencies) {
             await store.updateDraft(shortDraft.id, { status: 'clip_partial', productionState: 'partial' });
           }
         } catch (error) {
-          noteFailure('Short ' + (index + 1), error, 150);
+          const uploadLimitRejected = isYouTubeUploadLimitError(error);
+          const definiteUploadRejection = isDefiniteYouTubeUploadRejection(error);
+          const retryableUploadRejection = isRetryableYouTubeUploadRejection(error);
+          const retryDelayMs = computeRetryDelayMs({
+            attempt: attemptCount,
+            providerRetryAfterMs: error?.retryAfterMs,
+            minimumDelayMs: uploadLimitRejected ? YOUTUBE_UPLOAD_LIMIT_RETRY_MS : 1000,
+            baseDelayMs: 60 * 1000,
+            maxDelayMs: 30 * 60 * 1000,
+            seed: shortDraft?.id || id
+          });
+          if (shortDraft && acceptedShortId) {
+            await store.updateDraft(shortDraft.id, {
+              youtubeVideoId: acceptedShortId, status: 'clip_partial',
+              productionState: 'processing', error: null
+            });
+            shortDraft = { ...shortDraft, youtubeVideoId: acceptedShortId,
+              status: 'clip_partial', productionState: 'processing' };
+            shortsByIndex.set(index, shortDraft);
+          } else if (shortDraft && shortDraft.status === 'uploading_private_to_youtube') {
+            if (uploadLimitRejected || retryableUploadRejection) {
+              const nextClipAttemptAt = new Date(now() + retryDelayMs).toISOString();
+              const errorMessage = uploadLimitRejected
+                ? 'uploadLimitExceeded: YouTube rejected this Short because the channel upload limit was reached; retry is queued after a conservative 24-hour wait.'
+                : cleanText(error.message || 'YouTube rejected the Short upload; retry is scheduled', 300);
+              await store.updateDraft(shortDraft.id, {
+                status: 'clip_retry_wait', productionState: 'retry_scheduled',
+                nextClipAttemptAt, error: errorMessage,
+                uploadRejectionStatus: youtubeUploadHttpStatus(error)
+              });
+              shortDraft = { ...shortDraft, status: 'clip_retry_wait',
+                productionState: 'retry_scheduled', nextClipAttemptAt, error: errorMessage,
+                uploadRejectionStatus: youtubeUploadHttpStatus(error) };
+            } else if (definiteUploadRejection) {
+              const errorMessage = cleanText(error.message || 'YouTube rejected the Short upload', 300);
+              await store.updateDraft(shortDraft.id, {
+                status: 'clip_failed', productionState: 'failed',
+                nextClipAttemptAt: null, error: errorMessage,
+                uploadRejectionStatus: youtubeUploadHttpStatus(error)
+              });
+              shortDraft = { ...shortDraft, status: 'clip_failed',
+                productionState: 'failed', nextClipAttemptAt: null, error: errorMessage,
+                uploadRejectionStatus: youtubeUploadHttpStatus(error) };
+            } else {
+              const errorMessage = 'Short upload may have been accepted without a saved YouTube ID. Check the channel for a private upload before retrying.';
+              await store.updateDraft(shortDraft.id, {
+                status: 'clip_upload_uncertain', productionState: 'manual_reconciliation',
+                nextClipAttemptAt: null, error: errorMessage
+              });
+              shortDraft = { ...shortDraft, status: 'clip_upload_uncertain',
+                productionState: 'manual_reconciliation', nextClipAttemptAt: null, error: errorMessage };
+            }
+            shortsByIndex.set(index, shortDraft);
+          } else if (shortDraft && shortDraft.status === 'clip_retry_wait') {
+            // A due retry can fail before reaching YouTube (for example during
+            // rendering/validation). Move its deadline forward to avoid a 30s hot loop.
+            const retryable = isTransientError(error);
+            const nextClipAttemptAt = retryable ? new Date(now() + retryDelayMs).toISOString() : null;
+            const nextStatus = retryable ? 'clip_retry_wait' : 'clip_failed';
+            const errorMessage = cleanText(error.message || 'Short production failed', 300);
+            await store.updateDraft(shortDraft.id, {
+              status: nextStatus, productionState: retryable ? 'retry_scheduled' : 'failed',
+              nextClipAttemptAt, error: errorMessage
+            });
+            shortDraft = { ...shortDraft, status: nextStatus,
+              productionState: retryable ? 'retry_scheduled' : 'failed', nextClipAttemptAt, error: errorMessage };
+            shortsByIndex.set(index, shortDraft);
+          }
+          noteFailure('Short ' + (index + 1), error, 150, {
+            forcePermanent: !acceptedShortId &&
+              ['clip_upload_uncertain', 'clip_failed'].includes(shortDraft?.status)
+          });
         }
         offset += durations[index];
       }
@@ -598,13 +927,23 @@ function createHighlightProcessor(dependencies) {
       }
       const productionReady = localProductionReady && youtubeProcessingReady;
       const maxAttemptsAllowed = Number.isSafeInteger(maxAutoAttempts) && maxAutoAttempts > 0 ? maxAutoAttempts : 12;
-      const retryDelay = Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attemptCount - 1)));
+      const retryDelay = computeRetryDelayMs({
+        attempt: attemptCount, providerRetryAfterMs, baseDelayMs: 60 * 1000,
+        maxDelayMs: 30 * 60 * 1000, seed: id
+      });
       if (!productionReady) {
         const canAutoRetry = hasRetryableFailure && !hasPermanentFailure && attemptCount < maxAttemptsAllowed;
         const nextClipAttemptAt = canAutoRetry ? new Date(now() + retryDelay).toISOString() : null;
         const error = failures.slice(0, 8).join('; ') || 'Production checks did not pass';
         for (const short of finalShorts) {
-          if (short.publicationStatus !== 'published') {
+          const ambiguousUpload = ['clip_upload_uncertain', 'uploading_private_to_youtube'].includes(short.status);
+          const notYetUploaded = short.status === 'clip_queued' && !short.youtubeVideoId;
+          const scheduledShortRetry = short.status === 'clip_retry_wait' &&
+            (isYouTubeUploadLimitError({ message: short.error }) ||
+              isRetryableYouTubeUploadRejection({ status: short.uploadRejectionStatus }));
+          const definiteShortFailure = short.status === 'clip_failed';
+          if (short.publicationStatus !== 'published' && !ambiguousUpload &&
+              !notYetUploaded && !scheduledShortRetry && !definiteShortFailure) {
             await store.updateDraft(short.id, {
               status: 'clip_partial',
               productionState: canAutoRetry ? 'processing' : 'partial',
@@ -612,7 +951,7 @@ function createHighlightProcessor(dependencies) {
             });
           }
         }
-        await store.updateDraft(id, {
+        await updateOwnedDraft( {
           status: canAutoRetry ? 'clip_retry_wait' : 'clip_partial',
           productionState: canAutoRetry ? 'retry_scheduled' : 'partial',
           productionFailures: failures.length ? failures : [error], error, nextClipAttemptAt,
@@ -627,14 +966,14 @@ function createHighlightProcessor(dependencies) {
             });
           }
         }
-        await store.updateDraft(id, {
+        await updateOwnedDraft( {
           status: 'awaiting_owner_approval', productionState: 'ready',
           publicationStatus: 'pending', productionFailures: [], error: null,
           nextClipAttemptAt: null, processedAt: new Date(now()).toISOString()
         });
         logSuccess(id, finalShorts.length);
       } else {
-        await store.updateDraft(id, {
+        await updateOwnedDraft( {
           status: 'clip_retry_wait', productionState: 'publishing',
           publicationStatus: 'publishing', productionFailures: [], error: null,
           nextClipAttemptAt: new Date(now()).toISOString()
@@ -684,7 +1023,7 @@ function createHighlightProcessor(dependencies) {
           publishedShorts.length === expectedShortCount &&
           publishedShorts.every((draft) => draft.publicationStatus === 'published');
         if (publishedEverything) {
-          await store.updateDraft(id, {
+          await updateOwnedDraft( {
             status: 'completed', productionState: 'published',
             publicationStatus: 'published', productionFailures: [], error: null,
             nextClipAttemptAt: null, processedAt: new Date(now()).toISOString()
@@ -701,7 +1040,7 @@ function createHighlightProcessor(dependencies) {
               }
             }
           }
-          await store.updateDraft(id, {
+          await updateOwnedDraft( {
             status: canAutoRetry ? 'clip_retry_wait' : 'awaiting_owner_approval',
             productionState: canAutoRetry ? 'retry_scheduled' : 'ready',
             publicationStatus: canAutoRetry ? 'retry' : 'failed',
@@ -712,23 +1051,75 @@ function createHighlightProcessor(dependencies) {
         }
       }
     } catch (error) {
-      const message = cleanText(error.message || 'Highlight production failed', 500);
-      const attemptCount = (Number(batch && batch.clipAttemptCount) || 0) + 1;
-      const canAutoRetry = isTransientError(error) && attemptCount <
-        (Number.isSafeInteger(maxAutoAttempts) && maxAutoAttempts > 0 ? maxAutoAttempts : 12);
-      const retryDelay = error.code === 'TWITCH_CLIP_METADATA_PENDING'
-        ? 2 * 60 * 1000
-        : Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attemptCount - 1)));
+      const pendingIndex = Number(batch?.pendingTwitchClipIntentIndex);
+      const hasPendingClipIntent = Number.isSafeInteger(pendingIndex) && pendingIndex >= 0 &&
+        !batch?.twitchClips?.[pendingIndex]?.id;
+      const status = Number(error?.status || error?.statusCode);
+      const definiteProviderRejection = status >= 400 && status < 500;
+      if (hasPendingClipIntent && !definiteProviderRejection) {
+        logError(id, error);
+        await updateOwnedDraft({
+          status: 'clip_failed', productionState: 'manual_review',
+          error: 'Twitch clip creation for highlight ' + (pendingIndex + 1) +
+            ' may have succeeded before the request failed. Check Twitch clips before retrying.',
+          nextClipAttemptAt: null, processedAt: new Date(now()).toISOString()
+        }).catch(() => {});
+        return;
+      }
+      if (hasPendingClipIntent && definiteProviderRejection) {
+        const clearedIntent = await updateOwnedDraft({
+          pendingTwitchClipIntentIndex: null, pendingTwitchClipIntentAt: null
+        }).catch(() => null);
+        if (!clearedIntent) return;
+        batch = { ...batch, ...clearedIntent };
+      }
+      let message = cleanText(error.message || 'Highlight production failed', 500);
+      const attemptCount = Math.max(Number(batch && batch.clipAttemptCount) || 0, 1);
+      const uploadLimitRejected = isYouTubeUploadLimitError(error);
+      const definiteUploadRejection = isDefiniteYouTubeUploadRejection(error);
+      const retryableUploadRejection = isRetryableYouTubeUploadRejection(error);
+      const maxAttemptsAllowed = Number.isSafeInteger(maxAutoAttempts) && maxAutoAttempts > 0 ? maxAutoAttempts : 12;
+      let latest = await store.getDraft(id).catch(() => null);
+      if (!latest?.youtubeVideoId && (acceptedHighlightId || error.youtubeVideoId)) {
+        const knownId = acceptedHighlightId || error.youtubeVideoId;
+        latest = await updateOwnedDraft( {
+          youtubeVideoId: knownId, status: 'creating_shorts', productionState: 'processing',
+          error: null, nextClipAttemptAt: null
+        }).catch(() => latest);
+      }
+      const uploadingWithoutId = parentUploadStarted && !latest?.youtubeVideoId;
+      const retryDelay = Math.max(
+        uploadLimitRejected ? YOUTUBE_UPLOAD_LIMIT_RETRY_MS : 0,
+        error.code === 'TWITCH_CLIP_METADATA_PENDING' ? 2 * 60 * 1000 :
+          Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attemptCount - 1))),
+        Number(error.retryAfterMs) > 0 ? Number(error.retryAfterMs) : 0
+      );
+      const canAutoRetry = (uploadLimitRejected || retryableUploadRejection ||
+        !uploadingWithoutId && isTransientError(error)) && attemptCount < maxAttemptsAllowed;
+      if (uploadLimitRejected) {
+        message = 'YouTube rejected the upload because the channel upload limit was reached. Retry is queued after a conservative 24-hour wait.';
+      }
       logError(id, error);
-      await store.updateDraft(id, {
-        status: canAutoRetry ? 'clip_retry_wait' : 'clip_failed',
-        productionState: canAutoRetry ? 'retry_scheduled' : 'failed', error: message,
-        productionFailures: [message],
-        nextClipAttemptAt: canAutoRetry ? new Date(now() + retryDelay).toISOString() : null,
-        processedAt: new Date(now()).toISOString()
-      }).catch(() => {});
+      if (uploadingWithoutId && !uploadLimitRejected && !definiteUploadRejection) {
+        await updateOwnedDraft( {
+          status: 'clip_upload_uncertain', productionState: 'manual_reconciliation',
+          error: 'YouTube upload may have been accepted before its video ID was saved. Check the channel for a private upload before retrying.',
+          productionFailures: [message], nextClipAttemptAt: null,
+          processedAt: new Date(now()).toISOString()
+        }).catch(() => {});
+      } else {
+        await updateOwnedDraft( {
+          status: canAutoRetry ? 'clip_retry_wait' : 'clip_failed',
+          productionState: canAutoRetry ? 'retry_scheduled' : 'failed', error: message,
+          productionFailures: [message],
+          nextClipAttemptAt: canAutoRetry ? new Date(now() + retryDelay).toISOString() : null,
+          processedAt: new Date(now()).toISOString()
+        }).catch(() => {});
+      }
     } finally {
+      if (retryLeaseHeartbeat) clearInterval(retryLeaseHeartbeat);
       await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => {});
+      await releaseRetryLeaseWhenDurable(batch, id, claimToken);
     }
   }
 

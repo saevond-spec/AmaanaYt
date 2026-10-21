@@ -17,7 +17,7 @@ const DEFAULT_LIVE_CAPTURE_DURATION_SECONDS = 60;
 const DEFAULT_LIVE_CAPTURE_BUFFER_SECONDS = 90;
 const LIVE_SHORT_CANDIDATE_GROUP_SIZE = 5;
 const MAX_LIVE_SHORTS_PER_STREAM = 20;
-const RECENT_VOD_LIMIT = 20;
+const RECENT_VOD_LIMIT = 100;
 const MAX_AUTO_HIGHLIGHTS = MAX_HIGHLIGHT_SEGMENTS;
 const MAX_AUTO_SHORTS = 2;
 const MAX_LIVE_CANDIDATES = 160;
@@ -426,7 +426,39 @@ function createTwitchHighlightDiscovery({
     if (!broadcast || !broadcast.stream) {
       const state = await getState();
       for (const session of Object.values(state.liveSessions)) {
-        if (!session || !Array.isArray(session.shortCandidates) || !session.shortCandidates.length) continue;
+        if (!session) continue;
+        const rawOffset = session.pendingCaptureOffset;
+        const pendingOffset = rawOffset === null || rawOffset === undefined || rawOffset === ''
+          ? NaN : Number(rawOffset);
+        const hasPendingCapture = Number.isFinite(pendingOffset) && pendingOffset >= 0;
+        if (hasPendingCapture && /^\d+$/.test(String(session.vodId || ''))) {
+          try {
+            const archivedVod = await twitch.getVod(String(session.vodId));
+            const matchesSession = archivedVod && archivedVod.type === 'archive' &&
+              String(archivedVod.id) === String(session.vodId) &&
+              (!session.streamId || String(archivedVod.stream_id || '') === String(session.streamId));
+            if (!matchesSession) throw new Error('Archived VOD does not match the ended live session');
+            const handoff = await scanVod(archivedVod);
+            if (handoff.status !== 'already_scanning') {
+              session.pendingCaptureOffset = null;
+              session.pendingCaptureDuration = null;
+              session.pendingCaptureClipId = null;
+              session.pendingCaptureAttempts = 0;
+              session.nextCaptureAttemptAt = null;
+              session.pendingCaptureRecoveryStatus = handoff.status;
+              session.pendingCaptureRecoveredAt = new Date(now()).toISOString();
+              result.pendingCapturesRecovered = (Number(result.pendingCapturesRecovered) || 0) + 1;
+            }
+          } catch (error) {
+            result.pendingCaptureRecoveryError = clean(error && error.message ||
+              'Archived VOD recovery failed', 300);
+            if (logger && typeof logger.warn === 'function') {
+              logger.warn('Amaana ended-stream VOD recovery failed for ' +
+                String(session.vodId) + ': ' + result.pendingCaptureRecoveryError);
+            }
+          }
+        }
+        if (!Array.isArray(session.shortCandidates) || !session.shortCandidates.length) continue;
         await queueReadyLiveShorts({
           id: session.streamId, user_id: session.streamUserId,
           user_name: session.sourceChannel, user_login: session.sourceChannel,
@@ -511,7 +543,12 @@ function createTwitchHighlightDiscovery({
         batchIndex: 0,
         candidates: [],
         lastCaptureAt: null,
-        lastCaptureOffset: null
+        lastCaptureOffset: null,
+        pendingCaptureOffset: null,
+        pendingCaptureDuration: null,
+        pendingCaptureClipId: null,
+        pendingCaptureAttempts: 0,
+        nextCaptureAttemptAt: null
       };
       state.liveSessions[streamId] = session;
     }
@@ -527,11 +564,24 @@ function createTwitchHighlightDiscovery({
     await queueReadyLiveShorts(stream, session, result);
     await queueReadyLiveBatches(vod, stream, session, result);
 
+    const rawPendingOffset = session.pendingCaptureOffset;
+    const pendingOffset = rawPendingOffset === null || rawPendingOffset === undefined || rawPendingOffset === ''
+      ? NaN : Number(rawPendingOffset);
+    const hasPendingCapture = Number.isFinite(pendingOffset) && pendingOffset >= 0;
+    const retryAt = Date.parse(session.nextCaptureAttemptAt || '');
+    if (hasPendingCapture && Number.isFinite(retryAt) && timestamp < retryAt) {
+      result.status = 'waiting_for_capture_retry';
+      result.nextCaptureAttemptAt = session.nextCaptureAttemptAt;
+      await saveState();
+      return result;
+    }
     const lastCaptureAt = Date.parse(session.lastCaptureAt || '');
-    const captureDue = !Number.isFinite(lastCaptureAt) ||
+    const captureDue = hasPendingCapture || !Number.isFinite(lastCaptureAt) ||
       timestamp - lastCaptureAt >= liveCaptureIntervalMs;
-    const previousOffset = Number(session.lastCaptureOffset);
-    const newSegmentAvailable = !Number.isFinite(previousOffset) ||
+    const rawPreviousOffset = session.lastCaptureOffset;
+    const previousOffset = rawPreviousOffset === null || rawPreviousOffset === undefined || rawPreviousOffset === ''
+      ? NaN : Number(rawPreviousOffset);
+    const newSegmentAvailable = hasPendingCapture || !Number.isFinite(previousOffset) ||
       captureOffset - previousOffset >= requestedDuration + 30;
     if (!captureDue || !newSegmentAvailable) {
       result.status = result.batchesQueued ? 'queued' : 'waiting_for_next_capture';
@@ -539,22 +589,40 @@ function createTwitchHighlightDiscovery({
       return result;
     }
 
-    const requestedVodOffset = captureOffset;
-    const requestedStart = requestedVodOffset - requestedDuration;
-    session.lastCaptureAt = new Date(timestamp).toISOString();
-    session.lastCaptureOffset = requestedVodOffset;
+    const requestedVodOffset = hasPendingCapture ? pendingOffset : captureOffset;
+    const rawPendingDuration = session.pendingCaptureDuration;
+    const pendingDuration = rawPendingDuration === null || rawPendingDuration === undefined || rawPendingDuration === ''
+      ? NaN : Number(rawPendingDuration);
+    const hasPendingDuration = hasPendingCapture && Number.isFinite(pendingDuration) && pendingDuration > 0;
+    const requestedDurationSeconds = hasPendingDuration ? pendingDuration : requestedDuration;
+    const requestedStart = requestedVodOffset - requestedDurationSeconds;
+    if (!hasPendingCapture) {
+      session.pendingCaptureOffset = requestedVodOffset;
+      session.pendingCaptureDuration = requestedDurationSeconds;
+      session.pendingCaptureClipId = null;
+      session.pendingCaptureAttempts = 0;
+    }
+    session.pendingCaptureAttempts = (Number(session.pendingCaptureAttempts) || 0) + 1;
+    session.nextCaptureAttemptAt = null;
     session.captureAttempts = (Number(session.captureAttempts) || 0) + 1;
     session.lastCaptureError = null;
     await saveState();
     result.captureAttempted = true;
     try {
-      const created = await twitch.createClipFromVod({
-        vodId: String(vod.id),
-        vodOffset: requestedVodOffset,
-        duration: requestedDuration,
-        title: clean((stream.title || 'Livestream') + ' | gameplay capture', 100)
-      });
-      if (!created || !created.id) throw new Error('Twitch did not return a live clip ID');
+      let created;
+      if (session.pendingCaptureClipId) {
+        created = { id: String(session.pendingCaptureClipId), broadcasterId: userId, editorId: userId };
+      } else {
+        created = await twitch.createClipFromVod({
+          vodId: String(vod.id),
+          vodOffset: requestedVodOffset,
+          duration: requestedDurationSeconds,
+          title: clean((stream.title || 'Livestream') + ' | gameplay capture', 100)
+        });
+        if (!created || !created.id) throw new Error('Twitch did not return a live clip ID');
+        session.pendingCaptureClipId = String(created.id);
+        await saveState();
+      }
       const download = await twitch.waitForClipDownload({
         clipId: created.id, broadcasterId: created.broadcasterId || userId,
         editorId: created.editorId || userId
@@ -569,7 +637,7 @@ function createTwitchHighlightDiscovery({
         await twitch.downloadClip(download.landscape_download_url, source);
         const media = await video.inspectMedia(source);
         if (!Number.isFinite(Number(media.durationSeconds)) ||
-            Math.abs(Number(media.durationSeconds) - requestedDuration) > 1.5 ||
+            Math.abs(Number(media.durationSeconds) - requestedDurationSeconds) > 1.5 ||
             !Number.isFinite(Number(media.width)) || !Number.isFinite(Number(media.height)) ||
             Number(media.height) <= 0 || Number(media.width) / Number(media.height) < 1.6) {
           throw new Error('Live Twitch clip failed landscape gameplay media checks');
@@ -609,7 +677,7 @@ function createTwitchHighlightDiscovery({
           if (metadata && metadata.duration !== null && metadata.duration !== undefined) {
             const actualDuration = Number(metadata.duration);
             if (!Number.isFinite(actualDuration) ||
-                Math.abs(actualDuration - requestedDuration) > 1) {
+                Math.abs(actualDuration - requestedDurationSeconds) > 1) {
               throw new Error('Twitch live clip duration does not match the requested segment');
             }
           }
@@ -620,7 +688,7 @@ function createTwitchHighlightDiscovery({
             ...created,
             requestedVodId: String(vod.id),
             requestedVodOffset,
-            requestedDuration,
+            requestedDuration: requestedDurationSeconds,
             requestProofVersion: 1,
             requestProofReconstructed: false,
             liveCapture: true,
@@ -633,7 +701,9 @@ function createTwitchHighlightDiscovery({
               model: clean(gameplay.model || '', 80)
             }
           };
-          if (!session.candidates.some((candidate) => String(candidate.clip && candidate.clip.id) === String(clip.id))) {
+          if (!session.candidates.some((candidate) =>
+            String(candidate.clip && candidate.clip.id) === String(clip.id) ||
+            Math.abs(Number(candidate.startSeconds) - requestedStart) <= 2)) {
             session.candidates.push({
               clip,
               gameId,
@@ -656,10 +726,42 @@ function createTwitchHighlightDiscovery({
       } finally {
         await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => {});
       }
+      session.lastCaptureAt = new Date(timestamp).toISOString();
+      session.lastCaptureOffset = requestedVodOffset;
+      session.pendingCaptureOffset = null;
+      session.pendingCaptureDuration = null;
+      session.pendingCaptureClipId = null;
+      session.pendingCaptureAttempts = 0;
+      session.nextCaptureAttemptAt = null;
+      session.lastCaptureError = null;
+      await saveState();
     } catch (error) {
       session.lastCaptureError = clean(error && error.message || 'Live Twitch capture failed', 300);
       result.captureError = session.lastCaptureError;
       result.status = 'capture_failed';
+      const status = Number(error && (error.status || error.statusCode || error.response && error.response.status));
+      const transient = [408, 425, 429].includes(status) || status >= 500 && status <= 599 ||
+        ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND',
+          'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT'].includes(
+          String(error && (error.code || error.cause && error.cause.code) || '').toUpperCase());
+      if (transient) {
+        const attempt = Math.max(1, Number(session.pendingCaptureAttempts) || 1);
+        const backoffMs = Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attempt - 1)));
+        const providerDelay = Number(error.retryAfterMs);
+        const delayMs = Math.max(backoffMs, Number.isFinite(providerDelay) && providerDelay > 0 ? providerDelay : 0);
+        session.nextCaptureAttemptAt = new Date(now() + delayMs).toISOString();
+        result.nextCaptureAttemptAt = session.nextCaptureAttemptAt;
+      } else {
+        // A permanent rejection consumes this candidate offset; a later scan may
+        // choose a fresh segment instead of retrying the same invalid request forever.
+        session.lastCaptureAt = new Date(timestamp).toISOString();
+        session.lastCaptureOffset = requestedVodOffset;
+        session.pendingCaptureOffset = null;
+        session.pendingCaptureDuration = null;
+        session.pendingCaptureClipId = null;
+        session.pendingCaptureAttempts = 0;
+        session.nextCaptureAttemptAt = null;
+      }
       if (logger && typeof logger.error === 'function') {
         logger.error('Amaana live Twitch clip capture failed for stream ' + streamId + ': ' + error.message);
       }
