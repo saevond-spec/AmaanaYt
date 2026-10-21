@@ -57,7 +57,7 @@ test('finds only the connected broadcaster’s active archive VOD', async (t) =>
         body = { data: [
           { id: 'historical-vod-clip', broadcaster_id: '1001', video_id: '8001',
             created_at: '2025-01-01T12:00:00Z', duration: 30 }
-        ] };
+        ], pagination: { cursor: 'historical-more' } };
       } else {
         body = { data: [
           { id: 'live-clip-1', broadcaster_id: '1001', game_id: '509658', duration: 30 },
@@ -86,14 +86,18 @@ test('finds only the connected broadcaster’s active archive VOD', async (t) =>
     endedAt: new Date().toISOString()
   });
   const archivedVods = await twitch.listRecentArchivedVods({ first: 2, maxPages: 2 });
-  const vodClips = await twitch.listClipsForVod(archivedVods[0], { maxPages: 1 });
+  const vodClips = await twitch.listClipsForVod(archivedVods[0], { maxPages: 2 });
 
   assert.equal(broadcast.user.id, '1001');
   assert.deepEqual(clips.map((clip) => clip.id), ['live-clip-1']);
   assert.deepEqual(archivedVods.map((vod) => vod.id), ['8001', '6001']);
   assert.deepEqual(vodClips.map((clip) => clip.id), ['historical-vod-clip']);
-  assert.ok(calls.some((call) => call.includes('started_at=2024-12-31T00%3A00%3A00.000Z') &&
+  const vodClipWindowCalls = calls.filter((call) =>
+    call.startsWith('/helix/clips?') && call.includes('started_at='));
+  assert.equal(vodClipWindowCalls.length, 2);
+  assert.ok(vodClipWindowCalls.some((call) => call.includes('started_at=2024-12-31T00%3A00%3A00.000Z') &&
     call.includes('ended_at=2025-01-02T02%3A00%3A00.000Z')));
+  assert.ok(vodClipWindowCalls.some((call) => !call.includes('started_at=2024-12-31T00%3A00%3A00.000Z')));
   assert.ok(calls.some((call) => call.includes('first=2&after=cursor-1')));
   assert.equal(broadcast.stream.id, '7777');
   assert.equal(broadcast.vod.id, '9001');
