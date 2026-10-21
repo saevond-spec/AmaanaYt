@@ -349,7 +349,7 @@ test('429 delays are returned to the durable queue without in-flight retries', a
   assert.deepEqual(delays, []);
   requests = 0;
   await assert.rejects(generatePackage(source, context, {
-    ...options, fetchImpl: async () => {
+    ...options, circuitBreaker: createModelCircuitBreaker(), fetchImpl: async () => {
       requests += 1;
       return { ok: false, status: 429, headers: { get: () => '120' }, json: async () => null };
     }
