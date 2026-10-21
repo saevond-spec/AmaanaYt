@@ -32,6 +32,7 @@ const { createSessionStore } = require('./session-store');
 const { canAddVideoToPlaylist } = require('./youtube-playlists');
 const { parseGoogleSearchConsoleCsv } = require('./google-search-console');
 const { createPlaylistAutoAssigner } = require('./playlist-auto');
+const { isYouTubeUploadLimitError, recoverInterruptedYouTubeUploads } = require('./draft-recovery');
 
 for (const name of ['BASE_URL', 'DATABASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SESSION_SECRET', 'TOKEN_ENCRYPTION_KEY', 'AGENT_KEY', 'ADMIN_KEY']) {
   if (!process.env[name]) throw new Error(`Missing required environment variable: ${name}`);
@@ -429,9 +430,17 @@ async function processTwitchClipDraft(id) {
         status: 'clip_retry_wait', productionState: 'retry_scheduled', nextClipAttemptAt,
         error: cleanText(error.message, 500)
       }).catch(() => {});
-    } else if (latest && latest.discoverySource === 'twitch_community_clip' &&
-        latest.status === 'uploading_private_to_youtube') {
-      await store.updateDraft(id, { status: 'clip_upload_uncertain', error: cleanText(error.message, 500) }).catch(() => {});
+    } else if (latest && latest.status === 'uploading_private_to_youtube' &&
+        isYouTubeUploadLimitError(error)) {
+      await store.updateDraft(id, {
+        status: 'clip_failed', productionState: 'failed', nextClipAttemptAt: null,
+        error: 'YouTube rejected this upload because the channel reached its daily upload limit. Retry after the limit resets.'
+      }).catch(() => {});
+    } else if (latest && latest.status === 'uploading_private_to_youtube') {
+      await store.updateDraft(id, {
+        status: 'clip_upload_uncertain', productionState: 'manual_reconciliation',
+        error: cleanText(error.message, 500), nextClipAttemptAt: null
+      }).catch(() => {});
     } else {
       await store.updateDraft(id, { status: 'clip_failed', error: cleanText(error.message, 500) }).catch(() => {});
     }
@@ -1350,16 +1359,17 @@ store.init()
       monetization.schedule();
       market.schedule();
       void scheduleDueHighlightRetries();
-      twitchHighlightDiscovery.start();
       try {
-        const drafts = await store.listDrafts();
+        let drafts = await store.listDrafts();
+        drafts = await recoverInterruptedYouTubeUploads(drafts,
+          (id, patch) => store.updateDraft(id, patch));
+        twitchHighlightDiscovery.start();
         const resumable = new Set([
           'clip_queued',
           'creating_twitch_clip',
           'waiting_for_clip_media',
           'downloading_twitch_clip',
           'formatting_vertical_short',
-          'uploading_private_to_youtube',
           'clip_retry_wait'
         ]);
         drafts.filter((draft) => draft.sourceType === 'twitch_vod' && resumable.has(draft.status) &&
