@@ -257,6 +257,66 @@ async function updateDraftIfUnchanged(id, expected, patch) {
   }
 }
 
+async function claimTwitchVodDraft(id, options = {}) {
+  const timestamp = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
+  const leaseMs = Number.isFinite(Number(options.leaseMs)) && Number(options.leaseMs) > 0
+    ? Math.min(Number(options.leaseMs), 60 * 60 * 1000) : 15 * 60 * 1000;
+  const maxAttempts = Number.isSafeInteger(options.maxAttempts) && options.maxAttempts > 0
+    ? Math.min(options.maxAttempts, 24) : 8;
+  const claimToken = String(options.claimToken || crypto.randomUUID());
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(claimToken)) {
+    throw new Error('A UUID Twitch VOD claim token is required');
+  }
+  await init();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const selected = await client.query(
+      'SELECT payload FROM amaana_drafts WHERE id = $1 FOR UPDATE', [id]);
+    const draft = selected.rows[0]?.payload;
+    const retryValue = draft?.nextClipAttemptAt;
+    const retryAt = Date.parse(retryValue || '');
+    const leaseValue = draft?.retryLeaseUntil;
+    const leaseUntil = Date.parse(leaseValue || '');
+    const resumableStatuses = ['clip_queued', 'clip_retry_wait', 'creating_twitch_clip',
+      'waiting_for_clip_media', 'downloading_twitch_clip', 'formatting_vertical_short'];
+    const eligible = Boolean(draft && draft.sourceType === 'twitch_vod' &&
+      resumableStatuses.includes(draft.status) && !draft.youtubeVideoId &&
+      Number(draft.clipAttemptCount || 0) < maxAttempts &&
+      draft.productionState !== 'excluded' && draft.status !== 'excluded_by_owner' &&
+      !draft.excludedAt && draft.productionState !== 'published' &&
+      draft.publicationStatus !== 'published' && !hasProtectedPublication([draft]) &&
+      !(leaseValue != null && leaseValue !== '' && !Number.isFinite(leaseUntil)) &&
+      !(Number.isFinite(leaseUntil) && leaseUntil > timestamp) &&
+      !(retryValue != null && retryValue !== '' && !Number.isFinite(retryAt)) &&
+      !(draft.status === 'clip_retry_wait' &&
+        (!Number.isFinite(retryAt) || retryAt > timestamp)) &&
+      !(Number.isFinite(retryAt) && retryAt > timestamp));
+    if (!eligible) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    const claimedAt = new Date(timestamp).toISOString();
+    const updated = {
+      ...draft,
+      retryLeaseUntil: new Date(timestamp + leaseMs).toISOString(),
+      retryLeaseClaimedAt: claimedAt,
+      retryLeaseClaimToken: claimToken,
+      updatedAt: claimedAt
+    };
+    await client.query(
+      'UPDATE amaana_drafts SET payload = $2::jsonb, updated_at = NOW() WHERE id = $1',
+      [id, JSON.stringify(updated)]);
+    await client.query('COMMIT');
+    return updated;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function claimHighlightRetryParent(id, options = {}) {
   const timestamp = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
   const leaseMs = Number.isFinite(Number(options.leaseMs)) && Number(options.leaseMs) > 0
@@ -1120,6 +1180,7 @@ module.exports = {
   addDraft,
   updateDraft,
   updateDraftIfUnchanged,
+  claimTwitchVodDraft,
   claimHighlightRetryParent,
   extendHighlightRetryLease,
   releaseHighlightRetryLease,
