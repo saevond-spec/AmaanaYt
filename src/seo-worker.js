@@ -8,10 +8,8 @@ function geminiQuotaIsShared(env = {}) {
   const analysisKey = String(env.VIDEO_ANALYSIS_API_KEY || (seoUsesGemini ? seoKey : '')).trim();
   if (!seoUsesGemini || !seoKey || !analysisKey) return false;
   if (analysisKey === seoKey) return true;
-  const seoProject = String(env.SEO_AI_PROJECT_ID || env.GEMINI_SEO_PROJECT_ID ||
-    env.GOOGLE_CLOUD_PROJECT || '').trim();
-  const analysisProject = String(env.VIDEO_ANALYSIS_PROJECT_ID || env.GEMINI_VIDEO_PROJECT_ID ||
-    env.GOOGLE_CLOUD_PROJECT || '').trim();
+  const seoProject = String(env.SEO_AI_PROJECT_ID || env.GEMINI_SEO_PROJECT_ID || '').trim();
+  const analysisProject = String(env.VIDEO_ANALYSIS_PROJECT_ID || env.GEMINI_VIDEO_PROJECT_ID || '').trim();
   // Gemini usage limits are project-scoped. Different keys are still shared unless
   // the deployment explicitly identifies two different Google Cloud projects.
   return !(seoProject && analysisProject && seoProject !== analysisProject);
