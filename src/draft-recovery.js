@@ -36,6 +36,20 @@ function isDefiniteYouTubeUploadRejection(error) {
   return status !== null && status >= 400 && status < 500;
 }
 
+function youtubeUploadHttpStatus(error) {
+  const candidates = [
+    error?.response?.status,
+    error?.status,
+    error?.statusCode,
+    error?.response?.data?.error?.code
+  ];
+  for (const value of candidates) {
+    const status = Number(value);
+    if (Number.isInteger(status) && status >= 400 && status <= 599) return status;
+  }
+  return null;
+}
+
 function isRetryableYouTubeUploadRejection(error) {
   const status = youtubeUploadHttpStatus(error);
   return status === 408 || status === 425 || status === 429;
@@ -87,7 +101,8 @@ function findDueTwitchHighlightRetryParents(drafts, now = Date.now()) {
   for (const short of drafts) {
     if (short?.sourceType !== 'twitch_highlight_short' ||
         short.status !== 'clip_retry_wait' ||
-        !isYouTubeUploadLimitError({ message: short.error }) ||
+        !(isYouTubeUploadLimitError({ message: short.error }) ||
+          isRetryableYouTubeUploadRejection({ status: short.uploadRejectionStatus })) ||
         !Number.isFinite(Date.parse(short.nextClipAttemptAt || '')) ||
         Date.parse(short.nextClipAttemptAt) > Number(now)) continue;
     const parent = byId.get(short.parentId);
@@ -139,7 +154,7 @@ async function recoverInterruptedYouTubeUploads(drafts, updateDraft, onError = (
 }
 
 module.exports = { isYouTubeUploadLimitError, isDefiniteYouTubeUploadRejection,
-  isRetryableYouTubeUploadRejection, isUploadRetryCoolingDown,
-  isOwnedPrivateYouTubeVideo, buildUploadReconciliationPatch,
+  isRetryableYouTubeUploadRejection, youtubeUploadHttpStatus,
+  isUploadRetryCoolingDown, isOwnedPrivateYouTubeVideo, buildUploadReconciliationPatch,
   findDueTwitchVodRetries, findDueTwitchHighlightRetryParents,
   recoverInterruptedYouTubeUploads, YOUTUBE_UPLOAD_LIMIT_RETRY_MS };
