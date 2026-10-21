@@ -431,7 +431,7 @@ function createTwitchHighlightDiscovery({
         const pendingOffset = rawOffset === null || rawOffset === undefined || rawOffset === ''
           ? NaN : Number(rawOffset);
         const hasPendingCapture = Number.isFinite(pendingOffset) && pendingOffset >= 0;
-        if (hasPendingCapture && /^\\d+$/.test(String(session.vodId || ''))) {
+        if (hasPendingCapture && /^\d+$/.test(String(session.vodId || ''))) {
           try {
             const archivedVod = await twitch.getVod(String(session.vodId));
             const matchesSession = archivedVod && archivedVod.type === 'archive' &&
