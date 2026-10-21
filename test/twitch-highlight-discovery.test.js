@@ -743,6 +743,10 @@ test('live Twitch 429 preserves the failed offset and waits for the provider res
 
   const first = await h.discovery.runLive();
   const firstOffset = h.calls.liveClipCreates[0].vodOffset;
+  assert.ok(Number.isFinite(firstOffset) && firstOffset > 0,
+    'a fresh session must capture recent footage instead of treating null as offset zero');
+  assert.equal(h.calls.liveClipCreates[0].duration, 60,
+    'a fresh session uses the configured capture duration');
   assert.equal(first.status, 'capture_failed');
   assert.equal(h.state.liveSessions['7777'].pendingCaptureOffset, firstOffset);
   assert.equal(h.state.liveSessions['7777'].lastCaptureOffset, null);
