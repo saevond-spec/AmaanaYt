@@ -47,7 +47,7 @@ test('five-year lifecycle simulation exercises baseline and deterministic recove
   const stress = reliability.recoveryStress;
 
   assert.equal(reliability.assumptions.modelDays, 1826);
-  assert.match(reliability.assumptions.timestampSource, /SweatyClanker/);
+  assert.match(reliability.assumptions.timestampSource, /Amaana discovers its own archived Twitch VODs/);
   assert.match(reliability.assumptions.finishedOutputDefinition, /processingStatus=succeeded/);
   assert.match(reliability.assumptions.finishedOutputDefinition, /archived VOD/);
   assert.match(reliability.assumptions.studioChecksLimit, /does not report Studio/);
