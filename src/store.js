@@ -208,7 +208,14 @@ async function updateDraft(id, patch) {
       await client.query('ROLLBACK');
       return null;
     }
-    const updated = { ...result.rows[0].payload, ...patch, updatedAt: new Date().toISOString() };
+    const current = result.rows[0].payload;
+    // An owner exclusion is a one-way safety decision. A worker that started earlier
+    // must not overwrite it while finishing private uploads or entering publication.
+    if (current.status === 'excluded_by_owner') {
+      await client.query('ROLLBACK');
+      return current;
+    }
+    const updated = { ...current, ...patch, updatedAt: new Date().toISOString() };
     await client.query(
       'UPDATE amaana_drafts SET payload = $2::jsonb, updated_at = NOW() WHERE id = $1',
       [id, JSON.stringify(updated)]
@@ -243,7 +250,7 @@ async function excludeDrafts(ids, reason = 'owner_excluded_non_gameplay_test') {
     }
     const lockedDrafts = result.rows.map((row) => row.payload);
     if (hasProtectedPublication(lockedDrafts)) {
-      throw Object.assign(new Error('A related video is published or scheduled; exclusion left the group unchanged.'), { status: 409 });
+      throw Object.assign(new Error('A related video is published, scheduled, or entering publication; exclusion left the group unchanged.'), { status: 409 });
     }
     const excludedAt = new Date().toISOString();
     const updated = [];
