@@ -317,7 +317,7 @@ Market research: YouTube says auto dubbing supports 27 languages and reported mo
 
 Use square or vertical video no longer than three minutes. For gameplay, 1080×1920 (9:16) is recommended. Confirm music and footage rights before uploading.
 
-New Google API projects can be limited to private API uploads until Google completes an API compliance audit. Private drafts will still work, but public automation may require that audit.
+Amaana explicitly sets new uploads to private, even though the Data API can default an unspecified upload to public. Current YouTube Data API docs say uploads from unverified API projects are not restricted to private viewing mode, so an API verification audit is not a universal prerequisite for public uploads. Confirm any restriction or quota on the specific Google Cloud project from its API response and Cloud Console.
 
 ## Low-view SEO triage
 
