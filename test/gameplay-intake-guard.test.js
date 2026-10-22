@@ -73,9 +73,10 @@ test('lets a test VOD community clip exclude its whole related review group', ()
   assert.deepEqual(collectTestVodDrafts(drafts, unrelatedId), []);
 });
 
-test('blocks exclusion of public, published, or scheduled videos', () => {
+test('blocks exclusion of public, published, scheduled, or actively publishing videos', () => {
   assert.equal(hasProtectedPublication([{ status: 'published' }]), true);
   assert.equal(hasProtectedPublication([{ youtubePrivacyStatus: 'public' }]), true);
   assert.equal(hasProtectedPublication([{ publicationStatus: 'scheduled' }]), true);
+  assert.equal(hasProtectedPublication([{ publicationStatus: 'publishing' }]), true);
   assert.equal(hasProtectedPublication([{ status: 'awaiting_owner_approval', youtubePrivacyStatus: 'private' }]), false);
 });
