@@ -141,9 +141,9 @@ test('malformed and schema-invalid responses fall through to configured model fa
     }
   });
 
-  assert.equal(result.model, 'gemini-2.5-flash');
-  assert.equal(urls.length, 3);
-  assert.deepEqual(delays, [1000, 5000]);
+  assert.equal(result.model, 'gemini-2.0-flash');
+  assert.equal(urls.length, 4);
+  assert.deepEqual(delays, [1000, 5000, 15000]);
 });
 
 test('all malformed model outputs fail with a retryable, classified error', async () => {
