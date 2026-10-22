@@ -142,6 +142,8 @@ async function harness(t, options = {}) {
   let clipFailureUsed = false;
   let thumbnailUploadFailureUsed = false;
   let thumbnailCreateFailureUsed = false;
+  let publicationClaimExclusionUsed = false;
+  let manualPublicationClaimUsed = false;
   let shortFailureUsed = false;
   let seoFailureUsed = false;
   let idCounter = 0;
@@ -162,8 +164,42 @@ async function harness(t, options = {}) {
       return copy(draft);
     },
     async updateDraft(id, patch) {
+      if (options.manualPublicationClaimBeforeFence &&
+          patch?.productionState === 'publishing' &&
+          patch?.publicationStatus === 'publishing' &&
+          !manualPublicationClaimUsed) {
+        manualPublicationClaimUsed = true;
+        if (options.manualPublicationClaimBeforeFence === 'parent') {
+          const parent = drafts.get(id);
+          drafts.set(id, { ...parent, status: 'publication_in_progress',
+            publicationStatus: 'publishing', publicationClaimId: 'manual-owner-claim' });
+        } else {
+          const short = [...drafts.values()].find((draft) => draft.parentId === id);
+          drafts.set(short.id, { ...short, status: 'publication_in_progress',
+            publicationStatus: 'publishing', publicationClaimId: 'manual-owner-claim' });
+        }
+      }
+      if (options.excludeBeforePublicationClaim &&
+          patch?.productionState === 'publishing' &&
+          patch?.publicationStatus === 'publishing' &&
+          !publicationClaimExclusionUsed) {
+        publicationClaimExclusionUsed = true;
+        for (const [draftId, draft] of drafts.entries()) {
+          if (draftId === batch.id || draft.parentId === batch.id) {
+            drafts.set(draftId, { ...draft, status: 'excluded_by_owner',
+              productionState: 'excluded', publicationStatus: 'excluded',
+              autoPublishEligible: false, nextClipAttemptAt: null });
+          }
+        }
+      }
       const current = drafts.get(id);
       if (!current) return null;
+      if (current.status === 'excluded_by_owner') return copy(current);
+      if (current.publicationStatus === 'publishing' && current.publicationClaimId &&
+          patch?.publicationClaimId !== current.publicationClaimId) return copy(current);
+      if (patch?.publicationStatus === 'publishing' && current.sourceType === 'twitch_highlight_batch' &&
+          [...drafts.values()].some((draft) => draft.parentId === id &&
+            ['publishing', 'ambiguous'].includes(draft.publicationStatus))) return copy(current);
       const next = { ...current, ...copy(patch), updatedAt: new Date().toISOString() };
       drafts.set(id, next);
       return copy(next);
@@ -336,6 +372,7 @@ async function harness(t, options = {}) {
   };
   const processor = createHighlightProcessor(dependencies);
   return { batch, drafts, store, counters, processor,
+    publicationClaimExclusionUsed: () => publicationClaimExclusionUsed,
     createProcessor: () => createHighlightProcessor(dependencies) };
 }
 
@@ -878,6 +915,35 @@ test('excluded highlight batches stop before any worker or YouTube processing', 
   assert.equal(h.counters.uploads.length, 0);
   assert.equal(h.counters.thumbnailCreates, 0);
   assert.equal(h.counters.publications.length, 0);
+});
+
+test('owner exclusion that commits before publication fencing prevents every public mutation', async (t) => {
+  const h = await harness(t, { excludeBeforePublicationClaim: true });
+
+  await h.processor(h.batch.id);
+
+  assert.equal(h.publicationClaimExclusionUsed(), true);
+  assert.equal(h.drafts.get(h.batch.id).status, 'excluded_by_owner');
+  assert.equal(h.drafts.get(h.batch.id).autoPublishEligible, false);
+  assert.equal(h.counters.publications.length, 0);
+  assert.equal(h.counters.visibilityMutations, 0);
+  assert.ok(h.counters.uploads.every((upload) => upload.privacyStatus === 'private'));
+});
+
+test('a manual publication claim prevents the automatic worker from racing the parent output', async (t) => {
+  for (const claimedOutput of ['parent', 'short']) {
+    const h = await harness(t, { manualPublicationClaimBeforeFence: claimedOutput });
+    await h.processor(h.batch.id);
+
+    assert.equal(h.drafts.get(h.batch.id).publicationStatus,
+      claimedOutput === 'parent' ? 'publishing' : 'pending', claimedOutput);
+    if (claimedOutput === 'parent') {
+      assert.equal(h.drafts.get(h.batch.id).publicationClaimId, 'manual-owner-claim');
+    }
+    assert.equal(h.counters.publications.length, 0, claimedOutput);
+    assert.equal(h.counters.visibilityMutations, 0, claimedOutput);
+    assert.ok(h.counters.uploads.every((upload) => upload.privacyStatus === 'private'), claimedOutput);
+  }
 });
 
 test('old private batches and disabled automatic publication remain private for owner review', async (t) => {

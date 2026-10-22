@@ -651,11 +651,22 @@ function createHighlightProcessor(dependencies) {
         });
         logSuccess(id, finalShorts.length);
       } else {
+        // Persist a publication fence on the parent before the first YouTube visibility
+        // mutation. Owner exclusion and this update both lock the draft row in Postgres:
+        // whichever commits first wins, so an exclusion cannot be lost to stale worker state.
         await store.updateDraft(id, {
           status: 'clip_retry_wait', productionState: 'publishing',
           publicationStatus: 'publishing', productionFailures: [], error: null,
           nextClipAttemptAt: new Date(now()).toISOString()
         });
+        const publicationGate = await store.getDraft(id);
+        if (!publicationGate || publicationGate.status === 'excluded_by_owner' ||
+            publicationGate.autoPublishEligible !== true ||
+            publicationGate.publicationClaimId ||
+            publicationGate.publicationStatus !== 'publishing') {
+          logHeld(id, 'owner_exclusion_or_eligibility_changed_before_publication');
+          return;
+        }
         for (const output of outputs) {
           if (output.publicationStatus === 'published') continue;
           const label = output.id === id ? 'highlight publication' : 'Short ' + (output.highlightIndex + 1) + ' publication';

@@ -25,6 +25,7 @@ const DEFAULT_STATE = Object.freeze({
   lastRunFinishedAt: null,
   lastError: null,
   retryAfter: null,
+  retryAttempts: 0,
   lastRun: Object.freeze({ channel: 0, videos: 0, playlists: 0, conflicts: 0 })
 });
 
@@ -40,6 +41,7 @@ function normalizeState(value = {}) {
     enabled: value.enabled === true,
     updatesToday: Number.isSafeInteger(value.updatesToday) && value.updatesToday >= 0 ? value.updatesToday : 0,
     totalUpdated: Number.isSafeInteger(value.totalUpdated) && value.totalUpdated >= 0 ? value.totalUpdated : 0,
+    retryAttempts: Number.isSafeInteger(value.retryAttempts) && value.retryAttempts >= 0 ? value.retryAttempts : 0,
     lastRun: { ...DEFAULT_STATE.lastRun, ...(value.lastRun || {}) }
   };
 }
@@ -321,6 +323,7 @@ function createJapaneseLocalizationWorker({
       state.lastRunFinishedAt = timestamp();
       state.lastError = null;
       state.retryAfter = null;
+      state.retryAttempts = 0;
       state.status = state.enabled
         ? state.updatesToday >= dailyLimit ? 'quota_wait' : 'monitoring'
         : 'paused';
@@ -336,9 +339,14 @@ function createJapaneseLocalizationWorker({
       state.lastRun = { ...stats };
       state.lastRunFinishedAt = timestamp();
       state.lastError = String(error?.message || 'Japanese localization autopilot failed').slice(0, 300);
+      state.retryAttempts += 1;
+      const fallbackBackoff = Math.min(24 * 60 * 60 * 1000,
+        errorBackoffMs * 2 ** Math.min(state.retryAttempts - 1, 5));
+      const providerBackoff = error?.retryAfterPresent && Number.isFinite(error.retryAfterMs)
+        ? Math.max(1000, error.retryAfterMs) : fallbackBackoff;
       state.retryAfter = state.enabled ? quotaBlock
         ? new Date(quotaBlock.blockedUntil).toISOString()
-        : new Date(now() + errorBackoffMs).toISOString() : null;
+        : new Date(now() + providerBackoff).toISOString() : null;
       if (quotaBlock) logger.warn?.('Japanese localization autopilot paused until ' + state.retryAfter +
         ' after YouTube Data API quota limit');
       else logger.error?.('Japanese localization autopilot failed:', error?.message || error);
@@ -363,6 +371,7 @@ function createJapaneseLocalizationWorker({
     state.status = 'queued';
     state.lastError = null;
     state.retryAfter = null;
+    state.retryAttempts = 0;
     const updated = await writeState(state);
     schedule(true);
     return updated;
