@@ -465,11 +465,18 @@ const processHighlightBatch = createHighlightProcessor({
   uploadDir, store, twitch, video, youtube, seo, autoAssignPlaylist,
   buildHighlightTimeline, buildHighlightDescription, cleanText,
   maxAutoAttempts: highlightMaxAutoAttempts,
-  // Newly produced Twitch bundles stay private until the owner publishes from review.
-  autoPublish: false,
+  autoPublish: process.env.HIGHLIGHT_AUTO_PUBLISH === 'true',
+  canAutoPublish: () => youtube.canApprove(),
   logError: (id, error) => console.error('Highlight batch ' + id + ' failed:', error.message),
-  logSuccess: (id, shorts) => console.info('Amaana Twitch highlight batch ' + id +
-    ' is ready for owner review with ' + shorts + ' Shorts')
+  logHeld: (id, reason) => console.warn(JSON.stringify({
+    event: 'highlight_autopublish_held', batchId: id, reason
+  })),
+  logSuccess: (id, shorts) => console.info(JSON.stringify({
+    event: 'highlight_batch_ready_for_owner_review', batchId: id, shortCount: shorts
+  })),
+  logPublished: (id, shorts) => console.info(JSON.stringify({
+    event: 'highlight_batch_published', batchId: id, shortCount: shorts, outputCount: shorts + 1
+  }))
 });const highlightBatchQueue = createBatchQueue(processHighlightBatch, {
   onError: (id, error) => console.error('Highlight batch queue failed for ' + id + ':', error.message)
 });
@@ -884,12 +891,19 @@ app.get('/api/twitch/status', admin, async (_req, res, next) => {
   }
 });
 
-app.get('/api/twitch/highlight-discovery/status', admin, (_req, res) => {
-  const gameplayScreeningEnabled = process.env.ENABLE_GAMEPLAY_SCREENING === 'true';
-  const gameplayVisionKeyConfigured = Boolean(process.env.VIDEO_ANALYSIS_API_KEY);
-  res.json({ ...twitchHighlightDiscovery.status(), gameplayScreeningEnabled,
-    gameplayVisionKeyConfigured,
-    visualGameplayVerificationConfigured: gameplayScreeningEnabled && gameplayVisionKeyConfigured });
+app.get('/api/twitch/highlight-discovery/status', admin, async (_req, res, next) => {
+  try {
+    const gameplayScreeningEnabled = process.env.ENABLE_GAMEPLAY_SCREENING === 'true';
+    const gameplayVisionKeyConfigured = Boolean(process.env.VIDEO_ANALYSIS_API_KEY);
+    res.set('Cache-Control', 'no-store');
+    res.json({ ...twitchHighlightDiscovery.status(), gameplayScreeningEnabled,
+      gameplayVisionKeyConfigured,
+      visualGameplayVerificationConfigured: gameplayScreeningEnabled && gameplayVisionKeyConfigured,
+      highlightAutoPublishEnabled: process.env.HIGHLIGHT_AUTO_PUBLISH === 'true',
+      youtubeCanPublish: await youtube.canApprove() });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.get('/api/tiktok/status', admin, async (_req, res, next) => {
