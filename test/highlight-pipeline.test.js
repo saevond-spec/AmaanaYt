@@ -121,14 +121,16 @@ async function harness(t, options = {}) {
   const uploadDir = await fs.mkdtemp(path.join(os.tmpdir(), 'amaana-highlight-'));
   t.after(() => fs.rm(uploadDir, { recursive: true, force: true }));
   const batch = {
-    id: 'batch-1', sourceType: 'twitch_highlight_batch', vodId: '1234567890',
+    id: 'batch-1', sourceType: 'twitch_highlight_batch',
+    discoverySource: options.discoverySource || 'twitch_clips_api', vodId: '1234567890',
     highlights: structuredClone(moments), streamTitle: 'Saevond ranked session',
     vodDurationSeconds: 3600, autoPublishEligible: true, publicationStatus: 'pending',
     pipelineVersion: 2, thumbnailStatus: 'pending', status: 'clip_queued'
   };
   const drafts = new Map([[batch.id, batch]]);
   const counters = {
-    clipCreates: 0, clipMetadataChecks: 0, readyLogs: [], uploads: [], thumbnailSets: 0, thumbnailCreates: 0,
+    clipCreates: 0, clipMetadataChecks: 0, readyLogs: [], holdLogs: [], publishedLogs: [],
+    uploads: [], thumbnailSets: 0, thumbnailCreates: 0,
     thumbnailSource: null, thumbnailOptions: null,
     shortRenders: 0, gameplayVerifications: 0, assemblyTarget: null, validationTarget: null,
     seo: [], playlists: [], visibilityMutations: 0,
@@ -320,6 +322,9 @@ async function harness(t, options = {}) {
     uploadDir, store, twitch, video, youtube, seo, autoAssignPlaylist,
     buildHighlightTimeline, buildHighlightDescription, cleanText,
     autoPublish: options.autoPublish !== false,
+    canAutoPublish: async () => options.canAutoPublish !== false,
+    logHeld: (batchId, reason) => counters.holdLogs.push({ batchId, reason }),
+    logPublished: (batchId, shortCount) => counters.publishedLogs.push({ batchId, shortCount }),
     maxAutoAttempts: options.maxAutoAttempts,
     sleep: options.sleep || (async () => {}),
     clipMetadataPollIntervalMs: options.clipMetadataPollIntervalMs || 5000,
@@ -401,6 +406,32 @@ test('complete production validates media and timestamps, then publishes all out
   assert.equal(h.counters.publications.length, 4);
   assert.equal(h.counters.visibilityMutations, 4);
   assert.equal(h.counters.publicationChecks.length, 8);
+  assert.deepEqual(h.counters.publishedLogs, [{ batchId: h.batch.id, shortCount: 3 }]);
+});
+
+test('automatic publishing fails closed when the YouTube approval scope is missing', async (t) => {
+  const h = await harness(t, { autoPublish: true, canAutoPublish: false });
+  await h.processor(h.batch.id);
+
+  const parent = h.drafts.get(h.batch.id);
+  const shorts = [...h.drafts.values()].filter((draft) => draft.sourceType === 'twitch_highlight_short');
+  assert.equal(parent.status, 'awaiting_owner_approval');
+  assert.equal(parent.publicationStatus, 'pending');
+  assert.ok(shorts.every((draft) => draft.status === 'awaiting_owner_approval'));
+  assert.ok(h.counters.uploads.every((upload) => upload.privacyStatus === 'private'));
+  assert.equal(h.counters.publications.length, 0);
+  assert.deepEqual(h.counters.holdLogs, [{
+    batchId: h.batch.id, reason: 'youtube_force_ssl_scope_missing'
+  }]);
+});
+
+test('automatic publishing excludes unsupported discovery sources', async (t) => {
+  const h = await harness(t, { autoPublish: true, discoverySource: 'twitch_community_clip' });
+  await h.processor(h.batch.id);
+
+  assert.equal(h.drafts.get(h.batch.id).status, 'awaiting_owner_approval');
+  assert.equal(h.counters.publications.length, 0);
+  assert.ok(h.counters.uploads.every((upload) => upload.privacyStatus === 'private'));
 });
 
 test('new Twitch clip metadata is polled until the generated clip is linked to its VOD', async (t) => {
