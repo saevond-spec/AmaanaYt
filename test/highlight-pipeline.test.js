@@ -435,13 +435,18 @@ test('automatic publishing excludes unsupported discovery sources', async (t) =>
   assert.ok(h.counters.uploads.every((upload) => upload.privacyStatus === 'private'));
 });
 
-test('new Twitch clip metadata is polled until the generated clip is linked to its VOD', async (t) => {
-  const h = await harness(t, { metadataPendingAttempts: 4, clipMetadataMaxAttempts: 5 });
+test('new community clip metadata is polled, then remains private for owner review', async (t) => {
+  const h = await harness(t, {
+    discoverySource: 'twitch_community_clip',
+    metadataPendingAttempts: 4, clipMetadataMaxAttempts: 5
+  });
   await h.processor(h.batch.id);
-  assert.equal(h.drafts.get(h.batch.id).status, 'completed');
+  assert.equal(h.drafts.get(h.batch.id).status, 'awaiting_owner_approval');
   assert.equal(h.counters.clipMetadataChecks, 7);
   assert.equal(h.counters.clipCreates, 3);
   assert.equal(h.counters.uploads.filter((upload) => upload.succeeded).length, 4);
+  assert.equal(h.counters.publications.length, 0);
+  assert.ok(h.counters.uploads.every((upload) => upload.privacyStatus === 'private'));
 });
 
 test('discovered batches verify accepted VOD requests when Twitch link metadata remains blank', async (t) => {
@@ -509,7 +514,10 @@ test('live-captured batches reuse screened clips and leave YouTube uploads priva
 });
 
 test('bounded metadata polling schedules retry and reuses an existing Twitch clip', async (t) => {
-  const h = await harness(t, { metadataPendingAlways: true, clipMetadataMaxAttempts: 2 });
+  const h = await harness(t, {
+    discoverySource: 'twitch_community_clip',
+    metadataPendingAlways: true, clipMetadataMaxAttempts: 2
+  });
   await h.processor(h.batch.id);
   assert.equal(h.drafts.get(h.batch.id).status, 'clip_retry_wait');
   assert.equal(h.drafts.get(h.batch.id).twitchClips.length, 1);
