@@ -124,7 +124,8 @@ async function harness(t, options = {}) {
     id: 'batch-1', sourceType: 'twitch_highlight_batch',
     discoverySource: options.discoverySource || 'twitch_clips_api', vodId: '1234567890',
     highlights: structuredClone(moments), streamTitle: 'Saevond ranked session',
-    vodDurationSeconds: 3600, autoPublishEligible: true, publicationStatus: 'pending',
+    vodDurationSeconds: 3600, targetHighlightDurationSeconds: 90,
+    autoPublishEligible: true, publicationStatus: 'pending',
     pipelineVersion: 2, thumbnailStatus: 'pending', status: 'clip_queued'
   };
   const drafts = new Map([[batch.id, batch]]);
