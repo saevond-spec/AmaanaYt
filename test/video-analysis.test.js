@@ -132,7 +132,7 @@ test('malformed and schema-invalid responses fall through to configured model fa
   ];
   const result = await analyzeVideo(videoUrl, {
     apiKey: 'test-key', model: 'gemini-3.8-flash',
-    fallbackModels: ['gemini-3.5-flash-lite', 'gemini-2.5-flash'],
+    fallbackModels: ['gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.0-flash'],
     random: () => 0, circuitBreaker: createModelCircuitBreaker(),
     sleep: async (ms) => { delays.push(ms); },
     fetchImpl: async (url) => {
