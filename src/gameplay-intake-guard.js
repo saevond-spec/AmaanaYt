@@ -48,6 +48,7 @@ function hasProtectedPublication(drafts) {
     draft && (
       draft.status === 'published' || draft.status === 'scheduled' ||
       draft.publicationStatus === 'published' || draft.publicationStatus === 'scheduled' ||
+      draft.publicationStatus === 'publishing' ||
       draft.youtubePrivacyStatus === 'public'
     ));
 }
