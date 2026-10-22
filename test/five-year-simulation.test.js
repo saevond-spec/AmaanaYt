@@ -29,10 +29,14 @@ test('five-year simulation reports draft volume, queue throughput, and quota hea
   assert.equal(result.youtubeApiQuota.scheduledMarketSearchCallsAcrossFiveYears, 7304);
   assert.equal(result.youtubeApiQuota.maximumMarketSearchCallsAcrossFiveYears, 10956);
   assert.equal(result.youtubeApiQuota.maximumDailyMarketSearchBucketUtilizationPercent, 6);
-  assert.equal(result.youtubeApiQuota.publicationDailyQuotaUnits, 204);
-  assert.equal(result.youtubeApiQuota.currentPipelineDailyQuotaUnits, 6016);
-  assert.equal(result.youtubeApiQuota.combinedDailyQuotaUnitsWith50PerDayThumbnailBackfill, 8516);
-  assert.equal(result.youtubeApiQuota.headroomWithBulkThumbnailBackfillBeforeReads, 1484);
+  assert.equal(result.youtubeApiQuota.publicationVideoListCallsPerOutput, 2);
+  assert.equal(result.youtubeApiQuota.publicationTargetChannelChecksPerOutput, 1);
+  assert.equal(result.youtubeApiQuota.publicationReadUnitsPerOutput, 3);
+  assert.equal(result.youtubeApiQuota.publicationUnitsPerOutput, 53);
+  assert.equal(result.youtubeApiQuota.publicationDailyQuotaUnits, 212);
+  assert.equal(result.youtubeApiQuota.currentPipelineDailyQuotaUnits, 6024);
+  assert.equal(result.youtubeApiQuota.combinedDailyQuotaUnitsWith50PerDayThumbnailBackfill, 8524);
+  assert.equal(result.youtubeApiQuota.headroomWithBulkThumbnailBackfillBeforeReads, 1476);
 });
 
 test('five-year lifecycle simulation exercises baseline and deterministic recovery stress', () => {
@@ -43,7 +47,7 @@ test('five-year lifecycle simulation exercises baseline and deterministic recove
   const stress = reliability.recoveryStress;
 
   assert.equal(reliability.assumptions.modelDays, 1826);
-  assert.match(reliability.assumptions.timestampSource, /SweatyClanker/);
+  assert.match(reliability.assumptions.timestampSource, /Amaana discovers its own archived Twitch VODs/);
   assert.match(reliability.assumptions.finishedOutputDefinition, /processingStatus=succeeded/);
   assert.match(reliability.assumptions.finishedOutputDefinition, /archived VOD/);
   assert.match(reliability.assumptions.studioChecksLimit, /does not report Studio/);

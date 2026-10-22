@@ -57,5 +57,9 @@ services:
         sync: false
       - key: VIDEO_ANALYSIS_TIMEOUT_MS
         value: '180000'
+      - key: ENABLE_GAMEPLAY_SCREENING
+        value: 'true'
+      - key: HIGHLIGHT_AUTO_PUBLISH
+        value: 'true'
       - key: UPLOAD_DIR
         value: /tmp/uploads

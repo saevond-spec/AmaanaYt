@@ -121,14 +121,17 @@ async function harness(t, options = {}) {
   const uploadDir = await fs.mkdtemp(path.join(os.tmpdir(), 'amaana-highlight-'));
   t.after(() => fs.rm(uploadDir, { recursive: true, force: true }));
   const batch = {
-    id: 'batch-1', sourceType: 'twitch_highlight_batch', vodId: '1234567890',
+    id: 'batch-1', sourceType: 'twitch_highlight_batch',
+    discoverySource: options.discoverySource || 'twitch_clips_api', vodId: '1234567890',
     highlights: structuredClone(moments), streamTitle: 'Saevond ranked session',
-    vodDurationSeconds: 3600, autoPublishEligible: true, publicationStatus: 'pending',
+    vodDurationSeconds: 3600, targetHighlightDurationSeconds: 90,
+    autoPublishEligible: true, publicationStatus: 'pending',
     pipelineVersion: 2, thumbnailStatus: 'pending', status: 'clip_queued'
   };
   const drafts = new Map([[batch.id, batch]]);
   const counters = {
-    clipCreates: 0, clipMetadataChecks: 0, readyLogs: [], uploads: [], thumbnailSets: 0, thumbnailCreates: 0,
+    clipCreates: 0, clipMetadataChecks: 0, readyLogs: [], holdLogs: [], publishedLogs: [],
+    uploads: [], thumbnailSets: 0, thumbnailCreates: 0,
     thumbnailSource: null, thumbnailOptions: null,
     shortRenders: 0, gameplayVerifications: 0, assemblyTarget: null, validationTarget: null,
     seo: [], playlists: [], visibilityMutations: 0,
@@ -320,6 +323,9 @@ async function harness(t, options = {}) {
     uploadDir, store, twitch, video, youtube, seo, autoAssignPlaylist,
     buildHighlightTimeline, buildHighlightDescription, cleanText,
     autoPublish: options.autoPublish !== false,
+    canAutoPublish: async () => options.canAutoPublish !== false,
+    logHeld: (batchId, reason) => counters.holdLogs.push({ batchId, reason }),
+    logPublished: (batchId, shortCount) => counters.publishedLogs.push({ batchId, shortCount }),
     maxAutoAttempts: options.maxAutoAttempts,
     sleep: options.sleep || (async () => {}),
     clipMetadataPollIntervalMs: options.clipMetadataPollIntervalMs || 5000,
@@ -401,15 +407,46 @@ test('complete production validates media and timestamps, then publishes all out
   assert.equal(h.counters.publications.length, 4);
   assert.equal(h.counters.visibilityMutations, 4);
   assert.equal(h.counters.publicationChecks.length, 8);
+  assert.deepEqual(h.counters.publishedLogs, [{ batchId: h.batch.id, shortCount: 3 }]);
 });
 
-test('new Twitch clip metadata is polled until the generated clip is linked to its VOD', async (t) => {
-  const h = await harness(t, { metadataPendingAttempts: 4, clipMetadataMaxAttempts: 5 });
+test('automatic publishing fails closed when the YouTube approval scope is missing', async (t) => {
+  const h = await harness(t, { autoPublish: true, canAutoPublish: false });
   await h.processor(h.batch.id);
-  assert.equal(h.drafts.get(h.batch.id).status, 'completed');
+
+  const parent = h.drafts.get(h.batch.id);
+  const shorts = [...h.drafts.values()].filter((draft) => draft.sourceType === 'twitch_highlight_short');
+  assert.equal(parent.status, 'awaiting_owner_approval');
+  assert.equal(parent.publicationStatus, 'pending');
+  assert.ok(shorts.every((draft) => draft.status === 'awaiting_owner_approval'));
+  assert.ok(h.counters.uploads.every((upload) => upload.privacyStatus === 'private'));
+  assert.equal(h.counters.publications.length, 0);
+  assert.deepEqual(h.counters.holdLogs, [{
+    batchId: h.batch.id, reason: 'youtube_force_ssl_scope_missing'
+  }]);
+});
+
+test('automatic publishing excludes unsupported discovery sources', async (t) => {
+  const h = await harness(t, { autoPublish: true, discoverySource: 'twitch_community_clip' });
+  await h.processor(h.batch.id);
+
+  assert.equal(h.drafts.get(h.batch.id).status, 'awaiting_owner_approval');
+  assert.equal(h.counters.publications.length, 0);
+  assert.ok(h.counters.uploads.every((upload) => upload.privacyStatus === 'private'));
+});
+
+test('new community clip metadata is polled, then remains private for owner review', async (t) => {
+  const h = await harness(t, {
+    discoverySource: 'twitch_community_clip',
+    metadataPendingAttempts: 4, clipMetadataMaxAttempts: 5
+  });
+  await h.processor(h.batch.id);
+  assert.equal(h.drafts.get(h.batch.id).status, 'awaiting_owner_approval');
   assert.equal(h.counters.clipMetadataChecks, 7);
   assert.equal(h.counters.clipCreates, 3);
   assert.equal(h.counters.uploads.filter((upload) => upload.succeeded).length, 4);
+  assert.equal(h.counters.publications.length, 0);
+  assert.ok(h.counters.uploads.every((upload) => upload.privacyStatus === 'private'));
 });
 
 test('discovered batches verify accepted VOD requests when Twitch link metadata remains blank', async (t) => {
@@ -477,7 +514,10 @@ test('live-captured batches reuse screened clips and leave YouTube uploads priva
 });
 
 test('bounded metadata polling schedules retry and reuses an existing Twitch clip', async (t) => {
-  const h = await harness(t, { metadataPendingAlways: true, clipMetadataMaxAttempts: 2 });
+  const h = await harness(t, {
+    discoverySource: 'twitch_community_clip',
+    metadataPendingAlways: true, clipMetadataMaxAttempts: 2
+  });
   await h.processor(h.batch.id);
   assert.equal(h.drafts.get(h.batch.id).status, 'clip_retry_wait');
   assert.equal(h.drafts.get(h.batch.id).twitchClips.length, 1);

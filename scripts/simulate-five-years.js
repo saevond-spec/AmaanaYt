@@ -297,7 +297,7 @@ function simulateProductionHorizon(input, days) {
     assumptions: {
       modelDays: days, streamsPerDay, momentsPerStream, workerAttemptsPerDay: attemptsPerDay,
       maxAttemptsPerBatch: maxAttempts,
-      timestampSource: 'SweatyClanker supplies candidate VOD timestamps; the app checks them against Twitch VOD and clip metadata.',
+      timestampSource: 'Amaana discovers its own archived Twitch VODs and verifies gameplay frames, clip timestamps, and media using its connected Twitch account.',
       finishedOutputDefinition: 'Livestreams qualify as source material only when Twitch returns the broadcaster-owned archived VOD with a valid duration. Each YouTube video and Short needs the expected video ID, liveBroadcastContent=none, uploadStatus=processed, and processingStatus=succeeded before any bundle output can publish.',
       studioChecksLimit: 'YouTube Data API processing state does not report Studio copyright or suitability checks; this run does not claim those checks are clear.',
       stressSchedule: 'Deterministic fault intervals are repeatable test injections, not measured production failure rates.'
@@ -394,7 +394,14 @@ function simulateFiveYears(input = {}) {
   const uploadsPerStream = 1 + momentsPerStream;
   const videoInsertCallsPerDay = streamsPerDay * uploadsPerStream;
   const videoPublicationCallsPerDay = autoPublish ? videoInsertCallsPerDay : 0;
-  const publicationDailyUnits = videoPublicationCallsPerDay * (updateUnits + videoListUnits);
+  // Each public transition uses the pipeline readiness videos.list, a fresh
+  // mutation-boundary videos.list, channels.list to verify @saevond, then videos.update.
+  const publicationVideoListCallsPerOutput = 2;
+  const publicationTargetChannelChecksPerOutput = 1;
+  const publicationReadUnitsPerOutput =
+    (publicationVideoListCallsPerOutput + publicationTargetChannelChecksPerOutput) * videoListUnits;
+  const publicationUnitsPerOutput = updateUnits + publicationReadUnitsPerOutput;
+  const publicationDailyUnits = videoPublicationCallsPerDay * publicationUnitsPerOutput;
   const currentDailyUnits = seoWriteDailyLimit * updateUnits + streamsPerDay * thumbnailUnits +
     playlistAutoDailyUnits + publicationDailyUnits;
   const bulkThumbnailDailyUnits = thumbnailBackfillDailyLimit * thumbnailUnits;
@@ -436,6 +443,8 @@ function simulateFiveYears(input = {}) {
       maximumDailyMarketSearchBucketUtilizationPercent: marketSearchDailyLimit > 0
         ? Number((100 * marketSearchCallsPerDay / marketSearchDailyLimit).toFixed(2)) : null,
       automaticPublicationEnabled: autoPublish, publicationVideoUpdatesPerDay: videoPublicationCallsPerDay,
+      publicationVideoListCallsPerOutput, publicationTargetChannelChecksPerOutput,
+      publicationReadUnitsPerOutput, publicationUnitsPerOutput,
       publicationDailyQuotaUnits: publicationDailyUnits, playlistItemInsertUnits: playlistInsertUnits,
       playlistItemCheckUnits: playlistCheckUnits, ownedPlaylistListMaxPages: playlistListMaxPages,
       playlistQuotaCostsSourceDate: '2026-09-15',

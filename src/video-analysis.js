@@ -162,6 +162,14 @@ Moment times are approximate suggestions for human review, never verified chapte
     });
   };
   let lastResponse;
+  let lastOutputError = null;
+  const invalidOutput = (message, cause) => {
+    const error = new Error(message);
+    error.status = 502;
+    error.code = 'VIDEO_ANALYSIS_INVALID_MODEL_OUTPUT';
+    if (cause) error.cause = cause;
+    return error;
+  };
   for (const [index, requestedModel] of models.entries()) {
     const remaining = circuitBreaker.remaining(requestedModel);
     if (remaining) {
@@ -180,12 +188,33 @@ Moment times are approximate suggestions for human review, never verified chapte
     circuitBreaker.record(requestedModel, response.status);
     if (response.status === 503) { lastResponse = response; continue; }
     if (!response.ok) throw await providerError(response);
-    const body = await response.json();
+    let body;
+    try {
+      body = await response.json();
+    } catch (error) {
+      lastOutputError = invalidOutput('Video analysis provider returned invalid response JSON', error);
+      continue;
+    }
     const output = body.candidates?.[0]?.content?.parts?.filter((part) => !part.thought)
       .map((part) => part.text || '').join('');
-    if (!output || output.length > 30000) throw new Error('Video analysis provider returned empty or oversized content');
-    return validateAnalysis(JSON.parse(output), durationSeconds, requestedModel);
+    if (!output || output.length > 30000) {
+      lastOutputError = invalidOutput('Video analysis provider returned empty or oversized content');
+      continue;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(output);
+    } catch (error) {
+      lastOutputError = invalidOutput('Video analysis provider returned malformed analysis JSON', error);
+      continue;
+    }
+    try {
+      return validateAnalysis(parsed, durationSeconds, requestedModel);
+    } catch (error) {
+      lastOutputError = invalidOutput('Video analysis provider returned unusable analysis content', error);
+    }
   }
+  if (lastOutputError) throw lastOutputError;
   const error = await providerError(lastResponse || { status: 503 });
   if (lastResponse?.circuitOpen) error.retryAfterMs = lastResponse.retryAfterMs;
   throw error;
