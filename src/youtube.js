@@ -8,6 +8,7 @@ const { summarizeYoutubeSearchPerformance, hasYoutubeAnalyticsReadScopes, youtub
 const { youtubeVideoQualityQueries } = require('./youtube-video-quality');
 const { normalizeJapaneseChannelLocalization } = require('./channel-localization');
 const { normalizeJapaneseVideoLocalization } = require('./japanese-translation');
+const { buildPublishStatus } = require('./youtube-publication');
 
 const SCOPES = [
   'https://www.googleapis.com/auth/youtube.upload',
@@ -91,15 +92,36 @@ async function uploadPrivate({ filePath, title, description, tags, madeForKids =
 
 async function publish(videoId, publishAt) {
   if (!await canApprove()) throw new Error('Reconnect YouTube in the owner dashboard to grant video approval permission');
-  const youtube = await service();
-  const status = publishAt
-    ? { privacyStatus: 'private', publishAt: new Date(publishAt).toISOString() }
-    : { privacyStatus: 'public' };
-  const response = await youtube.videos.update({
-    part: ['status'],
-    requestBody: { id: videoId, status }
+  const current = await getVideo(videoId);
+  if (!current) {
+    const error = new Error('YouTube video was not found');
+    error.status = 404;
+    throw error;
+  }
+  const channelId = String(current.snippet?.channelId || '');
+  if (!channelId) {
+    const error = new Error('YouTube video has no verifiable channel owner');
+    error.status = 403;
+    throw error;
+  }
+  await assertTargetChannel(channelId);
+  const status = buildPublishStatus({
+    videoId, current, targetChannelId: channelId, publishAt
   });
-  return response.data;
+  const youtube = await service();
+  try {
+    const response = await youtube.videos.update({
+      part: ['status'],
+      requestBody: { id: videoId, status }
+    }, { headers: { 'If-Match': current.etag } });
+    return response.data;
+  } catch (error) {
+    if (Number(error.status || error.code) === 412) {
+      error.status = 409;
+      error.message = 'Video settings changed before publication; refresh and retry';
+    }
+    throw error;
+  }
 }
 
 async function setThumbnail(videoId, filePath) {
