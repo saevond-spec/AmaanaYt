@@ -119,6 +119,45 @@ test('analysis retries 503 on a fallback model and honors short 429 Retry-After'
   assert.deepEqual(delays, [1000, 20000]);
 });
 
+test('malformed and schema-invalid responses fall through to configured model fallbacks', async () => {
+  const urls = [];
+  const delays = [];
+  const replies = [
+    { async json() { throw new SyntaxError('malformed response JSON'); } },
+    { async json() { return { candidates: [{ content: { parts: [{ text: '{invalid' }] } }] }; } },
+    { async json() { return { candidates: [{ content: { parts: [{ text: JSON.stringify({
+      summary: '', topics: [], visualContext: ''
+    }) }] } }] }; } },
+    { async json() { return { candidates: [{ content: { parts: [{ text: JSON.stringify(rawAnalysis) }] } }] }; } }
+  ];
+  const result = await analyzeVideo(videoUrl, {
+    apiKey: 'test-key', model: 'gemini-3.8-flash',
+    fallbackModels: ['gemini-3.5-flash-lite', 'gemini-2.5-flash'],
+    random: () => 0, circuitBreaker: createModelCircuitBreaker(),
+    sleep: async (ms) => { delays.push(ms); },
+    fetchImpl: async (url) => {
+      urls.push(url);
+      return { ok: true, status: 200, json: replies.shift().json };
+    }
+  });
+
+  assert.equal(result.model, 'gemini-2.5-flash');
+  assert.equal(urls.length, 3);
+  assert.deepEqual(delays, [1000, 5000]);
+});
+
+test('all malformed model outputs fail with a retryable, classified error', async () => {
+  const error = await analyzeVideo(videoUrl, {
+    apiKey: 'test-key', model: 'gemini-3.8-flash', fallbackModels: ['gemini-3.5-flash-lite'],
+    circuitBreaker: createModelCircuitBreaker(), sleep: async () => {},
+    fetchImpl: async () => ({ ok: true, status: 200,
+      async json() { return { candidates: [{ content: { parts: [{ text: '{not-json' }] } }] }; } })
+  }).then(() => null, (failure) => failure);
+
+  assert.equal(error.status, 502);
+  assert.equal(error.code, 'VIDEO_ANALYSIS_INVALID_MODEL_OUTPUT');
+});
+
 test('analysis exposes bounded, redacted provider diagnostics for permanent 403 responses', async () => {
   await assert.rejects(analyzeVideo(videoUrl, {
     apiKey: 'test-key', model: 'gemini-3.8-flash',
