@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const { hasProtectedPublication } = require('./gameplay-intake-guard');
+const { hasProtectedPublication, isPlaceholderTestTitle } = require('./gameplay-intake-guard');
 const { Pool } = require('pg');
 const { prioritizeSeoAutoCandidates } = require('./seo-priority');
 const SEO_AUTOPILOT_VERSION = require('./seo-autopilot-version');
@@ -139,6 +139,14 @@ function decrypt(payload) {
   ]).toString('utf8'));
 }
 
+async function lockVodGroup(client, vodId) {
+  if (!String(vodId || '').trim()) return;
+  await client.query(
+    "SELECT pg_advisory_xact_lock(hashtextextended('amaana-vod-group:' || $1, 0))",
+    [String(vodId)]
+  );
+}
+
 async function saveEncryptedState(stateKey, value) {
   await init();
   if (!/^[a-z0-9_:-]{1,80}$/i.test(stateKey)) throw new Error('Invalid state key');
@@ -191,11 +199,74 @@ async function getDraft(id) {
 
 async function addDraft(draft) {
   await init();
-  await pool.query(
-    'INSERT INTO amaana_drafts (id, payload) VALUES ($1, $2::jsonb)',
-    [draft.id, JSON.stringify(draft)]
-  );
-  return draft;
+  const hasVodGroup = ['twitch_vod', 'twitch_highlight_batch'].includes(draft.sourceType) &&
+    String(draft.vodId || '').trim();
+  if (!draft.parentId && !hasVodGroup) {
+    await pool.query(
+      'INSERT INTO amaana_drafts (id, payload) VALUES ($1, $2::jsonb)',
+      [draft.id, JSON.stringify(draft)]
+    );
+    return draft;
+  }
+
+  // Child creation and owner exclusion share the same parent-row lock. This means
+  // an insert that wins first is visible to the exclusion's subsequent child scan;
+  // an exclusion that wins first makes the parent ineligible for new children.
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    if (hasVodGroup) await lockVodGroup(client, draft.vodId);
+    if (draft.parentId) {
+      const parentSnapshot = await client.query(
+        'SELECT payload FROM amaana_drafts WHERE id = $1', [draft.parentId]
+      );
+      const parent = parentSnapshot.rows[0]?.payload;
+      if (!parent) {
+        throw Object.assign(new Error('Parent highlight no longer exists; refresh and retry.'), { status: 409 });
+      }
+      if (parent.sourceType === 'twitch_highlight_batch' && parent.vodId) {
+        await lockVodGroup(client, parent.vodId);
+      }
+      let lockedParent = null;
+      if (parent.sourceType === 'twitch_highlight_batch' && parent.vodId) {
+        const parents = await client.query(`SELECT id, payload FROM amaana_drafts
+          WHERE payload->>'sourceType' = 'twitch_highlight_batch'
+            AND payload->>'vodId' = $1
+          ORDER BY id FOR UPDATE`, [String(parent.vodId)]);
+        lockedParent = parents.rows.find((row) => String(row.id) === String(draft.parentId))?.payload || null;
+      } else {
+        const locked = await client.query(
+          'SELECT payload FROM amaana_drafts WHERE id = $1 FOR UPDATE', [draft.parentId]
+        );
+        lockedParent = locked.rows[0]?.payload || null;
+      }
+      if (!lockedParent || lockedParent.status === 'excluded_by_owner' ||
+          hasProtectedPublication([lockedParent])) {
+        throw Object.assign(new Error('Parent highlight was excluded or publication has started; no child draft was created.'), { status: 409 });
+      }
+    }
+    if (hasVodGroup) {
+      const excluded = await client.query(`SELECT 1 FROM amaana_drafts
+        WHERE payload->>'vodId' = $1
+          AND payload->>'sourceType' IN ('twitch_vod', 'twitch_highlight_batch')
+          AND payload->>'status' = 'excluded_by_owner'
+        LIMIT 1`, [String(draft.vodId)]);
+      if (excluded.rowCount) {
+        throw Object.assign(new Error('This VOD group was excluded by the owner; no new drafts were created.'), { status: 409 });
+      }
+    }
+    await client.query(
+      'INSERT INTO amaana_drafts (id, payload) VALUES ($1, $2::jsonb)',
+      [draft.id, JSON.stringify(draft)]
+    );
+    await client.query('COMMIT');
+    return draft;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function updateDraft(id, patch) {
@@ -214,6 +285,28 @@ async function updateDraft(id, patch) {
     if (current.status === 'excluded_by_owner') {
       await client.query('ROLLBACK');
       return current;
+    }
+    // The manual approval path owns this publication claim. A worker that started
+    // earlier must not overwrite it or publish the same output concurrently.
+    if (current.publicationStatus === 'publishing' && current.publicationClaimId &&
+        patch.publicationClaimId !== current.publicationClaimId) {
+      await client.query('ROLLBACK');
+      return current;
+    }
+    // Automatic bundle publication fences the parent row. A concurrent manual
+    // Short approval claims the parent before the child; detect that claim while
+    // holding the parent lock so the two paths cannot publish the same Short.
+    if (patch.publicationStatus === 'publishing' &&
+        current.sourceType === 'twitch_highlight_batch' && !current.publicationClaimId) {
+      const activeChildren = await client.query(`SELECT payload FROM amaana_drafts
+        WHERE payload->>'sourceType' = 'twitch_highlight_short'
+          AND payload->>'parentId' = $1
+          AND payload->>'publicationStatus' IN ('publishing', 'ambiguous')
+        ORDER BY id FOR UPDATE`, [String(id)]);
+      if (activeChildren.rows.length) {
+        await client.query('ROLLBACK');
+        return current;
+      }
     }
     const updated = { ...current, ...patch, updatedAt: new Date().toISOString() };
     await client.query(
@@ -272,6 +365,193 @@ async function excludeDrafts(ids, reason = 'owner_excluded_non_gameplay_test') {
       );
       updated.push(payload);
     }
+    await client.query('COMMIT');
+    return updated;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function excludeTestVodGroup(id, reason = 'non_gameplay_test_stream') {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(id || ''))) {
+    throw Object.assign(new Error('A valid draft ID is required for exclusion'), { status: 400 });
+  }
+  await init();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const selectedResult = await client.query(
+      'SELECT payload FROM amaana_drafts WHERE id = $1', [id]
+    );
+    const selected = selectedResult.rows[0]?.payload;
+    if (!selected) throw Object.assign(new Error('Draft not found'), { status: 404 });
+    const rootId = selected.sourceType === 'twitch_highlight_short' ? selected.parentId : selected.id;
+    const rootSnapshot = selected.sourceType === 'twitch_highlight_short'
+      ? await client.query('SELECT payload FROM amaana_drafts WHERE id = $1', [rootId])
+      : selectedResult;
+    const root = rootSnapshot.rows[0]?.payload;
+    if (!root || !['twitch_highlight_batch', 'twitch_vod'].includes(root.sourceType) ||
+        !String(root.vodId || '').trim() || !isPlaceholderTestTitle(root.streamTitle)) {
+      throw Object.assign(new Error('Only a test-titled Twitch highlight VOD can be excluded this way.'), { status: 409 });
+    }
+
+    await lockVodGroup(client, root.vodId);
+
+    // Lock in one canonical order: batch parents, source VOD rows, then Shorts.
+    // Child inserts lock their parent first; manual publication claims do the same.
+    // The child query is a separate READ COMMITTED statement after parent locks,
+    // so it sees a Short insert that committed while this transaction waited.
+    const batchResult = await client.query(`SELECT id, payload FROM amaana_drafts
+      WHERE payload->>'sourceType' = 'twitch_highlight_batch'
+        AND payload->>'vodId' = $1
+      ORDER BY id FOR UPDATE`, [String(root.vodId)]);
+    const vodResult = await client.query(`SELECT id, payload FROM amaana_drafts
+      WHERE payload->>'sourceType' = 'twitch_vod'
+        AND payload->>'vodId' = $1
+      ORDER BY id FOR UPDATE`, [String(root.vodId)]);
+    const batchIds = batchResult.rows.map((row) => String(row.id));
+    const shortResult = batchIds.length
+      ? await client.query(`SELECT id, payload FROM amaana_drafts
+          WHERE payload->>'sourceType' = 'twitch_highlight_short'
+            AND payload->>'parentId' = ANY($1::text[])
+          ORDER BY id FOR UPDATE`, [batchIds])
+      : { rows: [] };
+    const rows = [...batchResult.rows, ...vodResult.rows, ...shortResult.rows];
+    const group = rows.map((row) => row.payload);
+    const currentSelected = group.find((draft) => String(draft.id) === String(id));
+    if (!currentSelected) {
+      throw Object.assign(new Error('Draft changed while exclusion was being prepared; refresh and retry.'), { status: 409 });
+    }
+    const currentRoot = currentSelected.sourceType === 'twitch_highlight_short'
+      ? group.find((draft) => String(draft.id) === String(currentSelected.parentId))
+      : currentSelected;
+    if (!currentRoot || !['twitch_highlight_batch', 'twitch_vod'].includes(currentRoot.sourceType) ||
+        String(currentRoot.vodId || '') !== String(root.vodId) ||
+        !isPlaceholderTestTitle(currentRoot.streamTitle)) {
+      throw Object.assign(new Error('The selected draft is no longer part of an eligible test VOD group.'), { status: 409 });
+    }
+    if (hasProtectedPublication(group)) {
+      throw Object.assign(new Error('A related video is published, scheduled, or entering publication; exclusion left the group unchanged.'), { status: 409 });
+    }
+    const excludedAt = new Date().toISOString();
+    const updated = [];
+    for (const row of rows) {
+      const payload = {
+        ...row.payload,
+        status: 'excluded_by_owner', productionState: 'excluded',
+        publicationStatus: 'excluded', autoPublishEligible: false,
+        nextClipAttemptAt: null, excludedAt,
+        exclusionReason: String(reason || 'non_gameplay_test_stream').slice(0, 80),
+        updatedAt: excludedAt
+      };
+      await client.query(
+        'UPDATE amaana_drafts SET payload = $2::jsonb, updated_at = NOW() WHERE id = $1',
+        [row.id, JSON.stringify(payload)]
+      );
+      updated.push(payload);
+    }
+    await client.query('COMMIT');
+    return updated;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function claimDraftForPublication(id) {
+  await init();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const snapshotResult = await client.query(
+      'SELECT payload FROM amaana_drafts WHERE id = $1', [id]
+    );
+    const snapshot = snapshotResult.rows[0]?.payload;
+    if (!snapshot) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    const parentSnapshot = snapshot.sourceType === 'twitch_highlight_short'
+      ? await client.query('SELECT payload FROM amaana_drafts WHERE id = $1', [snapshot.parentId])
+      : null;
+    const parentBeforeLock = parentSnapshot?.rows[0]?.payload || null;
+    const vodId = String(parentBeforeLock?.vodId || snapshot.vodId || '');
+    await lockVodGroup(client, vodId);
+    let lockedParents = [];
+    if (vodId) {
+      const parentRows = await client.query(`SELECT id, payload FROM amaana_drafts
+        WHERE payload->>'sourceType' = 'twitch_highlight_batch'
+          AND payload->>'vodId' = $1
+        ORDER BY id FOR UPDATE`, [vodId]);
+      lockedParents = parentRows.rows;
+    } else if (parentBeforeLock) {
+      const lockedParent = await client.query(
+        'SELECT id, payload FROM amaana_drafts WHERE id = $1 FOR UPDATE', [snapshot.parentId]
+      );
+      lockedParents = lockedParent.rows;
+    }
+    const currentResult = await client.query(
+      'SELECT payload FROM amaana_drafts WHERE id = $1 FOR UPDATE', [id]
+    );
+    const current = currentResult.rows[0]?.payload;
+    if (!current || current.status !== 'awaiting_owner_approval' ||
+        current.publicationStatus === 'publishing' || current.publicationStatus === 'ambiguous' ||
+        current.publicationStatus === 'excluded' ||
+        current.publicationStatus === 'published' || current.publicationStatus === 'scheduled' ||
+        current.status === 'excluded_by_owner') {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    if (current.sourceType === 'twitch_highlight_short') {
+      const parent = lockedParents.find((row) => String(row.id) === String(current.parentId))?.payload;
+      if (!parent || parent.status === 'excluded_by_owner' || parent.publicationStatus === 'excluded' ||
+          parent.publicationStatus === 'publishing' || parent.publicationStatus === 'ambiguous') {
+        await client.query('ROLLBACK');
+        return null;
+      }
+    }
+    const claimId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const claimed = {
+      ...current, status: 'publication_in_progress', publicationStatus: 'publishing',
+      publicationClaimId: claimId, publicationClaimedAt: now, updatedAt: now
+    };
+    await client.query('UPDATE amaana_drafts SET payload = $2::jsonb, updated_at = NOW() WHERE id = $1',
+      [id, JSON.stringify(claimed)]);
+    await client.query('COMMIT');
+    return claimed;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function finishDraftPublicationClaim(id, claimId, patch) {
+  await init();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query('SELECT payload FROM amaana_drafts WHERE id = $1 FOR UPDATE', [id]);
+    const current = result.rows[0]?.payload;
+    if (!current || current.status === 'excluded_by_owner' || current.publicationClaimId !== claimId) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    const keepClaim = patch.publicationStatus === 'ambiguous';
+    const updated = {
+      ...current, ...patch,
+      ...(keepClaim ? {} : { publicationClaimId: null, publicationClaimedAt: null }),
+      updatedAt: new Date().toISOString()
+    };
+    await client.query('UPDATE amaana_drafts SET payload = $2::jsonb, updated_at = NOW() WHERE id = $1',
+      [id, JSON.stringify(updated)]);
     await client.query('COMMIT');
     return updated;
   } catch (error) {
@@ -979,6 +1259,9 @@ module.exports = {
   addDraft,
   updateDraft,
   excludeDrafts,
+  excludeTestVodGroup,
+  claimDraftForPublication,
+  finishDraftPublicationClaim,
   claimTikTokDelivery,
   saveSeoSyncState,
   getSeoSyncState,

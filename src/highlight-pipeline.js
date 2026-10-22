@@ -662,6 +662,7 @@ function createHighlightProcessor(dependencies) {
         const publicationGate = await store.getDraft(id);
         if (!publicationGate || publicationGate.status === 'excluded_by_owner' ||
             publicationGate.autoPublishEligible !== true ||
+            publicationGate.publicationClaimId ||
             publicationGate.publicationStatus !== 'publishing') {
           logHeld(id, 'owner_exclusion_or_eligibility_changed_before_publication');
           return;

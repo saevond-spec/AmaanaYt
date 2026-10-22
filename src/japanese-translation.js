@@ -1,5 +1,7 @@
 'use strict';
 
+const { retryAfterDetails } = require('./seo-package');
+
 const MAX_BATCH_SIZE = 5;
 const MAX_TITLE_LENGTH = 100;
 const MAX_DESCRIPTION_LENGTH = 5000;
@@ -9,6 +11,14 @@ function inputError(message) {
   const error = new Error(message);
   error.status = 400;
   return error;
+}
+
+function retryInfoDelay(body) {
+  const detail = (Array.isArray(body?.error?.details) ? body.error.details : [])
+    .find((item) => String(item?.['@type'] || '').endsWith('google.rpc.RetryInfo'));
+  const match = String(detail?.retryDelay || '').match(/^(\d+(?:\.\d+)?)s$/);
+  const seconds = match ? Number(match[1]) : NaN;
+  return Number.isFinite(seconds) && seconds >= 0 ? Math.ceil(seconds * 1000) : null;
 }
 
 function protectedTokens(value) {
@@ -116,8 +126,17 @@ async function translateJapaneseVideoLocalizations(entries, {
     throw error;
   }
   if (!response.ok) {
+    const details = retryAfterDetails(response);
+    const body = await response.json().catch(() => null);
     const error = new Error(`Japanese translation provider returned HTTP ${response.status}`);
     error.status = response.status;
+    const bodyDelay = retryInfoDelay(body);
+    if (details.retryAfterPresent || bodyDelay !== null) {
+      error.retryAfterPresent = true;
+      error.retryAfterMs = details.retryAfterPresent ? details.retryAfterMs : bodyDelay;
+    }
+    const providerCode = body?.error?.status || (typeof body?.error?.code === 'string' ? body.error.code : '');
+    if (providerCode) error.providerCode = String(providerCode).replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 80);
     throw error;
   }
   const body = await response.json();
@@ -147,6 +166,6 @@ async function translateJapaneseVideoLocalizations(entries, {
 
 module.exports = {
   MAX_BATCH_SIZE, protectedTokens, normalizeJapaneseVideoLocalization,
-  normalizeBatchEntries, translateJapaneseVideoLocalizations
+  normalizeBatchEntries, retryInfoDelay, translateJapaneseVideoLocalizations
 };
 

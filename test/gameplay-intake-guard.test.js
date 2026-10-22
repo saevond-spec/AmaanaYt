@@ -78,5 +78,7 @@ test('blocks exclusion of public, published, scheduled, or actively publishing v
   assert.equal(hasProtectedPublication([{ youtubePrivacyStatus: 'public' }]), true);
   assert.equal(hasProtectedPublication([{ publicationStatus: 'scheduled' }]), true);
   assert.equal(hasProtectedPublication([{ publicationStatus: 'publishing' }]), true);
+  assert.equal(hasProtectedPublication([{ publicationStatus: 'ambiguous' }]), true);
+  assert.equal(hasProtectedPublication([{ status: 'publication_ambiguous' }]), true);
   assert.equal(hasProtectedPublication([{ status: 'awaiting_owner_approval', youtubePrivacyStatus: 'private' }]), false);
 });

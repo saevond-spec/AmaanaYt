@@ -47,8 +47,10 @@ function hasProtectedPublication(drafts) {
   return (Array.isArray(drafts) ? drafts : []).some((draft) =>
     draft && (
       draft.status === 'published' || draft.status === 'scheduled' ||
+      draft.status === 'publication_ambiguous' ||
       draft.publicationStatus === 'published' || draft.publicationStatus === 'scheduled' ||
       draft.publicationStatus === 'publishing' ||
+      draft.publicationStatus === 'ambiguous' ||
       draft.youtubePrivacyStatus === 'public'
     ));
 }

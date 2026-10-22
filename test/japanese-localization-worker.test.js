@@ -154,6 +154,44 @@ test('autopilot records provider failure and honors its retry backoff', async ()
   assert.equal(calls, 1);
 });
 
+test('autopilot honors a provider 429 retry hint and grows fallback delays after repeated failures', async () => {
+  let currentTime = FIXED_NOW;
+  const store = memoryStore({ enabled: true });
+  let calls = 0;
+  const { youtube } = connectedYouTube({
+    channel: { id: CHANNEL_ID, etag: 'channel-etag', title: 'Saevond', description: 'Profile', localizations: {} }
+  });
+  const worker = createJapaneseLocalizationWorker({
+    store, youtube, env: { SEO_AI_API_KEY: 'configured', SEO_AI_MODEL: 'test-model' },
+    translate: async () => {
+      calls += 1;
+      const error = new Error('provider quota limited');
+      error.status = 429;
+      error.retryAfterPresent = calls === 1;
+      error.retryAfterMs = 30_000;
+      throw error;
+    },
+    now: () => currentTime, logger: { error() {} }
+  });
+
+  const first = await worker.run();
+  assert.equal(Date.parse(first.retryAfter), FIXED_NOW + 30_000);
+  await worker.run();
+  assert.equal(calls, 1);
+
+  currentTime += 30_001;
+  const second = await worker.run();
+  assert.equal(Date.parse(second.retryAfter), currentTime + 2 * 60 * 60 * 1000);
+  assert.equal(second.retryAttempts, 2);
+  assert.equal(calls, 2);
+
+  currentTime += 2 * 60 * 60 * 1000 + 1;
+  const third = await worker.run();
+  assert.equal(Date.parse(third.retryAfter), currentTime + 4 * 60 * 60 * 1000);
+  assert.equal(third.retryAttempts, 3);
+  assert.equal(calls, 3);
+});
+
 test('autopilot resets an expired YouTube page token and restarts the video scan', async () => {
   const store = memoryStore({
     enabled: true, videoPageToken: 'expired-page-token',

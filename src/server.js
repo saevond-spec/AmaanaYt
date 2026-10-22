@@ -26,7 +26,7 @@ const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
   shouldPullForwardAllowedTwitchDownloadHost, shouldRequeueTwitchSegmentDurationFailure } = require('./highlight-pipeline');
 const { createTwitchHighlightDiscovery } = require('./twitch-highlight-discovery');
 const { clipRetryDelayMs, isRetryableCommunityClipError, isVerifiedGameplayResult, reuseOrVerifyGameplay } = require('./twitch-community-clips');
-const { collectTestVodDrafts } = require('./gameplay-intake-guard');
+const { publishApprovedDraft } = require('./draft-publication');
 const { auditVideo, channelSuggestions, problem, assertVideoMatchesCatalog } = require('./seo-publish');
 const { createSessionStore } = require('./session-store');
 const { canAddVideoToPlaylist } = require('./youtube-playlists');
@@ -1241,15 +1241,7 @@ app.post('/api/twitch/vod-clips', admin, async (req, res, next) => {
 
 app.post('/api/drafts/:id/exclude-test-vod', admin, async (req, res, next) => {
   try {
-    const draft = await store.getDraft(req.params.id);
-    if (!draft) return res.status(404).json({ error: 'Draft not found' });
-    const relatedDrafts = collectTestVodDrafts(await store.listDrafts(), draft.id);
-    if (!relatedDrafts.length) {
-      return res.status(409).json({ error: 'Only a test-titled Twitch highlight VOD can be excluded this way.' });
-    }
-    const updated = await store.excludeDrafts(
-      relatedDrafts.map((item) => item.id), 'non_gameplay_test_stream'
-    );
+    const updated = await store.excludeTestVodGroup(req.params.id, 'non_gameplay_test_stream');
     res.json({ excludedCount: updated.length, youtubeVisibilityChanged: false });
   } catch (error) {
     next(error);
@@ -1296,7 +1288,10 @@ app.post('/api/drafts/:id/approve', admin, async (req, res, next) => {
         return res.status(409).json({ error: 'This Short does not belong to a verified gameplay highlight and cannot be published. Keep it private.' });
       }
     }
-    const published = await youtube.publish(draft.youtubeVideoId, req.body.publishAt || null);
+    const result = await publishApprovedDraft({
+      draft, publishAt: req.body.publishAt || null, store, youtube
+    });
+    let updated = result.draft;
     const playlistAssignment = req.body.publishAt
       ? draft.playlistAssignment
       : await autoAssignPublishedPlaylist(draft.youtubeVideoId, draft);
@@ -1305,16 +1300,9 @@ app.post('/api/drafts/:id/approve', admin, async (req, res, next) => {
         typeof store.markSeoPlaylistResult === 'function') {
       await store.markSeoPlaylistResult(draft.youtubeVideoId, playlistAssignment);
     }
-    const updated = await store.updateDraft(draft.id, {
-      playlistAssignment,
-      status: req.body.publishAt ? 'scheduled' : 'published',
-      publicationStatus: req.body.publishAt ? 'scheduled' : 'published',
-      publishedAt: req.body.publishAt ? null : new Date().toISOString(),
-      publishAt: req.body.publishAt || null,
-      youtubePrivacyStatus: req.body.publishAt ? 'private' : 'public',
-      youtubeUrl: `https://youtu.be/${draft.youtubeVideoId}`
-    });
-    res.json({ draft: updated, youtube: published.status });
+    const withPlaylist = await store.updateDraft(draft.id, { playlistAssignment });
+    if (withPlaylist) updated = withPlaylist;
+    res.json({ draft: updated, youtube: result.youtube });
   } catch (error) {
     next(error);
   }

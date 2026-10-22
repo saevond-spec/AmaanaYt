@@ -4,6 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   normalizeJapaneseVideoLocalization,
+  retryInfoDelay,
   translateJapaneseVideoLocalizations
 } = require('../src/japanese-translation');
 
@@ -62,5 +63,24 @@ test('translator rejects incomplete and oversized batches before provider use', 
     id: `abcdefghij${index}`, title: 'Title', description: ''
   })), { apiKey: 'x', model: 'y', fetchImpl }), /between 1 and 5/);
   assert.equal(called, false);
+});
+
+test('translator preserves Gemini Retry-After and RPC RetryInfo hints on provider quota errors', async () => {
+  const retryResponse = (body, headers = {}) => new Response(JSON.stringify(body), {
+    status: 429, headers: { 'content-type': 'application/json', ...headers }
+  });
+  await assert.rejects(translateJapaneseVideoLocalizations([source], {
+    apiKey: 'test-key', model: 'test-model',
+    fetchImpl: async () => retryResponse({ error: { status: 'RESOURCE_EXHAUSTED' } }, { 'retry-after': '90' })
+  }), (error) => error.status === 429 && error.retryAfterPresent &&
+    error.retryAfterMs === 90_000 && error.providerCode === 'RESOURCE_EXHAUSTED');
+
+  const rpc = { error: { details: [{
+    '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '12.5s'
+  }] } };
+  assert.equal(retryInfoDelay(rpc), 12_500);
+  await assert.rejects(translateJapaneseVideoLocalizations([source], {
+    apiKey: 'test-key', model: 'test-model', fetchImpl: async () => retryResponse(rpc)
+  }), (error) => error.status === 429 && error.retryAfterPresent && error.retryAfterMs === 12_500);
 });
 
