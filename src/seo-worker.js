@@ -8,7 +8,8 @@ const { isYouTubeQuotaError, youtubeQuotaRetryAt, getYouTubeDataApiQuotaBlock,
   recordYouTubeDataApiQuotaBlock, callYouTubeDataApi } = require('./youtube-quota');
 
 function createSeoWorker({ store, youtube, env = process.env, logger = console, sleep,
-  generate = generatePackage, analyze = analyzeVideo, market = null, playlistAuto = null }) {
+  generate = generatePackage, analyze = analyzeVideo, market = null, playlistAuto = null,
+  setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout }) {
   let running = false;
   let scheduled = false;
   let rerunRequested = false;
@@ -18,6 +19,8 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   let catalogScanIncomplete = false;
   let lastDiagnostic = null;
   let legacyTagRecoveryChecked = false;
+  let quotaResumeTimer = null;
+  let quotaResumeAt = 0;
   const configuredLimit = Number(env.SEO_DAILY_LIMIT);
   const dailyLimit = Number.isSafeInteger(configuredLimit) && configuredLimit >= 1 ? configuredLimit : 200;
   const configuredAnalysisBatch = Number(env.SEO_ANALYSIS_BATCH_SIZE);
@@ -137,6 +140,26 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     return page;
   }
 
+  function scheduleQuotaResume(blockedUntil) {
+    const retryAt = Number(blockedUntil);
+    if (!Number.isFinite(retryAt) || retryAt <= Date.now()) return;
+    if (quotaResumeTimer && quotaResumeAt >= retryAt) return;
+    if (quotaResumeTimer) clearTimeoutFn(quotaResumeTimer);
+    quotaResumeAt = retryAt;
+    const delay = Math.min(2_147_483_647, Math.max(1, retryAt - Date.now()));
+    quotaResumeTimer = setTimeoutFn(() => {
+      quotaResumeTimer = null;
+      quotaResumeAt = 0;
+      if (retryAt > Date.now()) {
+        scheduleQuotaResume(retryAt);
+        return;
+      }
+      logger.info?.('YouTube Data API quota pause expired; resuming SEO work');
+      schedule(true);
+    }, delay);
+    quotaResumeTimer?.unref?.();
+  }
+
   async function markYouTubeQuotaBlocked(state, errorOrRetryAt) {
     const recorded = await recordYouTubeDataApiQuotaBlock(store, errorOrRetryAt);
     const retryAt = recorded?.blockedUntil || (typeof errorOrRetryAt === 'number'
@@ -145,6 +168,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     state.youtubeDataApiBlockedUntil = new Date(retryAt).toISOString();
     state.youtubeDataApiBlockReason = recorded?.reason ||
       'YouTube Data API quota or rate limit reached';
+    scheduleQuotaResume(retryAt);
     await store.saveSeoSyncState(state);
     logger.warn?.('YouTube Data API work paused until ' + state.youtubeDataApiBlockedUntil +
       ': ' + state.youtubeDataApiBlockReason);
@@ -224,6 +248,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       const blockedUntil = Math.max(globalQuotaBlock?.blockedUntil || 0,
         Number.isFinite(legacyBlockUntil) ? legacyBlockUntil : 0);
       if (blockedUntil > Date.now()) {
+        scheduleQuotaResume(blockedUntil);
         const blockedUntilIso = new Date(blockedUntil).toISOString();
         if (lastDiagnostic !== 'youtube_data_quota_blocked') {
           logger.info?.('SEO worker paused until the YouTube Data API quota window resets at ' +
