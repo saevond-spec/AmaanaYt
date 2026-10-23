@@ -17,7 +17,8 @@ const DEFAULT_LIVE_CAPTURE_DURATION_SECONDS = 60;
 const DEFAULT_LIVE_CAPTURE_BUFFER_SECONDS = 90;
 const LIVE_SHORT_CANDIDATE_GROUP_SIZE = 5;
 const MAX_LIVE_SHORTS_PER_STREAM = 20;
-const RECENT_VOD_LIMIT = 20;
+const RECENT_VOD_LIMIT = 100;
+const RECENT_VOD_MAX_PAGES = 5;
 const MAX_AUTO_HIGHLIGHTS = MAX_HIGHLIGHT_SEGMENTS;
 const MAX_AUTO_SHORTS = 2;
 const MAX_LIVE_CANDIDATES = 160;
@@ -65,6 +66,7 @@ function createTwitchHighlightDiscovery({
   liveCaptureDurationSeconds = DEFAULT_LIVE_CAPTURE_DURATION_SECONDS,
   liveCaptureBufferSeconds = DEFAULT_LIVE_CAPTURE_BUFFER_SECONDS,
   vodLimit = RECENT_VOD_LIMIT,
+  vodMaxPages = RECENT_VOD_MAX_PAGES,
   targetDurationSeconds = TARGET_HIGHLIGHT_DURATION_SECONDS,
   video,
   visualGameplayVerificationAvailable = () => false
@@ -715,7 +717,7 @@ function createTwitchHighlightDiscovery({
         lastRunResult = result;
         return result;
       }
-      const vods = await twitch.listRecentArchivedVods({ first: vodLimit });
+      const vods = await twitch.listRecentArchivedVods({ first: vodLimit, maxPages: vodMaxPages });
       const drafts = await store.listDrafts();
       const state = await getState();
       const timestamp = now();
@@ -811,5 +813,6 @@ module.exports = {
   DEFAULT_LIVE_CAPTURE_BUFFER_SECONDS,
   MAX_LIVE_CANDIDATES,
   RECENT_VOD_LIMIT,
+  RECENT_VOD_MAX_PAGES,
   MAX_AUTO_HIGHLIGHTS
 };

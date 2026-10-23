@@ -25,6 +25,7 @@ const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
   shouldPullForwardTwitchMetadataRetry, shouldRequeueUnexpectedTwitchDownloadHost,
   shouldPullForwardAllowedTwitchDownloadHost, shouldRequeueTwitchSegmentDurationFailure } = require('./highlight-pipeline');
 const { createTwitchHighlightDiscovery } = require('./twitch-highlight-discovery');
+const { resumableTwitchClipDrafts, resumableHighlightBatchDrafts } = require('./highlight-job-recovery');
 const { clipRetryDelayMs, isRetryableCommunityClipError, isVerifiedGameplayResult, reuseOrVerifyGameplay } = require('./twitch-community-clips');
 const { publishApprovedDraft } = require('./draft-publication');
 const { auditVideo, channelSuggestions, problem, assertVideoMatchesCatalog } = require('./seo-publish');
@@ -1355,20 +1356,9 @@ store.init()
       twitchHighlightDiscovery.start();
       try {
         const drafts = await store.listDrafts();
-        const resumable = new Set([
-          'clip_queued',
-          'creating_twitch_clip',
-          'waiting_for_clip_media',
-          'downloading_twitch_clip',
-          'formatting_vertical_short',
-          'uploading_private_to_youtube',
-          'clip_retry_wait'
-        ]);
-        drafts.filter((draft) => draft.sourceType === 'twitch_vod' && resumable.has(draft.status) &&
-          (draft.status !== 'clip_retry_wait' || Date.parse(draft.nextClipAttemptAt || '') <= Date.now()))
+        resumableTwitchClipDrafts(drafts)
           .forEach((draft) => enqueueClipProcessing(draft.id));
-        drafts.filter((draft) => draft.sourceType === 'twitch_highlight_batch'
-          && ['clip_queued', 'creating_twitch_clips', 'assembling_highlight_video', 'creating_shorts'].includes(draft.status))
+        resumableHighlightBatchDrafts(drafts)
           .forEach((draft) => enqueueHighlightBatch(draft.id));
       } catch (error) {
         console.error('Failed to resume Twitch clip jobs:', error.message);
