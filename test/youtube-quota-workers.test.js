@@ -121,3 +121,49 @@ test('SEO worker honors the shared quota pause before catalog reads', async () =
   await worker.run();
   assert.equal(catalogReads, 0);
 });
+
+
+test('SEO worker resumes immediately when the persisted YouTube quota pause expires', async () => {
+  let now = Date.parse('2026-10-23T06:59:00.000Z');
+  const blockedUntil = now + 60 * 1000;
+  let storedBlock = { blockedUntil, reason: 'daily quota' };
+  let timer = null;
+  let ownedChannelCalls = 0;
+  let resolveResumed;
+  const resumed = new Promise((resolve) => { resolveResumed = resolve; });
+  const store = blockedStore({
+    async getYoutubeDataApiQuotaBlock() { return storedBlock; },
+    async getSeoSyncState() { return {}; },
+    async saveSeoSyncState() {}
+  });
+  const youtube = {
+    async isConnected() { return true; },
+    async ownedChannel() {
+      ownedChannelCalls += 1;
+      resolveResumed();
+      throw new Error('stop after confirming the worker woke');
+    }
+  };
+  const worker = createSeoWorker({
+    store, youtube, env: {}, logger: { info() {}, warn() {}, error() {} },
+    setTimeoutFn(callback, delay) {
+      timer = { callback, delay, unref() {} };
+      return timer;
+    },
+    clearTimeoutFn() {}
+  });
+  const realNow = Date.now;
+  Date.now = () => now;
+  try {
+    await worker.run();
+    assert.equal(ownedChannelCalls, 0);
+    assert.equal(timer?.delay, 60 * 1000);
+    storedBlock = null;
+    now = blockedUntil;
+    timer.callback();
+    await resumed;
+    assert.equal(ownedChannelCalls, 1);
+  } finally {
+    Date.now = realNow;
+  }
+});
