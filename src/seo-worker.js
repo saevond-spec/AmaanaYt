@@ -142,9 +142,12 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     return page;
   }
 
+  function quotaResumeGraceMs(reason = '') {
+    return /daily quota/i.test(String(reason)) ? DAILY_QUOTA_RESUME_GRACE_MS : 0;
+  }
+
   function scheduleQuotaResume(blockedUntil, reason = '') {
-    const graceMs = /daily quota/i.test(String(reason)) ? DAILY_QUOTA_RESUME_GRACE_MS : 0;
-    const retryAt = Number(blockedUntil) + graceMs;
+    const retryAt = Number(blockedUntil) + quotaResumeGraceMs(reason);
     if (!Number.isFinite(retryAt) || retryAt <= Date.now()) return;
     if (quotaResumeTimer && quotaResumeAt >= retryAt) return;
     if (quotaResumeTimer) clearTimeoutFn(quotaResumeTimer);
@@ -250,15 +253,22 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       }
       stateForQuota = await store.getSeoSyncState();
       const globalQuotaBlock = await getYouTubeDataApiQuotaBlock(store);
-      const legacyBlockUntil = Date.parse(stateForQuota.youtubeDataApiBlockedUntil || '');
-      const blockedUntil = Math.max(globalQuotaBlock?.blockedUntil || 0,
-        Number.isFinite(legacyBlockUntil) ? legacyBlockUntil : 0);
-      if (blockedUntil > Date.now()) {
-        scheduleQuotaResume(blockedUntil, globalQuotaBlock?.reason || stateForQuota.youtubeDataApiBlockReason);
+      const globalBlockUntil = Number(globalQuotaBlock?.blockedUntil) || 0;
+      const parsedLegacyBlockUntil = Date.parse(stateForQuota.youtubeDataApiBlockedUntil || '');
+      const legacyBlockUntil = Number.isFinite(parsedLegacyBlockUntil) ? parsedLegacyBlockUntil : 0;
+      const blockedUntil = Math.max(globalBlockUntil, legacyBlockUntil);
+      const blockReason = globalBlockUntil >= legacyBlockUntil
+        ? globalQuotaBlock?.reason || stateForQuota.youtubeDataApiBlockReason
+        : stateForQuota.youtubeDataApiBlockReason || globalQuotaBlock?.reason;
+      const resumeAt = blockedUntil + quotaResumeGraceMs(blockReason);
+      if (resumeAt > Date.now()) {
+        scheduleQuotaResume(blockedUntil, blockReason);
         const blockedUntilIso = new Date(blockedUntil).toISOString();
+        const resumeAtIso = new Date(resumeAt).toISOString();
         if (lastDiagnostic !== 'youtube_data_quota_blocked') {
           logger.info?.('SEO worker paused until the YouTube Data API quota window resets at ' +
-            blockedUntilIso);
+            blockedUntilIso + (resumeAt > blockedUntil ? '; resuming after daily quota grace at ' +
+              resumeAtIso : ''));
           lastDiagnostic = 'youtube_data_quota_blocked';
         }
         return;
