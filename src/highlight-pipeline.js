@@ -7,6 +7,8 @@ const { validateHighlightMoments, verifyCreatedClip, verifyClipCreationRequest }
 const { buildHighlightTitle: defaultBuildHighlightTitle, buildShortTitle: defaultBuildShortTitle,
   buildShortDescription: defaultBuildShortDescription } = require('./highlight-metadata');
 
+const YOUTUBE_UPLOAD_RECOVERY_GRACE_MS = 15 * 60 * 1000;
+
 function createBatchQueue(processJob, options = {}) {
   const schedule = options.schedule || setImmediate;
   const onError = options.onError || (() => {});
@@ -108,6 +110,31 @@ function isTransientError(error) {
   const code = String(error && (error.code || error.cause && error.cause.code) || '').toUpperCase();
   return ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND',
     'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT'].includes(code);
+}
+
+function isAmbiguousYoutubeUploadError(error) {
+  const status = Number(error && (error.status || error.statusCode || error.response && error.response.status));
+  if (status === 429) return false;
+  if ([408, 425].includes(status) || status >= 500 && status <= 599) return true;
+  // An explicit non-transient HTTP rejection means YouTube rejected the request.
+  // A missing status is ambiguous: the request may have reached YouTube before the connection failed.
+  if (Number.isInteger(status) && status >= 400 && status <= 499) return false;
+  const code = String(error && (error.code || error.cause && error.cause.code) || '').toUpperCase();
+  if (['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT',
+    'UND_ERR_HEADERS_TIMEOUT'].includes(code)) return true;
+  return !Number.isInteger(status) || status < 400 || status > 499;
+}
+
+function uploadIntentIsStale(draft, now = Date.now()) {
+  const createdAt = Date.parse(draft?.youtubeUploadIntentCreatedAt || '');
+  const timestamp = Number(now);
+  return Boolean(draft?.youtubeUploadIntentId) && Number.isFinite(createdAt) &&
+    Number.isFinite(timestamp) && timestamp - createdAt >= YOUTUBE_UPLOAD_RECOVERY_GRACE_MS;
+}
+
+function shouldRequeueStaleYoutubeUploadIntent(draft, now = Date.now()) {
+  return draft?.sourceType === 'twitch_highlight_batch' &&
+    draft.status === 'uploading_private_to_youtube' && !draft.youtubeVideoId && uploadIntentIsStale(draft, now);
 }
 
 async function waitForVerifiedClipMetadata({
@@ -214,6 +241,21 @@ function createHighlightProcessor(dependencies) {
       if (!batch || batch.sourceType !== 'twitch_highlight_batch' || batch.status === 'completed' ||
           batch.status === 'excluded_by_owner' ||
           batch.status === 'awaiting_owner_approval' && batch.productionState === 'ready') return;
+      if (batch.status === 'uploading_private_to_youtube' && !batch.youtubeVideoId) {
+        if (batch.youtubeUploadIntentId && !uploadIntentIsStale(batch, now())) return;
+        const message = 'YouTube upload outcome is uncertain after an interrupted request; reconcile the private YouTube video before retrying.';
+        await store.updateDraft(id, { status: 'youtube_upload_uncertain', productionState: 'upload_uncertain',
+          publicationStatus: 'pending', youtubeUploadError: message, nextClipAttemptAt: null, error: message });
+        logHeld(id, 'youtube_upload_outcome_uncertain');
+        return;
+      }
+      if (batch.youtubeUploadIntentId && !batch.youtubeVideoId) {
+        const message = 'YouTube upload intent exists without a saved video ID; reconcile before retrying.';
+        await store.updateDraft(id, { status: 'youtube_upload_uncertain', productionState: 'upload_uncertain',
+          publicationStatus: 'pending', youtubeUploadError: message, nextClipAttemptAt: null, error: message });
+        logHeld(id, 'youtube_upload_outcome_uncertain');
+        return;
+      }
       if (['twitch_clips_api', 'twitch_live_capture'].includes(batch.discoverySource) &&
           !(Number.isFinite(Number(batch.targetHighlightDurationSeconds)) &&
             Number(batch.targetHighlightDurationSeconds) > 0)) {
@@ -386,14 +428,43 @@ function createHighlightProcessor(dependencies) {
         }
       }
 
-      const highlight = batch.youtubeVideoId ? { id: batch.youtubeVideoId } : await youtube.uploadPrivate({
-        filePath: montage,
-        title: highlightTitle,
-        description,
-        tags: highlightTags
-      });
+      let highlight = batch.youtubeVideoId ? { id: batch.youtubeVideoId } : null;
+      if (!highlight) {
+        const intentId = crypto.randomUUID();
+        const intentAt = new Date(now()).toISOString();
+        const claim = typeof store.claimYoutubeUpload === 'function'
+          ? await store.claimYoutubeUpload(id, intentId, intentAt)
+          : { claimed: true, draft: await store.updateDraft(id, {
+            status: 'uploading_private_to_youtube', productionState: 'uploading_private_to_youtube',
+            youtubeUploadIntentId: intentId, youtubeUploadIntentCreatedAt: intentAt,
+            youtubeUploadError: null, nextClipAttemptAt: null
+          }) };
+        if (!claim?.claimed) {
+          const current = claim?.draft || await store.getDraft(id);
+          if (current?.youtubeVideoId) highlight = { id: current.youtubeVideoId };
+          else return;
+        }
+        if (!highlight) {
+          try {
+            highlight = await youtube.uploadPrivate({
+              filePath: montage, title: highlightTitle, description, tags: highlightTags
+            });
+          } catch (error) {
+            if (isAmbiguousYoutubeUploadError(error)) {
+              const message = 'YouTube upload outcome is uncertain after an interrupted request; reconcile the private YouTube video before retrying.';
+              await store.updateDraft(id, { status: 'youtube_upload_uncertain', productionState: 'upload_uncertain',
+                publicationStatus: 'pending', youtubeUploadError: message, nextClipAttemptAt: null, error: message });
+              logHeld(id, 'youtube_upload_outcome_uncertain');
+              return;
+            }
+            await store.updateDraft(id, { youtubeUploadIntentId: null, youtubeUploadIntentCreatedAt: null });
+            throw error;
+          }
+        }
+      }
       const highlightPatch = {
         status: 'creating_shorts', productionState: 'processing', youtubeVideoId: highlight.id,
+        youtubeUploadIntentId: null, youtubeUploadIntentCreatedAt: null, youtubeUploadError: null,
         title: highlightTitle, description, tags: highlightTags,
         duration: Number.isFinite(targetHighlightDurationSeconds) ? targetHighlightDurationSeconds : timeline.durationSeconds,
         mediaValidation: 'passed'
@@ -505,24 +576,83 @@ function createHighlightProcessor(dependencies) {
           continue;
         }
 
+        if (existingShort && existingShort.youtubeUploadIntentId && !existingShort.youtubeVideoId) {
+          if (!uploadIntentIsStale(existingShort, now())) return;
+          const message = 'YouTube Short upload outcome is uncertain; reconcile the private YouTube video before retrying.';
+          await store.updateDraft(existingShort.id, { status: 'youtube_upload_uncertain',
+            productionState: 'upload_uncertain', youtubeUploadError: message, error: message,
+            nextClipAttemptAt: null });
+          noteFailure('Short ' + (index + 1), Object.assign(new Error(message), { status: 409 }), 180);
+          offset += durations[index];
+          continue;
+        }
+
         const shortPath = path.join(directory, 'short-' + index + '.mp4');
         try {
           await video.shortFromHighlight(montage, offset, length, shortPath);
           await video.validateShort(shortPath, length);
-          const uploaded = await youtube.uploadPrivate({
+          let shortDraft = existingShort;
+          const intentId = crypto.randomUUID();
+          const intentAt = new Date(now()).toISOString();
+          if (!shortDraft) {
+            shortDraft = {
+              id: idFactory(), sourceType: 'twitch_highlight_short', parentId: id,
+              highlightIndex: index, vodId: batch.vodId, title: shortTitle,
+              description: shortDescription, tags: shortTags, youtubeVideoId: null,
+              duration: length, youtubeUploadIntentId: intentId,
+              youtubeUploadIntentCreatedAt: intentAt, youtubeUploadError: null,
+              mediaValidation: 'passed', playlistAssignment: { state: 'pending' },
+              status: 'uploading_private_to_youtube', productionState: 'uploading_private_to_youtube',
+              seoRegistrationStatus: 'pending', publicationStatus: 'pending',
+              createdAt: intentAt
+            };
+            await store.addDraft(shortDraft);
+            shortsByIndex.set(index, shortDraft);
+          } else if (typeof store.claimYoutubeUpload === 'function') {
+            const claim = await store.claimYoutubeUpload(shortDraft.id, intentId, intentAt);
+            if (!claim?.claimed) {
+              const current = claim?.draft || await store.getDraft(shortDraft.id);
+              if (current?.youtubeVideoId) {
+                shortsByIndex.set(index, current);
+                offset += durations[index];
+                continue;
+              }
+              return;
+            }
+          } else {
+            await store.updateDraft(shortDraft.id, {
+              status: 'uploading_private_to_youtube', productionState: 'uploading_private_to_youtube',
+              youtubeUploadIntentId: intentId, youtubeUploadIntentCreatedAt: intentAt,
+              youtubeUploadError: null
+            });
+          }
+          let uploaded;
+          try {
+            uploaded = await youtube.uploadPrivate({
             filePath: shortPath, title: shortTitle, description: shortDescription, tags: shortTags
-          });
-          const shortDraft = {
-            id: idFactory(), sourceType: 'twitch_highlight_short', parentId: id,
-            highlightIndex: index, vodId: batch.vodId, title: shortTitle,
-            description: shortDescription, tags: shortTags, youtubeVideoId: uploaded.id,
-            mediaValidation: 'passed', playlistAssignment: { state: 'pending' },
-            status: 'clip_partial', productionState: 'processing',
-            seoRegistrationStatus: 'pending', publicationStatus: 'pending',
-            createdAt: new Date().toISOString()
-          };
-          // Record the YouTube ID before playlist and SEO work so a retry can reuse the Short.
-          await store.addDraft(shortDraft);
+            });
+          } catch (error) {
+            if (isAmbiguousYoutubeUploadError(error)) {
+              const message = 'YouTube Short upload outcome is uncertain after an interrupted request; reconcile the private YouTube video before retrying.';
+              await store.updateDraft(shortDraft.id, { status: 'youtube_upload_uncertain',
+                productionState: 'upload_uncertain', youtubeUploadError: message, error: message,
+                nextClipAttemptAt: null });
+              noteFailure('Short ' + (index + 1), Object.assign(new Error(message), { status: 409 }), 180);
+              offset += durations[index];
+              continue;
+            }
+            await store.updateDraft(shortDraft.id, {
+              youtubeUploadIntentId: null, youtubeUploadIntentCreatedAt: null,
+              youtubeUploadError: cleanText(error.message || 'YouTube rejected the upload request', 240),
+              status: 'clip_partial', productionState: 'partial'
+            });
+            throw error;
+          }
+          shortDraft = await store.updateDraft(shortDraft.id, {
+            youtubeVideoId: uploaded.id, duration: length,
+            youtubeUploadIntentId: null, youtubeUploadIntentCreatedAt: null,
+            youtubeUploadError: null, status: 'clip_partial', productionState: 'processing'
+          }) || { ...shortDraft, youtubeVideoId: uploaded.id };
           shortsByIndex.set(index, shortDraft);
           const playlist = await autoAssignPlaylist({
             id: uploaded.id, privacyStatus: 'private', title: shortTitle,
@@ -618,7 +748,8 @@ function createHighlightProcessor(dependencies) {
         const nextClipAttemptAt = canAutoRetry ? new Date(now() + retryDelay).toISOString() : null;
         const error = failures.slice(0, 8).join('; ') || 'Production checks did not pass';
         for (const short of finalShorts) {
-          if (short.publicationStatus !== 'published') {
+          if (short.publicationStatus !== 'published' &&
+              !(short.youtubeUploadIntentId && !short.youtubeVideoId)) {
             await store.updateDraft(short.id, {
               status: 'clip_partial',
               productionState: canAutoRetry ? 'processing' : 'partial',
@@ -766,6 +897,8 @@ function createHighlightProcessor(dependencies) {
 
 module.exports = {
   createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
+  isAmbiguousYoutubeUploadError, uploadIntentIsStale, YOUTUBE_UPLOAD_RECOVERY_GRACE_MS,
+  shouldRequeueStaleYoutubeUploadIntent,
   findHighlightBatchByVodId, isTransientError, shouldPullForwardTwitchMetadataRetry,
   shouldRequeueUnexpectedTwitchDownloadHost, shouldPullForwardAllowedTwitchDownloadHost,
   shouldRequeueTwitchSegmentDurationFailure,

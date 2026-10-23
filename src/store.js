@@ -323,6 +323,47 @@ async function updateDraft(id, patch) {
   }
 }
 
+async function claimYoutubeUpload(id, intentId, createdAt = new Date().toISOString()) {
+  if (!String(id || '').trim() || !String(intentId || '').trim() || !Number.isFinite(Date.parse(createdAt))) {
+    throw Object.assign(new Error('A draft ID, upload intent ID, and valid timestamp are required'), { status: 400 });
+  }
+  await init();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query('SELECT payload FROM amaana_drafts WHERE id = $1 FOR UPDATE', [id]);
+    if (!result.rows[0]) {
+      await client.query('ROLLBACK');
+      return { claimed: false, draft: null };
+    }
+    const current = result.rows[0].payload;
+    if (current.status === 'excluded_by_owner' || current.youtubeVideoId || current.youtubeUploadIntentId ||
+        ['published', 'scheduled', 'publishing', 'ambiguous', 'excluded'].includes(current.publicationStatus)) {
+      await client.query('ROLLBACK');
+      return { claimed: false, draft: current };
+    }
+    const updated = {
+      ...current,
+      status: 'uploading_private_to_youtube',
+      productionState: 'uploading_private_to_youtube',
+      youtubeUploadIntentId: String(intentId),
+      youtubeUploadIntentCreatedAt: new Date(createdAt).toISOString(),
+      youtubeUploadError: null,
+      nextClipAttemptAt: null,
+      updatedAt: new Date().toISOString()
+    };
+    await client.query('UPDATE amaana_drafts SET payload = $2::jsonb, updated_at = NOW() WHERE id = $1',
+      [id, JSON.stringify(updated)]);
+    await client.query('COMMIT');
+    return { claimed: true, draft: updated };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function excludeDrafts(ids, reason = 'owner_excluded_non_gameplay_test') {
   if (!Array.isArray(ids) || ids.some((id) =>
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(id)))) {
@@ -1258,6 +1299,7 @@ module.exports = {
   getDraft,
   addDraft,
   updateDraft,
+  claimYoutubeUpload,
   excludeDrafts,
   excludeTestVodGroup,
   claimDraftForPublication,

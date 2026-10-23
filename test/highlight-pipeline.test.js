@@ -8,7 +8,8 @@ const path = require('node:path');
 const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
   findHighlightBatchByVodId, isTransientError, shouldPullForwardTwitchMetadataRetry,
   shouldRequeueUnexpectedTwitchDownloadHost, shouldPullForwardAllowedTwitchDownloadHost,
-  shouldRequeueTwitchSegmentDurationFailure } = require('../src/highlight-pipeline');
+  shouldRequeueTwitchSegmentDurationFailure, isAmbiguousYoutubeUploadError,
+  shouldRequeueStaleYoutubeUploadIntent, YOUTUBE_UPLOAD_RECOVERY_GRACE_MS } = require('../src/highlight-pipeline');
 const { buildHighlightTimeline, buildHighlightDescription } = require('../src/highlight-metadata');
 const { downloadClip } = require('../src/twitch');
 
@@ -29,6 +30,20 @@ test('one-time diagnostic retry is limited to failed Twitch download-host batche
   assert.equal(shouldRequeueUnexpectedTwitchDownloadHost({
     ...failed, error: 'Twitch clip media was unavailable'
   }), false);
+});
+
+test('ambiguous YouTube upload outcomes are held, while explicit quota rejection can retry', () => {
+  assert.equal(isAmbiguousYoutubeUploadError(Object.assign(new Error('gateway timeout'), { status: 504 })), true);
+  assert.equal(isAmbiguousYoutubeUploadError(Object.assign(new Error('connection reset'), { code: 'ECONNRESET' })), true);
+  assert.equal(isAmbiguousYoutubeUploadError(Object.assign(new Error('quota'), { status: 429 })), false);
+  assert.equal(isAmbiguousYoutubeUploadError(Object.assign(new Error('not allowed'), { status: 403 })), false);
+  const now = Date.parse('2026-10-23T12:00:00Z');
+  assert.equal(shouldRequeueStaleYoutubeUploadIntent({ sourceType: 'twitch_highlight_batch',
+    status: 'uploading_private_to_youtube', youtubeUploadIntentId: 'intent',
+    youtubeUploadIntentCreatedAt: new Date(now - YOUTUBE_UPLOAD_RECOVERY_GRACE_MS).toISOString() }, now), true);
+  assert.equal(shouldRequeueStaleYoutubeUploadIntent({ sourceType: 'twitch_highlight_batch',
+    status: 'uploading_private_to_youtube', youtubeUploadIntentId: 'intent',
+    youtubeUploadIntentCreatedAt: new Date(now - 1).toISOString() }, now), false);
 });
 
 test('accepts only Amaana\'s observed Twitch CloudFront download host', async (t) => {
@@ -145,6 +160,7 @@ async function harness(t, options = {}) {
   let publicationClaimExclusionUsed = false;
   let manualPublicationClaimUsed = false;
   let shortFailureUsed = false;
+  let uncertainShortUploadUsed = false;
   let seoFailureUsed = false;
   let idCounter = 0;
 
@@ -162,6 +178,18 @@ async function harness(t, options = {}) {
       if (drafts.has(draft.id)) throw new Error('duplicate draft id');
       drafts.set(draft.id, copy(draft));
       return copy(draft);
+    },
+    async claimYoutubeUpload(id, intentId, createdAt) {
+      const current = drafts.get(id);
+      if (!current || current.status === 'excluded_by_owner' || current.youtubeVideoId ||
+          current.youtubeUploadIntentId || ['published', 'scheduled', 'publishing', 'ambiguous', 'excluded'].includes(current.publicationStatus)) {
+        return { claimed: false, draft: copy(current) };
+      }
+      const next = { ...current, status: 'uploading_private_to_youtube',
+        productionState: 'uploading_private_to_youtube', youtubeUploadIntentId: intentId,
+        youtubeUploadIntentCreatedAt: createdAt, youtubeUploadError: null };
+      drafts.set(id, next);
+      return { claimed: true, draft: copy(next) };
     },
     async updateDraft(id, patch) {
       if (options.manualPublicationClaimBeforeFence &&
@@ -296,6 +324,13 @@ async function harness(t, options = {}) {
       }
       call.id = id;
       youtubeVideos.set(id, 'private');
+      if (isShort && options.uncertainShortUpload && !uncertainShortUploadUsed) {
+        uncertainShortUploadUsed = true;
+        throw Object.assign(new Error('response lost after YouTube accepted the Short'), { status: 500 });
+      }
+      if (!isShort && options.uncertainParentUpload) {
+        throw Object.assign(new Error('response lost after YouTube accepted the highlight'), { status: 500 });
+      }
       return { id };
     },
     async getVideo(videoId) {
@@ -591,7 +626,10 @@ test('a transient Short upload failure schedules retry, then finishes without du
   assert.equal(h.drafts.get(h.batch.id).status, 'clip_retry_wait');
   assert.ok(Date.parse(h.drafts.get(h.batch.id).nextClipAttemptAt) > Date.now());
   assert.match(h.drafts.get(h.batch.id).error, /Short 2/);
-  assert.equal([...h.drafts.values()].filter((draft) => draft.sourceType === 'twitch_highlight_short').length, 2);
+  const partialShorts = [...h.drafts.values()].filter((draft) => draft.sourceType === 'twitch_highlight_short');
+  assert.equal(partialShorts.length, 3);
+  assert.equal(partialShorts.find((draft) => draft.highlightIndex === 1).youtubeVideoId, null);
+  assert.equal(partialShorts.find((draft) => draft.highlightIndex === 1).youtubeUploadIntentId, null);
   await h.processor(h.batch.id);
   assert.equal(h.drafts.get(h.batch.id).status, 'completed');
   assert.equal(h.drafts.get(h.batch.id).productionState, 'published');
@@ -640,6 +678,47 @@ test('a transient database error after parent persistence schedules recovery wit
   assert.equal(h.counters.uploads.filter((upload) => upload.kind === 'highlight' && upload.succeeded).length, 1);
   assert.equal(h.counters.clipCreates, 3);
   assert.equal(h.counters.publications.length, 4);
+});
+
+test('an ambiguous parent upload is persisted as uncertain and never duplicated or published', async (t) => {
+  const h = await harness(t, { uncertainParentUpload: true });
+  await h.processor(h.batch.id);
+  const parent = h.drafts.get(h.batch.id);
+  assert.equal(parent.status, 'youtube_upload_uncertain');
+  assert.equal(parent.youtubeVideoId, undefined);
+  assert.ok(parent.youtubeUploadIntentId);
+  assert.equal(h.counters.uploads.filter((item) => item.kind === 'highlight').length, 1);
+  assert.equal(h.counters.publications.length, 0);
+  assert.equal(h.counters.visibilityMutations, 0);
+  await h.createProcessor()(h.batch.id);
+  assert.equal(h.counters.uploads.filter((item) => item.kind === 'highlight').length, 1);
+  assert.equal(h.counters.publications.length, 0);
+});
+
+test('an expired parent upload intent without an ID is held for manual reconciliation', async (t) => {
+  const h = await harness(t);
+  h.drafts.set(h.batch.id, { ...h.batch, status: 'uploading_private_to_youtube',
+    productionState: 'uploading_private_to_youtube', youtubeUploadIntentId: 'intent-1',
+    youtubeUploadIntentCreatedAt: new Date(Date.now() - YOUTUBE_UPLOAD_RECOVERY_GRACE_MS - 1).toISOString() });
+  await h.createProcessor()(h.batch.id);
+  assert.equal(h.drafts.get(h.batch.id).status, 'youtube_upload_uncertain');
+  assert.equal(h.counters.uploads.length, 0);
+  assert.equal(h.counters.publications.length, 0);
+});
+
+test('an ambiguous Short upload has a durable record and is not uploaded a second time', async (t) => {
+  const h = await harness(t, { uncertainShortUpload: true });
+  await h.processor(h.batch.id);
+  const uncertain = [...h.drafts.values()].find((draft) => draft.sourceType === 'twitch_highlight_short' &&
+    draft.status === 'youtube_upload_uncertain');
+  assert.ok(uncertain);
+  assert.equal(uncertain.youtubeVideoId, null);
+  assert.ok(uncertain.youtubeUploadIntentId);
+  assert.equal(h.counters.uploads.filter((item) => item.kind === 'short').length, 3);
+  assert.equal(h.counters.publications.length, 0);
+  await h.createProcessor()(h.batch.id);
+  assert.equal(h.counters.uploads.filter((item) => item.kind === 'short').length, 3);
+  assert.equal(h.counters.publications.length, 0);
 });
 
 test('a restarted worker resumes a persisted creating-shorts batch without uploading the parent again', async (t) => {

@@ -17,7 +17,8 @@ function publishedHighlight(overrides = {}) {
 
 function report(summary = [['150', '900', '360', '50']], retention =
   Array.from({ length: 21 }, (_, index) => [index / 20, 0.6])) {
-  return { summaryRows: summary, retentionRows: retention };
+  return { summaryRows: summary, retentionRows: retention,
+    engagementRows: [['VIDEO_ON_DEMAND', '125', '150', '900']] };
 }
 
 function memoryStore(drafts) {
@@ -77,9 +78,10 @@ test('measures mature 12-minute highlights and preserves the 15-minute legacy co
     { id: 'abcdefghijk', start: '2026-10-02', end: '2026-10-08' }
   ]);
   assert.equal(drafts[0].youtubeQualityAssessment.windowDays, 7);
-  assert.equal(drafts[0].youtubeQualityAssessment.status, 'within_market_band');
+  assert.equal(drafts[0].youtubeQualityAssessment.status, 'warming_up');
+  assert.equal(drafts[0].youtubeQualityAssessment.engagementByContentType[0].engagedViews, 125);
   assert.equal(drafts[0].youtubeQualityRetryAfter, null);
-  assert.equal(drafts[1].youtubeQualityAssessment.status, 'within_market_band');
+  assert.equal(drafts[1].youtubeQualityAssessment.status, 'warming_up');
 });
 
 test('does not read or change drafts until read-only Analytics consent is available', async () => {
@@ -125,6 +127,41 @@ test('uses the ten prior qualifying highlights to score the current channel band
     now: new Date('2026-10-11T18:00:00Z'), logger: { info() {}, warn() {} } });
   assert.equal(second.status, 'already_ran_today');
   assert.equal(calls, 1);
+});
+
+test('measures Shorts separately and compares only against Shorts of similar duration', async () => {
+  const olderShorts = Array.from({ length: 10 }, (_, index) => ({
+    id: 'short-' + index, sourceType: 'twitch_highlight_short', duration: 45,
+    youtubeVideoId: String(index).padStart(11, '0'), publicationStatus: 'published',
+    publishedAt: new Date(Date.UTC(2026, 8, index + 1)).toISOString(),
+    youtubeQualityAssessment: { assessedViews: 150, averageViewPercentage: 30 + index,
+      relativeRetentionScore: 0.6 },
+    youtubeQualityLastCheckedAt: '2026-10-10T12:00:00.000Z'
+  }));
+  const current = {
+    id: 'current-short', sourceType: 'twitch_highlight_short', duration: 50,
+    youtubeVideoId: 'zzzzzzzzzzz', publicationStatus: 'published', status: 'completed',
+    publishedAt: '2026-10-01T12:00:00.000Z'
+  };
+  const longHighlight = publishedHighlight({ id: 'long', youtubeVideoId: 'yyyyyyyyyyy',
+    targetHighlightDurationSeconds: 720, duration: 720,
+    youtubeQualityAssessment: { assessedViews: 1000, averageViewPercentage: 99,
+      relativeRetentionScore: 0.99 }, youtubeQualityLastCheckedAt: '2026-10-10T12:00:00.000Z' });
+  const drafts = [...olderShorts, longHighlight, current];
+  const store = memoryStore(drafts);
+  let durationSeen;
+  const result = await runYoutubeQualityAutopilot({ store, now: new Date('2026-10-11T14:00:00Z'),
+    logger: { info() {}, warn() {} }, youtube: {
+      async hasAnalyticsReadAccess() { return true; },
+      async videoQualityReports(_id, _start, _end) {
+        durationSeen = 50;
+        return report([['150', '900', '30', '60']]);
+      }
+    }});
+  assert.equal(result.updatedCount, 1);
+  assert.equal(durationSeen, 50);
+  assert.equal(current.youtubeQualityAssessment.channelBand.sampleSize, 10);
+  assert.equal(current.youtubeQualityAssessment.status, 'above_ceiling');
 });
 
 test('retries a transient report failure after six hours without hiding it for a week', async () => {

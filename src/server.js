@@ -22,6 +22,7 @@ const { createJapaneseLocalizationWorker } = require('./japanese-localization-wo
 const { hasVerifiedGameplayHighlight, hasVerifiedLiveGameplayClip } = require('./highlight-validation');
 const { buildHighlightTimeline, buildHighlightDescription } = require('./highlight-metadata');
 const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
+  shouldRequeueStaleYoutubeUploadIntent,
   shouldPullForwardTwitchMetadataRetry, shouldRequeueUnexpectedTwitchDownloadHost,
   shouldPullForwardAllowedTwitchDownloadHost, shouldRequeueTwitchSegmentDurationFailure } = require('./highlight-pipeline');
 const { createTwitchHighlightDiscovery } = require('./twitch-highlight-discovery');
@@ -30,6 +31,8 @@ const { clipRetryDelayMs, isRetryableCommunityClipError, isVerifiedGameplayResul
 const { publishApprovedDraft } = require('./draft-publication');
 const { auditVideo, channelSuggestions, problem, assertVideoMatchesCatalog } = require('./seo-publish');
 const { createSessionStore } = require('./session-store');
+const { createAdminLoginProtection } = require('./admin-login-protection');
+const { normalizeHttpError } = require('./http-error-response');
 const { canAddVideoToPlaylist } = require('./youtube-playlists');
 const { parseGoogleSearchConsoleCsv } = require('./google-search-console');
 const { createPlaylistAutoAssigner } = require('./playlist-auto');
@@ -39,6 +42,7 @@ for (const name of ['BASE_URL', 'DATABASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIE
 }
 
 const app = express();
+const adminLoginProtection = createAdminLoginProtection();
 const uploadDir = path.resolve(process.env.UPLOAD_DIR || './uploads');
 const publicDir = path.resolve(__dirname, '../public');
 fs.mkdirSync(uploadDir, { recursive: true });
@@ -71,6 +75,11 @@ function isIsoDate(value) {
 
 app.set('trust proxy', 1);
 app.use(helmet());
+app.use((req, res, next) => {
+  req.requestId = crypto.randomUUID();
+  res.set('X-Request-Id', req.requestId);
+  next();
+});
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false }));
 let sessionMiddleware;
@@ -497,6 +506,10 @@ async function scheduleDueHighlightRetries() {
     const drafts = await store.listDrafts();
     const timestamp = Date.now();
     for (const draft of drafts) {
+      if (shouldRequeueStaleYoutubeUploadIntent(draft, timestamp)) {
+        enqueueHighlightBatch(draft.id);
+        continue;
+      }
       if (draft.sourceType === 'twitch_vod' && draft.discoverySource === 'twitch_community_clip' &&
           draft.status === 'clip_retry_wait' && Date.parse(draft.nextClipAttemptAt || '') <= timestamp) {
         enqueueClipProcessing(draft.id);
@@ -601,9 +614,18 @@ app.get('/api/admin/session', (req, res) => {
 });
 
 app.post('/api/admin/login', (req, res, next) => {
+  const clientKey = req.ip || req.socket?.remoteAddress || 'unknown';
+  const limit = adminLoginProtection.check(clientKey);
+  if (limit.blocked) {
+    res.set('Retry-After', String(limit.retryAfterSeconds));
+    return res.status(429).json({ error: 'Too many failed login attempts. Try again later.',
+      retryAfterSeconds: limit.retryAfterSeconds, requestId: req.requestId });
+  }
   if (!keysMatch(req.body?.key, process.env.ADMIN_KEY)) {
+    adminLoginProtection.recordFailure(clientKey);
     return res.status(401).json({ error: 'Incorrect admin key' });
   }
+  adminLoginProtection.clear(clientKey);
   req.session.regenerate((error) => {
     if (error) return next(error);
     req.session.adminAuthenticated = true;
@@ -1319,11 +1341,11 @@ app.get('/api/drafts/:id/status', admin, async (req, res, next) => {
   }
 });
 
-app.use((error, _req, res, _next) => {
-  console.error(error.message);
-  const candidate = Number(error.status || error.code);
-  const status = Number.isInteger(candidate) && candidate >= 400 && candidate <= 599 ? candidate : 500;
-  res.status(status).json({ error: error.message || 'Unexpected server error' });
+app.use((error, req, res, _next) => {
+  const normalized = normalizeHttpError(error, req.requestId);
+  console.error('Amaana request error', JSON.stringify({ ...normalized.log,
+    method: req.method, path: req.path }));
+  res.status(normalized.status).json(normalized.body);
 });
 
 store.init()

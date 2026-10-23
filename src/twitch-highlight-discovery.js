@@ -22,6 +22,7 @@ const RECENT_VOD_MAX_PAGES = 5;
 const MAX_AUTO_HIGHLIGHTS = MAX_HIGHLIGHT_SEGMENTS;
 const MAX_AUTO_SHORTS = 2;
 const MAX_LIVE_CANDIDATES = 160;
+const MAX_ENDED_LIVE_SESSIONS_PER_RUN = 20;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function clean(value, limit) {
@@ -415,28 +416,88 @@ function createTwitchHighlightDiscovery({
       result.status = 'live_broadcast_lookup_unavailable';
       return result;
     }
-    if (!visualGameplayVerificationAvailable()) {
-      result.status = 'visual_gameplay_screening_disabled';
-      return result;
+    const screeningStatus = !visualGameplayVerificationAvailable()
+      ? 'visual_gameplay_screening_disabled'
+      : !video || typeof video.verifyGameplay !== 'function' || typeof video.inspectMedia !== 'function'
+        ? 'visual_gameplay_screening_unavailable' : null;
+    let broadcast;
+    if (screeningStatus) {
+      const saved = await getState();
+      if (!Object.keys(saved.liveSessions).length) {
+        result.status = screeningStatus;
+        return result;
+      }
+      broadcast = await twitch.getLiveBroadcast();
+      if (broadcast?.stream) {
+        result.status = screeningStatus;
+        return result;
+      }
+    } else {
+      broadcast = await twitch.getLiveBroadcast();
     }
-    if (!video || typeof video.verifyGameplay !== 'function' ||
-        typeof video.inspectMedia !== 'function') {
-      result.status = 'visual_gameplay_screening_unavailable';
-      return result;
-    }
-    const broadcast = await twitch.getLiveBroadcast();
     if (!broadcast || !broadcast.stream) {
       const state = await getState();
-      for (const session of Object.values(state.liveSessions)) {
-        if (!session || !Array.isArray(session.shortCandidates) || !session.shortCandidates.length) continue;
-        await queueReadyLiveShorts({
-          id: session.streamId, user_id: session.streamUserId,
+      const endedSessions = Object.entries(state.liveSessions)
+        .sort((left, right) => Date.parse(left[1]?.lastSeenAt || '') - Date.parse(right[1]?.lastSeenAt || ''))
+        .slice(0, MAX_ENDED_LIVE_SESSIONS_PER_RUN);
+      for (const [streamKey, session] of endedSessions) {
+        if (!session || typeof session !== 'object') {
+          delete state.liveSessions[streamKey];
+          result.liveSessionsPruned = (result.liveSessionsPruned || 0) + 1;
+          continue;
+        }
+        const stream = {
+          id: String(session.streamId || streamKey), user_id: String(session.streamUserId || ''),
           user_name: session.sourceChannel, user_login: session.sourceChannel,
-          title: session.streamTitle
-        }, session, result, { flush: true });
+          title: session.streamTitle, started_at: session.streamStartedAt
+        };
+        if (!Array.isArray(session.shortCandidates)) session.shortCandidates = [];
+        if (!Array.isArray(session.candidates)) session.candidates = [];
+        if (session.shortCandidates.length) {
+          await queueReadyLiveShorts(stream, session, result, { flush: true });
+        }
+
+        // Ended sessions can still have enough verified captures for a final batch.
+        // Resolve them against the broadcaster-owned archive before consuming them.
+        let archivedVod = null;
+        if (session.candidates.length && typeof twitch.getVod === 'function' &&
+            /^\d+$/.test(String(session.vodId || ''))) {
+          try {
+            const candidateVod = await twitch.getVod(String(session.vodId));
+            if (String(candidateVod?.id || '') === String(session.vodId) &&
+                candidateVod?.type === 'archive' &&
+                String(candidateVod.user_id || '') === String(session.streamUserId || '') &&
+                String(candidateVod.stream_id || '') === String(stream.id)) {
+              archivedVod = candidateVod;
+              await queueReadyLiveBatches(archivedVod, stream, session, result);
+            }
+          } catch (error) {
+            logger.warn?.('Amaana ended Twitch session recovery deferred for stream ' + stream.id +
+              ': ' + clean(error?.message || 'archive lookup failed', 240));
+          }
+        }
+
+        // Do not retain empty stream records forever. If the archive is available,
+        // the normal VOD scanner is now the durable source for any unconsumed clips.
+        if (!session.shortCandidates.length && (!session.candidates.length || archivedVod)) {
+          if (archivedVod) {
+            try { await scanVod(archivedVod); }
+            catch (error) {
+              logger.warn?.('Amaana archived VOD scan deferred for ended stream ' + stream.id +
+                ': ' + clean(error?.message || 'VOD scan failed', 240));
+              continue;
+            }
+          }
+          delete state.liveSessions[streamKey];
+          result.liveSessionsPruned = (result.liveSessionsPruned || 0) + 1;
+        }
       }
       await saveState();
       result.status = 'not_live';
+      return result;
+    }
+    if (screeningStatus) {
+      result.status = screeningStatus;
       return result;
     }
     result.live = true;
