@@ -76,3 +76,73 @@ test('finds only the connected broadcaster’s active archive VOD', async (t) =>
   assert.ok(calls.some((call) => call.startsWith('/helix/videos?user_id=1001')));
   assert.ok(calls.some((call) => call.startsWith('/helix/clips?broadcaster_id=1001')));
 });
+
+test('paginates archived VODs, deduplicates repeated items, and stops on a stuck cursor', async (t) => {
+  const originalLoad = Module._load;
+  const originalFetch = global.fetch;
+  const originalEnv = {
+    clientId: process.env.TWITCH_CLIENT_ID,
+    clientSecret: process.env.TWITCH_CLIENT_SECRET
+  };
+  const tokens = { access_token: 'fixture-token', refresh_token: 'fixture-refresh',
+    expires_at: Date.now() + 60 * 60 * 1000 };
+  const fakeStore = {
+    async getTwitchTokens() { return tokens; },
+    async saveTwitchTokens(value) { Object.assign(tokens, value); }
+  };
+  const pageCursors = [];
+  const videoRequests = [];
+  const twitchPath = require.resolve('../src/twitch');
+  Module._load = function (request, parent, isMain) {
+    if (request === './store' && parent && parent.filename === twitchPath) return fakeStore;
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  process.env.TWITCH_CLIENT_ID = 'fixture-client';
+  process.env.TWITCH_CLIENT_SECRET = 'fixture-secret';
+  global.fetch = async (input) => {
+    const url = new URL(input);
+    let body = {};
+    if (url.pathname === '/oauth2/validate') {
+      body = { client_id: 'fixture-client', expires_in: 3600 };
+    } else if (url.pathname === '/helix/users') {
+      body = { data: [{ id: '1001', login: 'amaanayt' }] };
+    } else if (url.pathname === '/helix/streams') {
+      body = { data: [{ id: 'live-stream', user_id: '1001' }] };
+    } else if (url.pathname === '/helix/videos') {
+      const after = url.searchParams.get('after');
+      pageCursors.push(after);
+      videoRequests.push({ first: url.searchParams.get('first'), after });
+      const archive = (id, streamId = 'stream-' + id, userId = '1001', type = 'archive') => ({
+        id, stream_id: streamId, user_id: userId, type, duration: '1h'
+      });
+      if (!after) {
+        body = { data: [archive('5001'), archive('5002')], pagination: { cursor: 'page-a' } };
+      } else if (after === 'page-a') {
+        body = { data: [archive('5002'), archive('5003')], pagination: { cursor: 'page-b' } };
+      } else {
+        body = { data: [archive('5004'), archive('5005', 'live-stream'), archive('5006', 'stream-6', '2002')],
+          pagination: { cursor: 'page-b' } };
+      }
+    }
+    return new Response(JSON.stringify(body), { status: 200,
+      headers: { 'content-type': 'application/json' } });
+  };
+  delete require.cache[twitchPath];
+  const twitch = require('../src/twitch');
+  t.after(() => {
+    Module._load = originalLoad;
+    global.fetch = originalFetch;
+    if (originalEnv.clientId === undefined) delete process.env.TWITCH_CLIENT_ID;
+    else process.env.TWITCH_CLIENT_ID = originalEnv.clientId;
+    if (originalEnv.clientSecret === undefined) delete process.env.TWITCH_CLIENT_SECRET;
+    else process.env.TWITCH_CLIENT_SECRET = originalEnv.clientSecret;
+    delete require.cache[twitchPath];
+  });
+
+  const vods = await twitch.listRecentArchivedVods({ first: 2, maxPages: 8 });
+
+  assert.deepEqual(pageCursors, [null, 'page-a', 'page-b']);
+  assert.deepEqual(vods.map((vod) => vod.id), ['5001', '5002', '5003', '5004']);
+  assert.ok(videoRequests.every((request) => request.first === '2'));
+  assert.equal(videoRequests.length, 3);
+});
