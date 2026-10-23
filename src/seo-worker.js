@@ -22,6 +22,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   let quotaResumeTimer = null;
   let quotaResumeAt = 0;
   let quotaResumeGeneration = 0;
+  const DAILY_QUOTA_RESUME_GRACE_MS = 60 * 1000;
   const configuredLimit = Number(env.SEO_DAILY_LIMIT);
   const dailyLimit = Number.isSafeInteger(configuredLimit) && configuredLimit >= 1 ? configuredLimit : 200;
   const configuredAnalysisBatch = Number(env.SEO_ANALYSIS_BATCH_SIZE);
@@ -141,8 +142,9 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     return page;
   }
 
-  function scheduleQuotaResume(blockedUntil) {
-    const retryAt = Number(blockedUntil);
+  function scheduleQuotaResume(blockedUntil, reason = '') {
+    const graceMs = /daily quota/i.test(String(reason)) ? DAILY_QUOTA_RESUME_GRACE_MS : 0;
+    const retryAt = Number(blockedUntil) + graceMs;
     if (!Number.isFinite(retryAt) || retryAt <= Date.now()) return;
     if (quotaResumeTimer && quotaResumeAt >= retryAt) return;
     if (quotaResumeTimer) clearTimeoutFn(quotaResumeTimer);
@@ -172,7 +174,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     state.youtubeDataApiBlockedUntil = new Date(retryAt).toISOString();
     state.youtubeDataApiBlockReason = recorded?.reason ||
       'YouTube Data API quota or rate limit reached';
-    scheduleQuotaResume(retryAt);
+    scheduleQuotaResume(retryAt, recorded?.reason || state.youtubeDataApiBlockReason);
     await store.saveSeoSyncState(state);
     logger.warn?.('YouTube Data API work paused until ' + state.youtubeDataApiBlockedUntil +
       ': ' + state.youtubeDataApiBlockReason);
@@ -252,7 +254,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
       const blockedUntil = Math.max(globalQuotaBlock?.blockedUntil || 0,
         Number.isFinite(legacyBlockUntil) ? legacyBlockUntil : 0);
       if (blockedUntil > Date.now()) {
-        scheduleQuotaResume(blockedUntil);
+        scheduleQuotaResume(blockedUntil, globalQuotaBlock?.reason || stateForQuota.youtubeDataApiBlockReason);
         const blockedUntilIso = new Date(blockedUntil).toISOString();
         if (lastDiagnostic !== 'youtube_data_quota_blocked') {
           logger.info?.('SEO worker paused until the YouTube Data API quota window resets at ' +
