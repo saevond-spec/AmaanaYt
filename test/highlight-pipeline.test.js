@@ -805,7 +805,15 @@ test('retry scanner selects only due highlight batches', () => {
     nextClipAttemptAt: '2026-10-03T12:01:00.000Z' };
   const unrelated = { id: 'public', sourceType: 'youtube_upload', status: 'clip_retry_wait',
     nextClipAttemptAt: '2026-10-03T11:00:00.000Z' };
-  assert.deepEqual(findDueHighlightRetries([due, future, unrelated], now).map((draft) => draft.id), ['due']);
+  const missing = { id: 'missing', sourceType: 'twitch_highlight_batch', status: 'clip_retry_wait' };
+  const blank = { id: 'blank', sourceType: 'twitch_highlight_batch', status: 'clip_retry_wait', nextClipAttemptAt: '' };
+  const invalid = { id: 'invalid', sourceType: 'twitch_highlight_batch', status: 'clip_retry_wait',
+    nextClipAttemptAt: 'not-a-date' };
+  const nullTimestamp = { id: 'null', sourceType: 'twitch_highlight_batch', status: 'clip_retry_wait',
+    nextClipAttemptAt: null };
+  assert.deepEqual(findDueHighlightRetries(
+    [due, future, unrelated, missing, blank, invalid, nullTimestamp], now).map((draft) => draft.id), ['due']);
+  assert.deepEqual(findDueHighlightRetries([due], new Date(now)).map((draft) => draft.id), ['due']);
 });
 
 test('invalid measured render durations fail closed before YouTube upload', async (t) => {
