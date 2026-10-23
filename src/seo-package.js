@@ -5,6 +5,18 @@ const { rateThumbnailBriefs } = require('./thumbnail-rating');
 const { ensureCreatorTag } = require('./channel-tags');
 const { canonicalText, descriptionCore, findMetadataConflicts } = require('./metadata-uniqueness');
 
+function selectVidIQPromptRows(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .filter((row) => row?.sourceOwnerTokenOverlap === true)
+    .slice()
+    .sort((left, right) => {
+      const leftScore = Number.isFinite(left?.overallScore) ? left.overallScore : -Infinity;
+      const rightScore = Number.isFinite(right?.overallScore) ? right.overallScore : -Infinity;
+      return rightScore - leftScore || String(left?.keyword || '').localeCompare(String(right?.keyword || ''));
+    })
+    .slice(0, 12);
+}
+
 function clean(value, max = 5000) {
   return String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
 }
@@ -227,7 +239,11 @@ function validatePackage(raw, source, context, analysis = null, marketEvidence =
         : marketEvidence?.metrics?.phraseSuggestionReason || 'unavailable',
       marketMetrics: marketEvidence?.metrics || null,
       marketTerms: marketEvidence?.metrics?.phraseSuggestionsEligible === true
-        ? marketEvidence.terms?.slice(0, 8) || [] : [] },
+        ? marketEvidence.terms?.slice(0, 8) || [] : [],
+      vidiqObservedAt: marketEvidence?.vidiq?.observedAt || null,
+      vidiqQuery: marketEvidence?.vidiq?.query || null,
+      vidiqRows: selectVidIQPromptRows(marketEvidence?.vidiq?.rows),
+      vidiqPolicy: marketEvidence?.vidiq?.policy || null },
     generatedAt: new Date().toISOString()
   };
 }
@@ -286,7 +302,19 @@ async function generatePackage(source, context, { apiKey, model, baseUrl, fallba
       terms: marketEvidence.metrics?.phraseSuggestionsEligible === true
         ? marketEvidence.terms?.slice(0, 8) || [] : [],
       samples: marketEvidence.metrics?.phraseSuggestionsEligible === true
-        ? marketEvidence.samples?.slice(0, 5) || [] : []
+        ? marketEvidence.samples?.slice(0, 5) || [] : [],
+      vidiqResearch: marketEvidence.vidiq ? {
+        source: marketEvidence.vidiq.source,
+        game: marketEvidence.vidiq.game,
+        query: marketEvidence.vidiq.query,
+        observedAt: marketEvidence.vidiq.observedAt,
+        rows: selectVidIQPromptRows(marketEvidence.vidiq.rows)
+          .map((row, index) => ({ keyword: row.keyword,
+            sourceSupport: row.sourceSupport, sourceOwnerTokenOverlap: row.sourceOwnerTokenOverlap === true,
+            supportSources: row.supportSources,
+            vidiqPriorityOrder: index + 1 })),
+        usePolicy: 'read-only estimated keyword priority order; exact source phrase overlap is a triage signal, not semantic proof; never state market estimates as facts or forecasts'
+      } : null
     } : null,
     existingChannelVideos: (Array.isArray(metadataPeers) ? metadataPeers : []).slice(0, PROMPT_METADATA_PEER_LIMIT).map((item) => ({
       videoId: String(item.videoId || '').slice(0, 32), title: String(item.title || '').slice(0, 100),
@@ -305,7 +333,7 @@ The hook is 50 to 160 characters and includes the primary keyword naturally. The
 Each thumbnail overlay has at most four words, complements its title, and has clear contrast in light and dark feeds.
 Return 3 to 8 focused tags, ordered from most relevant to least relevant. The first tag must be the exact primaryKeyword verbatim; then add exact game or mode terms, meaningful aliases, and common misspellings. Do not pad the list with generic tags. Only the first eight candidates are considered; the exact primary keyword is moved to the first position or added if missing, and total tag text stays under 450 characters. Treat tags as supporting metadata rather than a ranking driver.
 Keep each title and thumbnail promise accurate to the actual footage. Optimize for viewer satisfaction and watch time rather than click-through rate alone; a click is not a success if the video does not deliver on its promise.
-Market evidence is a sample of recent public YouTube search results, not search volume, total demand, or proof of this video's content. It is compared within a same-game duration band and adjusted for sample age; duration is only a length proxy, not a Shorts/long-form classification. Treat repeated phrases as directional ideas only when phraseSignal says evidence is eligible. The confidence field is a heuristic stability score, not a probability or significance test. A missing trend, a single competitor example, an undated/broad keyword scan, or low sample confidence is not a keyword recommendation. Use a phrase only when the footage, owner input, or video analysis supports it; never copy another creator's title or imply that an event, weapon, outcome, or update appears here unless the owner input or video analysis confirms it.
+Market evidence is a sample of recent public YouTube search results, not search volume, total demand, or proof of this video's content. It is compared within a same-game duration band and adjusted for sample age; duration is only a length proxy, not a Shorts/long-form classification. Treat repeated phrases as directional ideas only when phraseSignal says evidence is eligible. The confidence field is a heuristic stability score, not a probability or significance test. VidIQ keyword figures are third-party estimates: competition, overall, volume scores, monthly search ranges, and growth are not guarantees or forecasts. A bounded estimate such as <750 is an interval, not an exact zero. VidIQ candidate_phrase_overlap means only that the complete normalized phrase appears in a source or owner field; it is a lexical triage signal, not semantic proof that the footage supports the phrase. Never copy competitor titles or infer an event, character, weapon, outcome, patch, or update from search metrics. Use only the overlapping phrases supplied; never state an estimate as a factual claim. A market phrase that is actually used in generated metadata but is absent from all source/owner context triggers review; otherwise normal evidence and duplicate checks determine readiness.
 Do not infer demand or SEO causality from channel-wide view totals or traffic-source shares. A source share can rise when total views fall; use absolute counts and comparable per-video windows, and describe observed changes without claiming metadata caused them. Do not transfer a keyword trend across games, formats, or audiences. Search relevance depends on the title, description, tags, video content, and viewer response; tags are supporting metadata, not a substitute for accurate content.
 Do not invent games, outcomes, quotes, products, events, or steps absent from the evidence.
 Do not turn approximate video analysis moments into verified timestamps. Chapter and clip times are assembled separately from grounded markers. Provide clipHooks only for the supplied clip markers.
@@ -412,6 +440,6 @@ DATA: ${JSON.stringify(payload)}`;
   return validatePackage(JSON.parse(content), source, context, analysis, marketEvidence, metadataPeers);
 }
 
-module.exports = { clean, clock, secondsFromIso, normalizeSource, normalizeContext,
+module.exports = { clean, clock, secondsFromIso, selectVidIQPromptRows, normalizeSource, normalizeContext,
   descriptionChapters, evidenceFor, validatePackage, generatePackage,
   retryAfterDetails, createModelCircuitBreaker };

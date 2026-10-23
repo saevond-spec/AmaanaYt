@@ -37,6 +37,14 @@ services:
         sync: false
       - key: SEO_AI_BASE_URL
         sync: false
+      - key: VIDIQ_MCP_API_KEY
+        sync: false
+      - key: VIDIQ_MARKET_RESEARCH
+        value: 'true'
+      - key: VIDIQ_WEEKLY_CREDIT_LIMIT
+        value: '5'
+      - key: VIDIQ_MCP_URL
+        value: 'https://mcp.vidiq.com/mcp'
       - key: SEO_AI_TIMEOUT_MS
         value: '120000'
       - key: SEO_DAILY_LIMIT

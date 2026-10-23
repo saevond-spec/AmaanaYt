@@ -815,6 +815,20 @@ function renderSeoVideo(item) {
         'Search-result sample only; this is not search volume or a view forecast.'
       ].filter(Boolean).join('\n')));
     }
+    if (pkg.evidence?.vidiqObservedAt) {
+      const rows = (pkg.evidence.vidiqRows || []).map((row) => {
+        const monthly = row.estimatedMonthlySearch?.display || 'unknown';
+        const growth = Number.isFinite(row.searchDemandGrowthPct)
+          ? `${row.searchDemandGrowthPct > 0 ? '+' : ''}${row.searchDemandGrowthPct}%` : 'unknown';
+        return `${row.keyword} · estimated monthly searches ${monthly} · competition ${row.competitionScore ?? 'unknown'}/100 · growth ${growth} · ${row.sourceSupport === 'supported_by_video_or_owner_context' ? 'matches supplied video/context' : 'not verified against footage/context'}`;
+      });
+      details.append(seoHeading('VidIQ keyword research · review required', [
+        `Query: ${pkg.evidence.vidiqQuery || 'unknown'}`,
+        `Observed: ${new Date(pkg.evidence.vidiqObservedAt).toLocaleString()}`,
+        ...rows,
+        'vidIQ values are directional estimates, not forecasts or proof of video content. This package cannot be auto-applied; verify every phrase against the actual footage.'
+      ].join('\n')));
+    }
     for (const group of ['search', 'curiosity', 'hybrid']) {
       details.append(seoHeading(`${group[0].toUpperCase() + group.slice(1)} titles`,
         (pkg.titles?.[group] || []).map((title, index) => `${index + 1}. ${title}`).join('\n')));
