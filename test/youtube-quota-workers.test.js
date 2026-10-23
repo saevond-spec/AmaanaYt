@@ -122,7 +122,6 @@ test('SEO worker honors the shared quota pause before catalog reads', async () =
   assert.equal(catalogReads, 0);
 });
 
-
 test('SEO worker resumes immediately when the persisted YouTube quota pause expires', async () => {
   let now = Date.parse('2026-10-23T06:59:00.000Z');
   const blockedUntil = now + 60 * 1000;
@@ -140,12 +139,11 @@ test('SEO worker resumes immediately when the persisted YouTube quota pause expi
     async isConnected() { return true; },
     async ownedChannel() {
       ownedChannelCalls += 1;
-      resolveResumed();
       throw new Error('stop after confirming the worker woke');
     }
   };
   const worker = createSeoWorker({
-    store, youtube, env: {}, logger: { info() {}, warn() {}, error() {} },
+    store, youtube, env: {}, logger: { info() {}, warn() {}, error() { resolveResumed(); } },
     setTimeoutFn(callback, delay) {
       timer = { callback, delay, unref() {} };
       return timer;
