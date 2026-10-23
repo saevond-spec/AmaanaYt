@@ -9,6 +9,7 @@ const { createPlaylistAutoAssigner } = require('../src/playlist-auto');
 const { createSeoMarket } = require('../src/seo-market');
 const { createShortViewMonitor } = require('../src/short-views');
 const { createSeoWorker } = require('../src/seo-worker');
+const { recordYouTubeDataApiQuotaBlock } = require('../src/youtube-quota');
 
 const BLOCKED_UNTIL = '2099-01-01T00:00:00.000Z';
 
@@ -127,28 +128,29 @@ test('SEO worker resumes immediately when the persisted YouTube quota pause expi
   const blockedUntil = now + 60 * 1000;
   let storedBlock = { blockedUntil, reason: 'daily quota' };
   let timer = null;
+  let scheduledRun = null;
   let ownedChannelCalls = 0;
-  let resolveResumed;
-  const resumed = new Promise((resolve) => { resolveResumed = resolve; });
   const store = blockedStore({
     async getYoutubeDataApiQuotaBlock() { return storedBlock; },
-    async getSeoSyncState() { return {}; },
+    async saveYoutubeDataApiQuotaBlock(value) { storedBlock = value; return value; },
+    async getSeoSyncState() {
+      return { enabled: false, completed: true, viewPriorityScanVersion: 1,
+        channelId: 'channel-id', recentAt: new Date(blockedUntil).toISOString() };
+    },
     async saveSeoSyncState() {}
   });
   const youtube = {
     async isConnected() { return true; },
-    async ownedChannel() {
-      ownedChannelCalls += 1;
-      throw new Error('stop after confirming the worker woke');
-    }
+    async ownedChannel() { ownedChannelCalls += 1; return { id: 'channel-id', title: 'Amaana' }; }
   };
   const worker = createSeoWorker({
-    store, youtube, env: {}, logger: { info() {}, warn() {}, error() { resolveResumed(); } },
+    store, youtube, env: {}, logger: { info() {}, warn() {}, error() {} },
     setTimeoutFn(callback, delay) {
       timer = { callback, delay, unref() {} };
       return timer;
     },
-    clearTimeoutFn() {}
+    clearTimeoutFn() {},
+    setImmediateFn(callback) { scheduledRun = callback; }
   });
   const realNow = Date.now;
   Date.now = () => now;
@@ -156,11 +158,61 @@ test('SEO worker resumes immediately when the persisted YouTube quota pause expi
     await worker.run();
     assert.equal(ownedChannelCalls, 0);
     assert.equal(timer?.delay, 60 * 1000);
+    const firstTimer = timer;
+    firstTimer.callback(); // Simulate an early timer delivery.
+    assert.equal(ownedChannelCalls, 0);
+    assert.notEqual(timer, firstTimer);
+    assert.equal(timer?.delay, 60 * 1000);
+
     storedBlock = null;
     now = blockedUntil;
     timer.callback();
-    await resumed;
+    assert.equal(typeof scheduledRun, 'function');
+    await scheduledRun();
     assert.equal(ownedChannelCalls, 1);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('a stale quota timer cannot replace a newer persisted deadline', async () => {
+  let now = Date.parse('2026-10-23T06:00:00.000Z');
+  let storedBlock = { blockedUntil: now + 60 * 1000, reason: 'daily quota' };
+  const timers = [];
+  const cleared = [];
+  const store = blockedStore({
+    async getYoutubeDataApiQuotaBlock() { return storedBlock; },
+    async saveYoutubeDataApiQuotaBlock(value) { storedBlock = value; return value; },
+    async getSeoSyncState() { return {}; },
+    async saveSeoSyncState() {}
+  });
+  const worker = createSeoWorker({
+    store,
+    youtube: { async isConnected() { return true; } },
+    env: {}, logger: { info() {}, warn() {}, error() {} },
+    setTimeoutFn(callback, delay) {
+      const timer = { callback, delay, unref() {} };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeoutFn(timer) { cleared.push(timer); }
+  });
+  const realNow = Date.now;
+  Date.now = () => now;
+  try {
+    await worker.run();
+    const firstTimer = timers[0];
+    await recordYouTubeDataApiQuotaBlock(store, now + 2 * 60 * 1000, now);
+    await worker.run();
+    const secondTimer = timers[1];
+    assert.ok(cleared.includes(firstTimer));
+
+    firstTimer.callback(); // A canceled callback may already be queued.
+    await recordYouTubeDataApiQuotaBlock(store, now + 3 * 60 * 1000, now);
+    await worker.run();
+
+    assert.equal(timers.length, 3);
+    assert.ok(cleared.includes(secondTimer));
   } finally {
     Date.now = realNow;
   }
