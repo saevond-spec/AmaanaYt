@@ -58,6 +58,8 @@ function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], init
     liveLookups: 0, liveClipCreates: [], liveCommunityClipLookups: 0 };
   const liveClipRequests = new Map();
   let liveClipNumber = 0;
+  const visualScreeningAvailable = typeof visualGameplayVerificationAvailable === 'function'
+    ? visualGameplayVerificationAvailable : () => visualGameplayVerificationAvailable;
   const twitch = {
     async listRecentArchivedVods(options) {
       calls.vodList += 1;
@@ -133,7 +135,7 @@ function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], init
     idFactory: (() => { let id = 0; return () => `batch-${++id}`; })(), now,
     scanIntervalMs: 15 * MINUTE, targetDurationSeconds,
     liveCaptureIntervalMs, liveCaptureDurationSeconds,
-    visualGameplayVerificationAvailable: () => visualGameplayVerificationAvailable
+    visualGameplayVerificationAvailable: visualScreeningAvailable
   });
   return {
     discovery, twitch, store, drafts, enqueued, enqueuedClips, calls,
@@ -236,6 +238,28 @@ test('holds Twitch VOD work when opt-in visual gameplay screening is disabled', 
   assert.equal(result.queued, 0);
   assert.equal(h.calls.clipList, 0);
   assert.equal(h.drafts.length, 0);
+  assert.equal(h.state.lastScannedAt[vod.id], undefined);
+});
+
+test('screening recovery clears stale VOD scan cooldowns and resumes discovery immediately', async () => {
+  const vod = makeVod();
+  let screeningAvailable = false;
+  const h = harness({ vods: [vod], visualGameplayVerificationAvailable: () => screeningAvailable,
+    initialState: { lastScannedAt: { [vod.id]: '2026-10-18T14:59:00.000Z' }, liveSessions: {} },
+    clipsByVod: { [vod.id]: [makeClip('candidate', 300, 30, 20)] } });
+
+  const paused = await h.discovery.run();
+  assert.equal(paused.visualScreeningUnavailable, 1);
+  assert.equal(h.state.visualGameplayScreeningAvailable, false);
+  assert.equal(h.state.lastScannedAt[vod.id], undefined);
+  assert.equal(h.calls.clipList, 0);
+
+  screeningAvailable = true;
+  const resumed = await h.discovery.run();
+  assert.equal(resumed.queued, 1);
+  assert.equal(h.calls.clipList, 1);
+  assert.equal(h.drafts.length, 1);
+  assert.equal(h.drafts[0].vodId, vod.id);
 });
 
 test('creates one private-pipeline batch from Amaana-discovered Twitch clip evidence', async () => {
