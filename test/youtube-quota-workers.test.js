@@ -123,9 +123,10 @@ test('SEO worker honors the shared quota pause before catalog reads', async () =
   assert.equal(catalogReads, 0);
 });
 
-test('SEO worker resumes immediately when the persisted YouTube quota pause expires', async () => {
+test('SEO worker resumes after the daily quota reset grace', async () => {
   let now = Date.parse('2026-10-23T06:59:00.000Z');
   const blockedUntil = now + 60 * 1000;
+  const graceMs = 60 * 1000;
   let storedBlock = { blockedUntil, reason: 'daily quota' };
   let timer = null;
   let scheduledRun = null;
@@ -143,8 +144,9 @@ test('SEO worker resumes immediately when the persisted YouTube quota pause expi
     async isConnected() { return true; },
     async ownedChannel() { ownedChannelCalls += 1; return { id: 'channel-id', title: 'Amaana' }; }
   };
+  const workerErrors = [];
   const worker = createSeoWorker({
-    store, youtube, env: {}, logger: { info() {}, warn() {}, error() {} },
+    store, youtube, env: {}, logger: { info() {}, warn() {}, error(...args) { workerErrors.push(args); } },
     setTimeoutFn(callback, delay) {
       timer = { callback, delay, unref() {} };
       return timer;
@@ -157,19 +159,30 @@ test('SEO worker resumes immediately when the persisted YouTube quota pause expi
   try {
     await worker.run();
     assert.equal(ownedChannelCalls, 0);
-    assert.equal(timer?.delay, 60 * 1000);
+    assert.equal(timer?.delay, 60 * 1000 + graceMs);
     const firstTimer = timer;
     firstTimer.callback(); // Simulate an early timer delivery.
     assert.equal(ownedChannelCalls, 0);
     assert.notEqual(timer, firstTimer);
-    assert.equal(timer?.delay, 60 * 1000);
+    assert.equal(timer?.delay, 60 * 1000 + graceMs);
 
     storedBlock = null;
-    now = blockedUntil;
+    now = blockedUntil + graceMs;
     timer.callback();
     assert.equal(typeof scheduledRun, 'function');
-    await scheduledRun();
+    let completionTimer;
+    try {
+      await Promise.race([
+        scheduledRun(),
+        new Promise((_, reject) => {
+          completionTimer = setTimeout(() => reject(new Error('resumed SEO pass timed out')), 5000);
+        })
+      ]);
+    } finally {
+      if (completionTimer) clearTimeout(completionTimer);
+    }
     assert.equal(ownedChannelCalls, 1);
+    assert.deepEqual(workerErrors, []);
   } finally {
     Date.now = realNow;
   }
@@ -177,7 +190,7 @@ test('SEO worker resumes immediately when the persisted YouTube quota pause expi
 
 test('a stale quota timer cannot replace a newer persisted deadline', async () => {
   let now = Date.parse('2026-10-23T06:00:00.000Z');
-  let storedBlock = { blockedUntil: now + 60 * 1000, reason: 'daily quota' };
+  let storedBlock = { blockedUntil: now + 60 * 1000, reason: 'YouTube Data API rate limit reached' };
   const timers = [];
   const cleared = [];
   const store = blockedStore({
