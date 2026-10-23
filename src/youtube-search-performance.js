@@ -57,11 +57,20 @@ function youtubeSearchReportQueries(videoId, startDate, endDate) {
   ];
 }
 function metricCount(value, label) {
-  const count = Number(value);
+  const normalized = typeof value === 'string' ? value.trim() : value;
+  const count = typeof normalized === 'number' ? normalized
+    : typeof normalized === 'string' && /^\d+$/.test(normalized) ? Number(normalized) : NaN;
   if (!Number.isSafeInteger(count) || count < 0) {
     throw new Error('YouTube Analytics returned an invalid ' + label + ' count');
   }
   return count;
+}
+function addMetricCount(total, value, label) {
+  const sum = total + metricCount(value, label);
+  if (!Number.isSafeInteger(sum)) {
+    throw new Error('YouTube Analytics returned an invalid ' + label + ' total');
+  }
+  return sum;
 }
 function summarizeYoutubeSearchPerformance(trafficRows, externalDetailRows, maxDetailRows = 25) {
   const traffic = Array.isArray(trafficRows) ? trafficRows : [];
@@ -71,9 +80,9 @@ function summarizeYoutubeSearchPerformance(trafficRows, externalDetailRows, maxD
   }
   const youtubeSearchViews = traffic
     .filter((row) => Array.isArray(row) && String(row[0] || '').toUpperCase() === 'YT_SEARCH')
-    .reduce((sum, row) => sum + metricCount(row[1], 'YouTube Search view'), 0);
+    .reduce((sum, row) => addMetricCount(sum, row[1], 'YouTube Search view'), 0);
   const matched = details.filter((row) => Array.isArray(row) && isGoogleExternalReferrer(row[0]));
-  const googleViews = matched.reduce((sum, row) => sum + metricCount(row[1], 'Google referral view'), 0);
+  const googleViews = matched.reduce((sum, row) => addMetricCount(sum, row[1], 'Google referral view'), 0);
   const capped = details.length >= maxDetailRows;
   return {
     youtubeSearchViews,
