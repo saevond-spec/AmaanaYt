@@ -9,7 +9,7 @@ const { isYouTubeQuotaError, youtubeQuotaRetryAt, getYouTubeDataApiQuotaBlock,
 
 function createSeoWorker({ store, youtube, env = process.env, logger = console, sleep,
   generate = generatePackage, analyze = analyzeVideo, market = null, playlistAuto = null,
-  setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout }) {
+  setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout, setImmediateFn = setImmediate }) {
   let running = false;
   let scheduled = false;
   let rerunRequested = false;
@@ -21,6 +21,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   let legacyTagRecoveryChecked = false;
   let quotaResumeTimer = null;
   let quotaResumeAt = 0;
+  let quotaResumeGeneration = 0;
   const configuredLimit = Number(env.SEO_DAILY_LIMIT);
   const dailyLimit = Number.isSafeInteger(configuredLimit) && configuredLimit >= 1 ? configuredLimit : 200;
   const configuredAnalysisBatch = Number(env.SEO_ANALYSIS_BATCH_SIZE);
@@ -146,8 +147,11 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     if (quotaResumeTimer && quotaResumeAt >= retryAt) return;
     if (quotaResumeTimer) clearTimeoutFn(quotaResumeTimer);
     quotaResumeAt = retryAt;
+    const generation = ++quotaResumeGeneration;
     const delay = Math.min(2_147_483_647, Math.max(1, retryAt - Date.now()));
     quotaResumeTimer = setTimeoutFn(() => {
+      if (generation !== quotaResumeGeneration) return;
+      quotaResumeGeneration += 1;
       quotaResumeTimer = null;
       quotaResumeAt = 0;
       if (retryAt > Date.now()) {
@@ -550,7 +554,7 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
     const minimumInterval = catalogScanIncomplete ? 5 * 60 * 1000 : recentScanIntervalMs;
     if (scheduled || !force && Date.now() - lastRun < minimumInterval) return;
     scheduled = true;
-    setImmediate(async () => {
+    setImmediateFn(async () => {
       scheduled = false;
       try { await run(); } catch (error) {
         if (isYouTubeAuthorizationError(error)) {
