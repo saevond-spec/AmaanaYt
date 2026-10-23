@@ -143,7 +143,8 @@ test('live market evidence reaches the prompt as observations without replacing 
     apiKey: 'unit-test-key', model: 'test-model',
     marketEvidence: { game: 'NARAKA: BLADEPOINT', query: 'NARAKA: BLADEPOINT gameplay',
       observedAt: '2026-10-02T12:00:00Z', windowDays: 7,
-      metrics: { sampleCount: 10, medianViewsPerDay: 200, p90ViewsPerDay: 450, confidence: 0.42 },
+      metrics: { sampleCount: 10, medianViewsPerDay: 200, p90ViewsPerDay: 450, confidence: 0.42,
+        phraseSuggestionsEligible: true },
       terms: [{ phrase: 'solo parry', score: 0.8, sampleCount: 3 }],
       samples: [{ id: 'sample-1', title: 'NARAKA parry', publishedAt: '2026-10-01T00:00:00Z',
         viewCount: 400, estimatedViewsPerDay: 400 }] },
@@ -157,7 +158,28 @@ test('live market evidence reaches the prompt as observations without replacing 
   assert.match(prompt, /solo parry/);
   assert.match(prompt, /NARAKA parry/);
   assert.match(prompt, /estimatedViewsPerDay/);
+  assert.match(prompt, /same-game duration band/);
+  assert.match(prompt, /A source share can rise when total views fall/);
   assert.match(prompt, /Opening, first round, final fight/);
+});
+
+test('unsupported market phrases are withheld from the model prompt', async () => {
+  let prompt;
+  const result = await generatePackage(source, context, {
+    apiKey: 'unit-test-key', model: 'test-model',
+    marketEvidence: { game: 'NARAKA: BLADEPOINT', observedAt: '2026-10-02T12:00:00Z',
+      metrics: { sampleCount: 4, phraseSuggestionsEligible: false, phraseSuggestionReason: 'too_few_comparable_samples' },
+      terms: [{ phrase: 'unverified trend', score: 0.9, sampleCount: 1 }],
+      samples: [{ id: 'sample-1', title: 'unverified trend', viewCount: 3 }] },
+    fetchImpl: async (_url, options) => {
+      prompt = JSON.parse(options.body).messages[1].content;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) };
+    }
+  });
+  assert.doesNotMatch(prompt, /unverified trend/);
+  assert.match(prompt, /too_few_comparable_samples/);
+  assert.deepEqual(result.evidence.marketTerms, []);
+  assert.equal(result.evidence.marketPhraseSignal, 'too_few_comparable_samples');
 });
 
 test('SEO prompt context is compact while duplicate checks still use the full catalog', async () => {
