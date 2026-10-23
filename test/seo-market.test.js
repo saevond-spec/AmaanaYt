@@ -107,7 +107,7 @@ test('refreshes stale samples, excludes the owner channel, caps examples at five
     examples.push({
       id: 'sample-' + index, title: 'Example ' + index,
       publishedAt: '2026-10-02T12:00:00.000Z', viewCount: index * 100,
-      estimatedViewsPerDay: index * 100, channelId: 'other-channel', durationSeconds: 900
+      estimatedViewsPerDay: index * 100, channelId: 'other-channel-' + index, durationSeconds: 900
     });
   }
   const state = fixture({ snapshots: [['ARC Raiders', stale]], examples });
@@ -142,13 +142,13 @@ test('enforces the three-query Pacific quota-day budget and resets at midnight P
   assert.equal(state.calls(), 1);
 });
 
-test('market ranking shrinks very new view spikes, reports robust spread, and scores repeated title phrases', () => {
+test('market ranking shrinks new-view spikes and reports robust spread without claiming phrase causality', () => {
   const now = Date.parse('2026-10-07T12:00:00Z');
   const examples = [
-    { id: 'new-spike', title: 'ARC Raiders solo extraction', publishedAt: '2026-10-07T11:00:00Z', viewCount: 600, durationSeconds: 900 },
-    { id: 'steady-one', title: 'ARC Raiders solo extraction guide', publishedAt: '2026-10-04T12:00:00Z', viewCount: 900, durationSeconds: 900 },
-    { id: 'steady-two', title: 'ARC Raiders solo fight', publishedAt: '2026-10-04T12:00:00Z', viewCount: 600, durationSeconds: 900 },
-    { id: 'steady-three', title: 'ARC Raiders squad gameplay', publishedAt: '2026-10-04T12:00:00Z', viewCount: 300, durationSeconds: 900 }
+    { id: 'new-spike', channelId: 'creator-1', title: 'ARC Raiders solo extraction', publishedAt: '2026-10-07T11:00:00Z', viewCount: 600, durationSeconds: 900 },
+    { id: 'steady-one', channelId: 'creator-2', title: 'ARC Raiders solo extraction guide', publishedAt: '2026-10-04T12:00:00Z', viewCount: 900, durationSeconds: 900 },
+    { id: 'steady-two', channelId: 'creator-3', title: 'ARC Raiders solo fight', publishedAt: '2026-10-04T12:00:00Z', viewCount: 600, durationSeconds: 900 },
+    { id: 'steady-three', channelId: 'creator-4', title: 'ARC Raiders squad gameplay', publishedAt: '2026-10-04T12:00:00Z', viewCount: 300, durationSeconds: 900 }
   ];
   const summary = summarizeMarketSamples(examples, { now, game: 'ARC Raiders', durationSeconds: 900 });
   assert.equal(summary.metrics.sampleCount, 4);
@@ -177,7 +177,60 @@ test('market phrase suggestions require repeated support across a comparable sam
   assert.equal(summary.metrics.comparisonBasis, 'same_game_and_duration_band');
   assert.equal(summary.metrics.phraseSuggestionsEligible, true);
   assert.ok(summary.terms.some((term) => term.phrase === 'solo extraction' && term.sampleCount >= 3));
+  assert.ok(summary.terms.every((term) => Number.isFinite(term.score) && term.score >= 0));
   assert.ok(summary.samples.every((item) => item.durationSeconds === 900));
+});
+
+test('repeated uploads from one channel do not inflate distinct-channel phrase support', () => {
+  const now = Date.parse('2026-10-07T12:00:00Z');
+  const samples = Array.from({ length: 10 }, (_value, index) => ({
+    ...marketSample(index + 1), channelId: 'one-creator', viewCount: index + 1,
+    title: 'ARC Raiders solo extraction guide',
+    publishedAt: new Date(now - (index + 1) * 24 * 60 * 60 * 1000).toISOString()
+  }));
+  const summary = summarizeMarketSamples(samples, { now, game: 'ARC Raiders', durationSeconds: 900 });
+  assert.equal(summary.metrics.sampleCount, 10);
+  assert.equal(summary.metrics.distinctChannelCount, 1);
+  assert.equal(summary.metrics.positiveViewChannelCount, 1);
+  assert.equal(summary.metrics.phraseSuggestionReason, 'too_few_distinct_channels');
+  assert.equal(summary.metrics.phraseSuggestionsEligible, false);
+  assert.ok(summary.metrics.confidence <= 0.167, 'rounded score is capped by one independent channel');
+  assert.equal(summary.terms.length, 0);
+});
+
+test('all-zero results and repeated result IDs cannot create phrase suggestions', () => {
+  const now = Date.parse('2026-10-07T12:00:00Z');
+  const zeroResults = Array.from({ length: 10 }, (_value, index) => ({
+    ...marketSample(index + 1), viewCount: 0, title: 'ARC Raiders solo extraction guide',
+    publishedAt: new Date(now - (index + 1) * 24 * 60 * 60 * 1000).toISOString()
+  }));
+  const zeros = summarizeMarketSamples(zeroResults, { now, game: 'ARC Raiders', durationSeconds: 900 });
+  assert.equal(zeros.metrics.positiveViewChannelCount, 0);
+  assert.equal(zeros.metrics.phraseSuggestionReason, 'too_few_positive_view_channels');
+  assert.equal(zeros.metrics.phraseSuggestionsEligible, false);
+
+  const duplicate = summarizeMarketSamples([marketSample(1), marketSample(1)], {
+    now: Date.parse('2026-10-03T12:00:00Z'), game: 'ARC Raiders', durationSeconds: 900
+  });
+  assert.equal(duplicate.metrics.sampleCount, 1);
+  assert.equal(duplicate.metrics.distinctChannelCount, 1);
+});
+
+test('missing, malformed, fractional and unsafe public counts are excluded instead of coerced to zero', () => {
+  const now = Date.parse('2026-10-07T12:00:00Z');
+  const invalidCounts = [null, '', undefined, '1,2', -1, 1.5, 1e308, '9'.repeat(100)];
+  const samples = [
+    { ...marketSample(101), channelId: 'zero-number', viewCount: 0 },
+    { ...marketSample(102), channelId: 'zero-string', viewCount: '0' },
+    { ...marketSample(103), channelId: 'valid-grouped', viewCount: '1,000' },
+    ...invalidCounts.map((viewCount, index) => ({ ...marketSample(index + 104), viewCount })),
+    { ...marketSample(200), id: '', channelId: 'missing-id-channel', viewCount: 99 }
+  ];
+  const summary = summarizeMarketSamples(samples, { now, game: 'ARC Raiders', durationSeconds: 900 });
+  assert.equal(summary.metrics.sampleCount, 3);
+  assert.equal(summary.metrics.positiveViewChannelCount, 1);
+  assert.deepEqual(summary.samples.map((sample) => sample.viewCount), [1000, 0, 0]);
+  assert.ok(Number.isFinite(summary.metrics.medianViewsPerDay));
 });
 
 test('fails closed on YouTube research errors and records a warning', async () => {

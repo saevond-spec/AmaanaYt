@@ -97,6 +97,9 @@ function assertVideoMatchesCatalog(video, channelId, item) {
 function metadataOwnerReviewReason(item) {
   const pkg = item?.package || {};
   const warnings = Array.isArray(pkg.missingEvidence) ? pkg.missingEvidence : [];
+  if (warnings.some((warning) => /vidiq keyword estimates are directional|market-led metadata/i.test(String(warning)))) {
+    return 'VidIQ keyword evidence requires owner review before automatic SEO edits';
+  }
   if (pkg.metadataConflicts?.length || warnings.some((warning) =>
     /duplicate titles|closely matches another public video/i.test(String(warning)))) {
     return 'Generated title or description closely matches existing channel metadata; owner review is required';

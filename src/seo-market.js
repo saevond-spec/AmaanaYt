@@ -6,7 +6,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const VELOCITY_PRIOR_DAYS = 2;
 const MIN_MARKET_SAMPLE_AGE_DAYS = 1 / 24;
 const MIN_MARKET_PHRASE_SAMPLE_COUNT = 8;
+const MIN_MARKET_CHANNEL_COUNT = 4;
+const MIN_POSITIVE_VIEW_CHANNEL_COUNT = 3;
 const MIN_REPEATED_PHRASE_DOCUMENTS = 3;
+const MIN_REPEATED_PHRASE_CHANNELS = 3;
 const MIN_MARKET_PHRASE_CONFIDENCE = 0.25;
 const STOP_WORDS = new Set(['the', 'and', 'for', 'with', 'from', 'this', 'that', 'your', 'you',
   'game', 'gameplay', 'video', 'live', 'stream', 'clip', 'short', 'shorts', 'official']);
@@ -51,6 +54,15 @@ function quantile(values, probability) {
   return sorted[Math.max(0, Math.ceil(probability * sorted.length) - 1)];
 }
 
+function parseMarketViewCount(value) {
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!/^\d+$|^\d{1,3}(?:,\d{3})+$/.test(text)) return null;
+  const count = Number(text.replace(/,/g, ''));
+  return Number.isSafeInteger(count) && count >= 0 ? count : null;
+}
+
 function titlePhrases(title, game) {
   const gameWords = new Set(String(game || '').toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) || []);
   const words = String(title || '').toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
@@ -68,61 +80,108 @@ function titlePhrases(title, game) {
  */
 function summarizeMarketSamples(samples, { now = Date.now(), game = '', durationSeconds = null } = {}) {
   const targetDurationBand = durationBand(durationSeconds);
-  const eligible = (Array.isArray(samples) ? samples : []).filter((sample) => {
+  const eligibleCandidates = (Array.isArray(samples) ? samples : []).filter((sample) => {
+    if (!String(sample?.id || '').trim()) return false;
     const publishedAt = Date.parse(sample?.publishedAt || '');
-    const views = Number(sample?.viewCount);
+    const views = parseMarketViewCount(sample?.viewCount);
     const sampleDurationBand = durationBand(sample?.durationSeconds);
-    return Number.isFinite(publishedAt) && publishedAt <= now && Number.isFinite(views) && views >= 0 &&
+    return Number.isFinite(publishedAt) && publishedAt <= now && views !== null &&
       (!targetDurationBand || sampleDurationBand === targetDurationBand);
+  });
+  const seenVideoIds = new Set();
+  const eligible = eligibleCandidates.filter((sample) => {
+    const id = String(sample?.id || '').trim();
+    if (seenVideoIds.has(id)) return false;
+    seenVideoIds.add(id);
+    return true;
   }).map((sample) => {
     // Use observed fractional age. The two-day Gamma-Poisson prior below keeps
     // videos published minutes ago from producing unbounded daily-rate spikes.
     const ageDays = Math.max(MIN_MARKET_SAMPLE_AGE_DAYS,
       (now - Date.parse(sample.publishedAt)) / DAY_MS);
-    const viewCount = Number(sample.viewCount);
+    const viewCount = parseMarketViewCount(sample.viewCount);
     return { ...sample, ageDays, rawViewsPerDay: viewCount / ageDays, viewCount };
   });
   if (!eligible.length) return { metrics: { sampleCount: 0 }, terms: [], samples: [] };
 
-  const priorViewsPerDay = median(eligible.map((sample) => sample.rawViewsPerDay));
+  const rawRatesByChannel = new Map();
+  for (const sample of eligible) {
+    const channelId = String(sample.channelId || '').trim();
+    if (!channelId) continue;
+    const rates = rawRatesByChannel.get(channelId) || [];
+    rates.push(sample.rawViewsPerDay);
+    rawRatesByChannel.set(channelId, rates);
+  }
+  const creatorRawRates = [...rawRatesByChannel.values()].map((rates) => median(rates));
+  const priorViewsPerDay = median(creatorRawRates.length
+    ? creatorRawRates : eligible.map((sample) => sample.rawViewsPerDay));
   const smoothed = eligible.map((sample) => ({ ...sample,
     smoothedViewsPerDay: (sample.viewCount + priorViewsPerDay * VELOCITY_PRIOR_DAYS) /
       (sample.ageDays + VELOCITY_PRIOR_DAYS)
   }));
-  const velocities = smoothed.map((sample) => sample.smoothedViewsPerDay);
+  const velocitiesByChannel = new Map();
+  for (const sample of smoothed) {
+    const channelId = String(sample.channelId || '').trim();
+    if (!channelId) continue;
+    const rates = velocitiesByChannel.get(channelId) || [];
+    rates.push(sample.smoothedViewsPerDay);
+    velocitiesByChannel.set(channelId, rates);
+  }
+  const creatorVelocities = [...velocitiesByChannel.values()].map((rates) => median(rates));
+  const velocities = creatorVelocities.length ? creatorVelocities : smoothed.map((sample) => sample.smoothedViewsPerDay);
   const center = median(velocities);
   const mad = median(velocities.map((velocity) => Math.abs(velocity - center)));
   const sampleCount = smoothed.length;
-  // Sample-size shrinkage and robust dispersion keep a few outliers from looking certain.
-  const confidence = (sampleCount / (sampleCount + 5)) / (1 + mad / Math.max(1, center));
+  const distinctChannelCount = new Set(smoothed.map((sample) => String(sample.channelId || '').trim()).filter(Boolean)).size;
+  const positiveViewChannelCount = new Set(smoothed.filter((sample) => sample.viewCount > 0)
+    .map((sample) => String(sample.channelId || '').trim()).filter(Boolean)).size;
+  // Distinct channels, not video rows, set the effective support. Repeated uploads
+  // by one creator are correlated observations and must not inflate confidence.
+  const confidence = (distinctChannelCount / (distinctChannelCount + 5)) /
+    (1 + mad / Math.max(1, center));
   const weightedTerms = new Map();
   for (const sample of smoothed) {
-    const normalizedVelocity = Math.log1p(sample.smoothedViewsPerDay / Math.max(1, center));
+    const channelId = String(sample.channelId || '').trim();
     for (const phrase of titlePhrases(sample.title, game)) {
-      const entry = weightedTerms.get(phrase) || { documents: 0, weight: 0 };
+      const entry = weightedTerms.get(phrase) || { documents: 0, channels: new Set(), positiveChannels: new Set() };
       entry.documents += 1;
-      entry.weight += normalizedVelocity;
+      if (channelId) {
+        entry.channels.add(channelId);
+        if (sample.viewCount > 0) entry.positiveChannels.add(channelId);
+      }
       weightedTerms.set(phrase, entry);
     }
   }
   const terms = [...weightedTerms.entries()].map(([phrase, entry]) => {
-    const support = entry.documents / (entry.documents + 2);
-    const inverseDocumentFrequency = 1 + Math.log((sampleCount + 1) / (entry.documents + 1));
-    return { phrase, sampleCount: entry.documents,
-      score: Number((support * inverseDocumentFrequency * entry.weight / entry.documents).toFixed(4)) };
-  }).filter((term) => term.sampleCount >= MIN_REPEATED_PHRASE_DOCUMENTS)
+    const channelCount = entry.channels.size;
+    const positiveChannelCount = entry.positiveChannels.size;
+    const support = channelCount / (channelCount + 2);
+    const inverseDocumentFrequency = 1 + Math.log((distinctChannelCount + 1) / (channelCount + 1));
+    // Rank repeated title phrases by channel-level recurrence and positive-view
+    // coverage only. Do not imply that a phrase causes higher views: the search
+    // sample is selected and correlated, and it has no untreated control group.
+    return { phrase, sampleCount: entry.documents, channelCount, positiveChannelCount,
+      score: Number((support * inverseDocumentFrequency * (positiveChannelCount / Math.max(1, channelCount))).toFixed(4)) };
+  }).filter((term) => term.sampleCount >= MIN_REPEATED_PHRASE_DOCUMENTS &&
+    term.channelCount >= MIN_REPEATED_PHRASE_CHANNELS && term.positiveChannelCount >= 2)
     .sort((left, right) => right.score - left.score || left.phrase.localeCompare(right.phrase)).slice(0, 8);
   // This is an evidence gate, not a statistical significance claim. Search
   // result samples are a small, selected market snapshot, not search volume.
   const marketPhraseEligible = targetDurationBand !== null && sampleCount >= MIN_MARKET_PHRASE_SAMPLE_COUNT &&
+    distinctChannelCount >= MIN_MARKET_CHANNEL_COUNT && positiveViewChannelCount >= MIN_POSITIVE_VIEW_CHANNEL_COUNT &&
     confidence >= MIN_MARKET_PHRASE_CONFIDENCE && terms.length > 0;
   const marketPhraseReason = !targetDurationBand ? 'target_duration_unavailable' :
     sampleCount < MIN_MARKET_PHRASE_SAMPLE_COUNT ? 'too_few_comparable_samples' :
-      confidence < MIN_MARKET_PHRASE_CONFIDENCE ? 'weak_sample_consistency' :
-        terms.length === 0 ? 'no_repeated_phrase_support' : null;
+      distinctChannelCount < MIN_MARKET_CHANNEL_COUNT ? 'too_few_distinct_channels' :
+        positiveViewChannelCount < MIN_POSITIVE_VIEW_CHANNEL_COUNT ? 'too_few_positive_view_channels' :
+          confidence < MIN_MARKET_PHRASE_CONFIDENCE ? 'weak_sample_consistency' :
+            terms.length === 0 ? 'no_repeated_phrase_support' : null;
 
   const ranked = smoothed.sort((left, right) => right.smoothedViewsPerDay - left.smoothedViewsPerDay ||
-    right.viewCount - left.viewCount).slice(0, 5).map(({ id, title, publishedAt, viewCount,
+    right.viewCount - left.viewCount).filter((sample, index, sorted) => {
+      const channelId = String(sample.channelId || '').trim();
+      return !channelId || sorted.findIndex((item) => String(item.channelId || '').trim() === channelId) === index;
+    }).slice(0, 5).map(({ id, title, publishedAt, viewCount,
     durationSeconds, rawViewsPerDay, smoothedViewsPerDay }) => ({ id, title, publishedAt, viewCount,
     durationSeconds,
     estimatedViewsPerDay: Math.round(rawViewsPerDay), smoothedViewsPerDay: Math.round(smoothedViewsPerDay),
@@ -130,6 +189,8 @@ function summarizeMarketSamples(samples, { now = Date.now(), game = '', duration
   return {
     metrics: {
       sampleCount,
+      distinctChannelCount,
+      positiveViewChannelCount,
       durationBand: targetDurationBand,
       comparisonBasis: targetDurationBand ? 'same_game_and_duration_band' : 'same_game_only',
       priorDays: VELOCITY_PRIOR_DAYS,
@@ -137,7 +198,7 @@ function summarizeMarketSamples(samples, { now = Date.now(), game = '', duration
       medianViewsPerDay: Number(center.toFixed(1)),
       p90ViewsPerDay: Number(quantile(velocities, 0.9).toFixed(1)),
       medianAbsoluteDeviation: Number(mad.toFixed(1)),
-      confidenceSemantics: 'heuristic_stability_score_not_probability',
+      confidenceSemantics: 'heuristic_channel_adjusted_stability_score_not_probability_or_significance',
       confidence: Number(confidence.toFixed(3)),
       phraseSuggestionsEligible: marketPhraseEligible,
       phraseSuggestionReason: marketPhraseReason
