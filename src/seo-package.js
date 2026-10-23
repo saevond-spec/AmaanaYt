@@ -222,8 +222,12 @@ function validatePackage(raw, source, context, analysis = null, marketEvidence =
       videoAnalysis: Boolean(analysis),
       marketObservedAt: marketEvidence?.observedAt || null,
       marketSampleSize: marketEvidence?.metrics?.sampleCount || marketEvidence?.samples?.length || 0,
+      marketPhraseSignal: marketEvidence?.metrics?.phraseSuggestionsEligible === true
+        ? 'directional_repeated_phrase_evidence'
+        : marketEvidence?.metrics?.phraseSuggestionReason || 'unavailable',
       marketMetrics: marketEvidence?.metrics || null,
-      marketTerms: marketEvidence?.terms?.slice(0, 8) || [] },
+      marketTerms: marketEvidence?.metrics?.phraseSuggestionsEligible === true
+        ? marketEvidence.terms?.slice(0, 8) || [] : [] },
     generatedAt: new Date().toISOString()
   };
 }
@@ -277,8 +281,12 @@ async function generatePackage(source, context, { apiKey, model, baseUrl, fallba
       game: marketEvidence.game, query: marketEvidence.query,
       observedAt: marketEvidence.observedAt, windowDays: marketEvidence.windowDays,
       metrics: marketEvidence.metrics || null,
-      terms: marketEvidence.terms?.slice(0, 8) || [],
-      samples: marketEvidence.samples?.slice(0, 5)
+      phraseSignal: marketEvidence.metrics?.phraseSuggestionsEligible === true
+        ? 'directional repeated phrase evidence' : marketEvidence.metrics?.phraseSuggestionReason || 'unavailable',
+      terms: marketEvidence.metrics?.phraseSuggestionsEligible === true
+        ? marketEvidence.terms?.slice(0, 8) || [] : [],
+      samples: marketEvidence.metrics?.phraseSuggestionsEligible === true
+        ? marketEvidence.samples?.slice(0, 5) || [] : []
     } : null,
     existingChannelVideos: (Array.isArray(metadataPeers) ? metadataPeers : []).slice(0, PROMPT_METADATA_PEER_LIMIT).map((item) => ({
       videoId: String(item.videoId || '').slice(0, 32), title: String(item.title || '').slice(0, 100),
@@ -297,7 +305,8 @@ The hook is 50 to 160 characters and includes the primary keyword naturally. The
 Each thumbnail overlay has at most four words, complements its title, and has clear contrast in light and dark feeds.
 Return 3 to 8 focused tags, ordered from most relevant to least relevant. The first tag must be the exact primaryKeyword verbatim; then add exact game or mode terms, meaningful aliases, and common misspellings. Do not pad the list with generic tags. Only the first eight candidates are considered; the exact primary keyword is moved to the first position or added if missing, and total tag text stays under 450 characters. Treat tags as supporting metadata rather than a ranking driver.
 Keep each title and thumbnail promise accurate to the actual footage. Optimize for viewer satisfaction and watch time rather than click-through rate alone; a click is not a success if the video does not deliver on its promise.
-Market evidence is a sample of recent public YouTube search results, not search volume, total demand, or proof of this video's content. Compare age-adjusted and two-day median-shrunk view velocity, sample size, dispersion, and recurring title phrases only as weak market context. Use a phrase only when the footage, owner input, or video analysis supports it; never copy another creator's title or imply that an event, weapon, outcome, or update appears here unless the owner input or video analysis confirms it.
+Market evidence is a sample of recent public YouTube search results, not search volume, total demand, or proof of this video's content. It is compared within a same-game duration band and adjusted for sample age; duration is only a length proxy, not a Shorts/long-form classification. Treat repeated phrases as directional ideas only when phraseSignal says evidence is eligible. The confidence field is a heuristic stability score, not a probability or significance test. A missing trend, a single competitor example, an undated/broad keyword scan, or low sample confidence is not a keyword recommendation. Use a phrase only when the footage, owner input, or video analysis supports it; never copy another creator's title or imply that an event, weapon, outcome, or update appears here unless the owner input or video analysis confirms it.
+Do not infer demand or SEO causality from channel-wide view totals or traffic-source shares. A source share can rise when total views fall; use absolute counts and comparable per-video windows, and describe observed changes without claiming metadata caused them. Do not transfer a keyword trend across games, formats, or audiences. Search relevance depends on the title, description, tags, video content, and viewer response; tags are supporting metadata, not a substitute for accurate content.
 Do not invent games, outcomes, quotes, products, events, or steps absent from the evidence.
 Do not turn approximate video analysis moments into verified timestamps. Chapter and clip times are assembled separately from grounded markers. Provide clipHooks only for the supplied clip markers.
 Write in the video's language. No Markdown fencing. JSON only.
