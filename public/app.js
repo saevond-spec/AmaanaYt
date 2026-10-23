@@ -347,8 +347,15 @@ function renderDraft(draft, draftsById = new Map()) {
         const score = Math.round(Number(assessment.relativeRetentionScore) * 100);
         const intro = assessment.introRelativeRetentionScore === null || assessment.introRelativeRetentionScore === undefined
           ? '' : ` · first 30 seconds ${Math.round(Number(assessment.introRelativeRetentionScore) * 100)}/100`;
+        const engagement = Array.isArray(assessment.engagementByContentType)
+          ? assessment.engagementByContentType.find((item) => item && Number.isFinite(Number(item.engagedViews)))
+          : null;
+        const engagedViews = engagement ? ` · ${Number(engagement.engagedViews).toLocaleString()} engaged views` : '';
+        const comparison = assessment.channelBand?.calibrated
+          ? 'compared with the channel’s matched highlight cohort'
+          : 'channel comparison is still warming up';
         card.append(element('p', 'draft-meta',
-          `Post-upload 7-day retention ${score}/100 vs similar-length YouTube videos (median floor ${Math.round(Number(assessment.marketFloor) * 100)}/100; strong ceiling ${Math.round(Number(assessment.marketCeiling) * 100)}/100)${intro}. Status: ${String(assessment.status).replaceAll('_', ' ')}.`));
+          `Post-upload 7-day relative retention ${score}/100${engagedViews}${intro}; ${comparison}. Status: ${String(assessment.status).replaceAll('_', ' ')}.`));
       }
       const channelBand = assessment.channelBand;
       if (channelBand?.calibrated && Number.isFinite(Number(assessment.averageViewPercentage)) &&
@@ -357,7 +364,7 @@ function renderDraft(draft, draftsById = new Map()) {
           `Channel comparison from ${channelBand.sampleSize} similar highlights: average viewed ${Number(assessment.averageViewPercentage).toFixed(1)}% · floor ${Number(channelBand.floor).toFixed(1)}% · ceiling ${Number(channelBand.ceiling).toFixed(1)}%.`));
       } else if (channelBand && Number.isFinite(Number(channelBand.sampleSize))) {
         card.append(element('p', 'draft-meta',
-          `Channel-specific performance band warming up (${channelBand.sampleSize}/${channelBand.requiredSampleSize} comparable highlights with enough views).`));
+          `Channel-only comparison warming up (${channelBand.sampleSize}/${channelBand.requiredSampleSize} comparable highlights with enough views); no general-market benchmark is being inferred.`));
       }
     }
   }

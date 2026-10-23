@@ -448,7 +448,8 @@ test('SEO worker automatically measures mature published 15-minute highlights', 
       assert.equal(startDate, '2026-09-02');
       assert.equal(endDate, '2026-09-08');
       return { summaryRows: [['150', '900', '360', '40']],
-        retentionRows: Array.from({ length: 21 }, (_, index) => [index / 20, 0.6]) };
+        retentionRows: Array.from({ length: 21 }, (_, index) => [index / 20, 0.6]),
+        engagementRows: [['VIDEO_ON_DEMAND', '120', '150', '900']] };
     }
   };
   const worker = createSeoWorker({ store, youtube, env: {}, logger: { info() {}, warn() {} } });
@@ -456,7 +457,8 @@ test('SEO worker automatically measures mature published 15-minute highlights', 
   await worker.run();
 
   assert.equal(reportCalls, 1);
-  assert.equal(draft.youtubeQualityAssessment.status, 'within_market_band');
+  assert.equal(draft.youtubeQualityAssessment.status, 'warming_up');
+  assert.equal(draft.youtubeQualityAssessment.engagementByContentType[0].engagedViews, 120);
   assert.equal(draft.youtubeQualityAssessment.windowDays, 7);
   assert.equal(state.youtubeQualityAnalyticsRunDate, today);
 });

@@ -450,10 +450,11 @@ async function videoQualityReports(videoId, startDate, endDate) {
   }
   const auth = await oauthClient();
   const analytics = google.youtubeAnalytics({ version: 'v2', auth });
-  const [summary, retention] = await Promise.all(queries.map((query) => analytics.reports.query(query)));
+  const [summary, retention, engagement] = await Promise.all(queries.map((query) => analytics.reports.query(query)));
   return {
     summaryRows: summary.data?.rows || [],
-    retentionRows: retention.data?.rows || []
+    retentionRows: retention.data?.rows || [],
+    engagementRows: engagement.data?.rows || []
   };
 }
 

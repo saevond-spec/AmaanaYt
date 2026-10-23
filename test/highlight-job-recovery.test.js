@@ -27,7 +27,8 @@ test('startup recovery requeues resumable Twitch clips but waits for scheduled r
 });
 
 test('startup recovery requeues in-progress highlight batches and leaves review states alone', () => {
-  const statuses = ['clip_queued', 'creating_twitch_clips', 'assembling_highlight_video', 'creating_shorts'];
+  const statuses = ['clip_queued', 'creating_twitch_clips', 'assembling_highlight_video', 'creating_shorts',
+    'uploading_private_to_youtube'];
   const drafts = statuses.map((status, index) => ({
     id: 'batch-' + index, sourceType: 'twitch_highlight_batch', status
   }));

@@ -3,12 +3,11 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  MARKET_RETENTION_FLOOR,
-  MARKET_RETENTION_CEILING,
   CHANNEL_HISTORY_SIZE,
   youtubeVideoQualityQueries,
   summarizeRelativeRetention,
   summarizeChannelBand,
+  summarizeEngagementRows,
   summarizeYoutubeVideoQuality
 } = require('../src/youtube-video-quality');
 
@@ -31,7 +30,10 @@ test('requests seven-day video metrics and single-video relative retention with 
       metrics: 'views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage' },
     { ids: 'channel==MINE', startDate: '2026-10-01', endDate: '2026-10-07',
       filters: 'video==abcdefghijk', dimensions: 'elapsedVideoTimeRatio',
-      metrics: 'relativeRetentionPerformance' }
+      metrics: 'relativeRetentionPerformance' },
+    { ids: 'channel==MINE', startDate: '2026-10-01', endDate: '2026-10-07',
+      filters: 'video==abcdefghijk', dimensions: 'creatorContentType',
+      metrics: 'engagedViews,views,estimatedMinutesWatched' }
   ]);
   for (const args of [
     ['invalid', '2026-10-01', '2026-10-07'],
@@ -46,8 +48,6 @@ test('integrates the full relative-retention curve and interpolates the first-30
   assert.equal(result.pointCount, 21);
   assert.equal(result.score, 0.5);
   assert.equal(result.introScore, 0.22);
-  assert.equal(MARKET_RETENTION_FLOOR, 0.5);
-  assert.equal(MARKET_RETENTION_CEILING, 0.75);
 });
 
 test('deduplicates curve positions and refuses null, malformed, sparse, and out-of-range points', () => {
@@ -77,23 +77,26 @@ test('uses median and robust upper band from ten mature same-channel highlights'
   assert.equal(summarizeChannelBand(prior.map((item) => ({ ...item, views: 99 })), 40).sampleSize, 0);
 });
 
-test('classifies market retention, channel retention, and low-sample results without inventing data', () => {
+test('uses observed channel data only and exposes documented engaged-view rows', () => {
   const average = summarizeYoutubeVideoQuality([['150', '400', '160', '18']], retentionRows(), {
-    history: []
+    history: [], engagementRows: [['SHORTS', '120', '150', '400']]
   });
-  assert.equal(average.status, 'within_market_band');
+  assert.equal(average.status, 'warming_up');
   assert.equal(average.assessedViews, 150);
   assert.equal(average.averageViewPercentage, 18);
-  assert.equal(average.marketStatus, 'within_market_band');
+  assert.equal(average.marketStatus, undefined);
+  assert.equal(average.marketFloor, undefined);
+  assert.deepEqual(average.engagementByContentType, [{ creatorContentType: 'SHORTS',
+    engagedViews: 120, views: 150, estimatedMinutesWatched: 400 }]);
   assert.equal(average.channelBand.status, 'warming_up');
 
   const strong = summarizeYoutubeVideoQuality([['150', '1000', '600', '66']],
     retentionRows(() => 0.8), { history: [] });
-  assert.equal(strong.status, 'above_market_ceiling');
+  assert.equal(strong.status, 'warming_up');
 
   const below = summarizeYoutubeVideoQuality([['150', '100', '10', '1']],
     retentionRows(() => 0.3), { history: [] });
-  assert.equal(below.status, 'below_market_floor');
+  assert.equal(below.status, 'warming_up');
 
   const channel = summarizeYoutubeVideoQuality([['200', '600', '300', '40']], retentionRows(), {
     history: history([20, 21, 22, 23, 24, 25, 26, 27, 28, 29])
@@ -105,7 +108,14 @@ test('classifies market retention, channel retention, and low-sample results wit
     history: history([20, 21, 22, 23, 24, 25, 26, 27, 28, 29])
   });
   assert.equal(noAveragePercentage.averageViewPercentage, null);
-  assert.equal(noAveragePercentage.status, 'within_market_band');
+  assert.equal(noAveragePercentage.status, 'unavailable');
+
+  assert.deepEqual(summarizeEngagementRows([
+    ['VIDEO_ON_DEMAND', '0', '10', '2.5'], ['SHORTS', null, '3', '1'], ['bad']
+  ]), [
+    { creatorContentType: 'VIDEO_ON_DEMAND', engagedViews: 0, views: 10, estimatedMinutesWatched: 2.5 },
+    { creatorContentType: 'SHORTS', engagedViews: null, views: 3, estimatedMinutesWatched: 1 }
+  ]);
 
   const sparse = summarizeYoutubeVideoQuality([['22', null, null, null]], [], { history: [] });
   assert.equal(sparse.status, 'low_sample');

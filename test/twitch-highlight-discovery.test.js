@@ -43,14 +43,14 @@ function makeClip(id, offset, duration = 20, views = 1, overrides = {}) {
   };
 }
 
-function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], liveBroadcast = null, video = null,
+function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], initialState = null, liveBroadcast = null, video = null,
   liveCaptureIntervalMs = 3 * MINUTE, liveCaptureDurationSeconds = 60,
   liveClips = [],
   startAt = Date.parse('2026-10-18T15:00:00.000Z'),
   now = () => startAt, getVodError, listError, clipErrorByVod = {}, onClipsRead,
   targetDurationSeconds = 15, visualGameplayVerificationAvailable = true } = {}) {
   let clock = startAt;
-  let persistedState = null;
+  let persistedState = initialState ? structuredClone(initialState) : null;
   const drafts = [...initialDrafts];
   const enqueued = [];
   const enqueuedClips = [];
@@ -488,6 +488,42 @@ test('flushes leftover verified live captures into a private Short draft when th
   assert.equal(h.drafts[0].sourceType, 'twitch_vod');
   assert.equal(h.drafts[0].liveCapture, true);
   assert.deepEqual(h.enqueuedClips, [h.drafts[0].id]);
+});
+
+test('prunes drained ended live sessions instead of serializing empty records forever', async () => {
+  const h = harness({
+    liveBroadcast: null,
+    initialState: { liveSessions: {
+      'stream-old-a': { streamId: 'stream-old-a', candidates: [], shortCandidates: [], lastSeenAt: '2026-10-01T00:00:00Z' },
+      'stream-old-b': { streamId: 'stream-old-b', candidates: [], shortCandidates: [], lastSeenAt: '2026-10-02T00:00:00Z' }
+    } }
+  });
+  const result = await h.discovery.runLive();
+  assert.equal(result.status, 'not_live');
+  assert.equal(result.liveSessionsPruned, 2);
+  assert.deepEqual(h.state.liveSessions, {});
+});
+
+test('keeps an ended live session intact when the final Short flush cannot be queued', async () => {
+  const shortCandidates = Array.from({ length: 5 }, (_, index) => ({
+    clip: { id: 'final-' + index, visualGameplayVerification: {
+      verified: true, totalFrames: 5, activeGameplayFrames: 5, confidence: 0.95
+    } },
+    gameId: '509658', startSeconds: index * 60, duration: 60, viewCount: 0,
+    title: 'Verified gameplay ' + index, createdAt: `2026-10-02T00:0${index}:00Z`
+  }));
+  const h = harness({
+    liveBroadcast: null,
+    initialState: { liveSessions: { 'stream-ended': {
+      streamId: 'stream-ended', streamUserId: 'broadcaster-1', vodId: '1001',
+      sourceChannel: 'AmaanaYT', streamTitle: 'Ranked gaming session',
+      candidates: [], shortCandidates, lastSeenAt: '2026-10-02T00:00:00Z'
+    } } }
+  });
+  h.store.addDraft = async () => { throw new Error('database temporarily unavailable'); };
+  await h.discovery.runLive();
+  assert.deepEqual(h.state.liveSessions['stream-ended'].shortCandidates, shortCandidates);
+  assert.equal(h.state.liveSessions['stream-ended'].candidates.length, 0);
 });
 
 test('does not create Twitch clips for a live stream when visual gameplay screening is disabled', async () => {

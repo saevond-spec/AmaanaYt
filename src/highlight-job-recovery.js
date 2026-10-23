@@ -14,7 +14,8 @@ const RESUMABLE_HIGHLIGHT_BATCH_STATUSES = new Set([
   'clip_queued',
   'creating_twitch_clips',
   'assembling_highlight_video',
-  'creating_shorts'
+  'creating_shorts',
+  'uploading_private_to_youtube'
 ]);
 
 function resumableTwitchClipDrafts(drafts, now = Date.now()) {

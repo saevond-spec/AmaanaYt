@@ -1,7 +1,5 @@
 'use strict';
 
-const MARKET_RETENTION_FLOOR = 0.5;
-const MARKET_RETENTION_CEILING = 0.75;
 const CHANNEL_HISTORY_SIZE = 10;
 const CHANNEL_MINIMUM_VIEWS = 100;
 const MINIMUM_RETENTION_POINTS = 10;
@@ -22,7 +20,8 @@ function youtubeVideoQualityQueries(videoId, startDate, endDate) {
   const common = { ids: 'channel==MINE', startDate, endDate, filters: 'video==' + videoId };
   return [
     { ...common, metrics: 'views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage' },
-    { ...common, dimensions: 'elapsedVideoTimeRatio', metrics: 'relativeRetentionPerformance' }
+    { ...common, dimensions: 'elapsedVideoTimeRatio', metrics: 'relativeRetentionPerformance' },
+    { ...common, dimensions: 'creatorContentType', metrics: 'engagedViews,views,estimatedMinutesWatched' }
   ];
 }
 
@@ -132,9 +131,28 @@ function summarizeChannelBand(history, currentAverageViewPercentage) {
   };
 }
 
+function summarizeEngagementRows(rows) {
+  return (Array.isArray(rows) ? rows : []).flatMap((row) => {
+    if (!Array.isArray(row) || row.length < 4) return [];
+    const creatorContentType = String(row[0] || '').trim();
+    const engagedViewsValue = finiteMetric(row[1]);
+    const viewsValue = finiteMetric(row[2]);
+    const minutesValue = finiteMetric(row[3]);
+    if (!creatorContentType) return [];
+    return [{
+      creatorContentType,
+      engagedViews: engagedViewsValue !== null && engagedViewsValue >= 0 ? Math.floor(engagedViewsValue) : null,
+      views: viewsValue !== null && viewsValue >= 0 ? Math.floor(viewsValue) : null,
+      estimatedMinutesWatched: minutesValue !== null && minutesValue >= 0
+        ? Number(minutesValue.toFixed(2)) : null
+    }];
+  });
+}
+
 function summarizeYoutubeVideoQuality(summaryRows, retentionRows, {
   durationSeconds = 12 * 60,
-  history = []
+  history = [],
+  engagementRows = []
 } = {}) {
   const row = Array.isArray(summaryRows) && Array.isArray(summaryRows[0]) ? summaryRows[0] : [];
   const viewsValue = finiteMetric(row[0]);
@@ -150,12 +168,9 @@ function summarizeYoutubeVideoQuality(summaryRows, retentionRows, {
     ? Number(averageViewPercentageValue.toFixed(2)) : null;
   const relativeRetention = summarizeRelativeRetention(retentionRows, durationSeconds);
   const channelBand = summarizeChannelBand(history, averageViewPercentage);
-  const marketStatus = !relativeRetention.available ? 'insufficient_retention_data'
-    : relativeRetention.score < MARKET_RETENTION_FLOOR ? 'below_market_floor'
-      : relativeRetention.score >= MARKET_RETENTION_CEILING ? 'above_market_ceiling' : 'within_market_band';
   const status = views < CHANNEL_MINIMUM_VIEWS ? 'low_sample'
     : !relativeRetention.available ? 'insufficient_retention_data'
-      : channelBand.calibrated && channelBand.status !== 'unavailable' ? channelBand.status : marketStatus;
+      : !channelBand.calibrated ? 'warming_up' : channelBand.status;
 
   return {
     status,
@@ -166,20 +181,17 @@ function summarizeYoutubeVideoQuality(summaryRows, retentionRows, {
     relativeRetentionScore: relativeRetention.score,
     introRelativeRetentionScore: relativeRetention.introScore,
     retentionPointCount: relativeRetention.pointCount,
-    marketFloor: MARKET_RETENTION_FLOOR,
-    marketCeiling: MARKET_RETENTION_CEILING,
-    marketStatus,
-    channelBand
+    channelBand,
+    engagementByContentType: summarizeEngagementRows(engagementRows)
   };
 }
 
 module.exports = {
-  MARKET_RETENTION_FLOOR,
-  MARKET_RETENTION_CEILING,
   CHANNEL_HISTORY_SIZE,
   CHANNEL_MINIMUM_VIEWS,
   youtubeVideoQualityQueries,
   summarizeRelativeRetention,
   summarizeChannelBand,
+  summarizeEngagementRows,
   summarizeYoutubeVideoQuality
 };
