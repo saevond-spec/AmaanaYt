@@ -136,7 +136,9 @@ test('SEO worker resumes after the daily quota reset grace', async () => {
     async saveYoutubeDataApiQuotaBlock(value) { storedBlock = value; return value; },
     async getSeoSyncState() {
       return { enabled: false, completed: true, viewPriorityScanVersion: 1,
-        channelId: 'channel-id', recentAt: new Date(blockedUntil).toISOString() };
+        channelId: 'channel-id', recentAt: new Date(blockedUntil).toISOString(),
+        youtubeDataApiBlockedUntil: new Date(blockedUntil).toISOString(),
+        youtubeDataApiBlockReason: 'YouTube Data API daily quota exceeded' };
     },
     async saveSeoSyncState() {}
   });
@@ -166,7 +168,9 @@ test('SEO worker resumes after the daily quota reset grace', async () => {
     assert.notEqual(timer, firstTimer);
     assert.equal(timer?.delay, 60 * 1000 + graceMs);
 
-    storedBlock = null;
+    now = blockedUntil + graceMs / 2;
+    await worker.run(); // A regular/manual trigger must respect the daily reset grace too.
+    assert.equal(ownedChannelCalls, 0);
     now = blockedUntil + graceMs;
     timer.callback();
     assert.equal(typeof scheduledRun, 'function');
@@ -215,6 +219,7 @@ test('a stale quota timer cannot replace a newer persisted deadline', async () =
   try {
     await worker.run();
     const firstTimer = timers[0];
+    assert.equal(firstTimer.delay, 60 * 1000); // Short rate-limit blocks get no daily-reset grace.
     await recordYouTubeDataApiQuotaBlock(store, now + 2 * 60 * 1000, now);
     await worker.run();
     const secondTimer = timers[1];
