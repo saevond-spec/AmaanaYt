@@ -9,6 +9,9 @@ const HELIX_BASE = 'https://api.twitch.tv/helix';
 // Observed in Twitch's authenticated Get Clips Download response. Keep this host exact.
 const TRUSTED_CLIP_DOWNLOAD_HOSTS = new Set(['d1ndex63qxojbr.cloudfront.net']);
 const SCOPES = ['channel:manage:clips'];
+const DEFAULT_ARCHIVED_VOD_PAGE_SIZE = 100;
+const DEFAULT_ARCHIVED_VOD_MAX_PAGES = 5;
+const MAX_ARCHIVED_VOD_PAGES = 10;
 let lastValidatedAt = 0;
 
 function isConfigured() {
@@ -160,18 +163,49 @@ async function getVod(vodId) {
   return requireArchivedTwitchVod(vod, vodId, user.id);
 }
 
-async function listRecentArchivedVods({ first = 20 } = {}) {
+async function listRecentArchivedVods({ first = DEFAULT_ARCHIVED_VOD_PAGE_SIZE,
+  maxPages = DEFAULT_ARCHIVED_VOD_MAX_PAGES } = {}) {
   const user = await currentUser();
   const requestedFirst = Math.floor(Number(first));
   const pageSize = Number.isFinite(requestedFirst) && requestedFirst > 0
-    ? Math.min(100, Math.max(1, requestedFirst)) : 20;
-  const [videosPayload, streamsPayload] = await Promise.all([
+    ? Math.min(100, Math.max(1, requestedFirst)) : DEFAULT_ARCHIVED_VOD_PAGE_SIZE;
+  const requestedPages = Math.floor(Number(maxPages));
+  const pageLimit = Number.isFinite(requestedPages) && requestedPages > 0
+    ? Math.min(MAX_ARCHIVED_VOD_PAGES, Math.max(1, requestedPages))
+    : DEFAULT_ARCHIVED_VOD_MAX_PAGES;
+  const [firstVideosPayload, streamsPayload] = await Promise.all([
     helix('/videos', { query: { user_id: user.id, type: 'archive', first: pageSize } }),
     helix('/streams', { query: { user_id: user.id, first: 100 } })
   ]);
+  const videos = [];
+  const seenVodIds = new Set();
+  const appendPage = (payload) => {
+    for (const vod of payload.data || []) {
+      const id = String(vod && vod.id || '');
+      if (!id || seenVodIds.has(id)) continue;
+      seenVodIds.add(id);
+      videos.push(vod);
+    }
+  };
+  appendPage(firstVideosPayload);
+
+  const seenCursors = new Set();
+  let cursor = firstVideosPayload.pagination && firstVideosPayload.pagination.cursor;
+  for (let page = 1; page < pageLimit && cursor; page += 1) {
+    if (seenCursors.has(cursor)) break;
+    seenCursors.add(cursor);
+    const payload = await helix('/videos', {
+      query: { user_id: user.id, type: 'archive', first: pageSize, after: cursor }
+    });
+    appendPage(payload);
+    const nextCursor = payload.pagination && payload.pagination.cursor;
+    if (!nextCursor || seenCursors.has(nextCursor)) break;
+    cursor = nextCursor;
+  }
+
   const activeStreamIds = new Set((streamsPayload.data || [])
     .map((stream) => String(stream.id || '')).filter(Boolean));
-  return (videosPayload.data || [])
+  return videos
     .filter((vod) => vod && vod.type === 'archive' && String(vod.user_id || '') === String(user.id))
     .filter((vod) => !activeStreamIds.has(String(vod.stream_id || '')) &&
       !activeStreamIds.has(String(vod.id || '')))
