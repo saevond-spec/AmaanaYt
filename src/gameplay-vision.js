@@ -1,7 +1,7 @@
 const { clean, retryAfterDetails, createModelCircuitBreaker } = require('./seo-package');
 
 const GAMEPLAY_EVENT_TYPES = Object.freeze(['fight', 'rare_loot', 'clutch']);
-const DEFAULT_PROVIDER_ORDER = Object.freeze(['gemini', 'openai', 'openai_compatible', 'anthropic', 'ollama']);
+const DEFAULT_PROVIDER_ORDER = Object.freeze(['gemini', 'grok', 'openai', 'openai_compatible', 'anthropic', 'ollama']);
 const MAX_FRAME_COUNT = 8;
 const DEFAULT_COMPAT_MAX_IMAGES = 3;
 
@@ -9,7 +9,13 @@ function resolveProviderOrder(value) {
   const names = String(value || '').trim().toLowerCase();
   const requested = !names || names === 'auto'
     ? DEFAULT_PROVIDER_ORDER
-    : names.split(',').map((name) => name.trim().replaceAll('-', '_'));
+    : names.split(',').map((name) => {
+      const normalized = name.trim().toLowerCase().replaceAll('-', '_');
+      if (normalized === 'google') return 'gemini';
+      if (normalized === 'xai') return 'grok';
+      if (normalized === 'groq') return 'openai_compatible';
+      return normalized;
+    });
   return [...new Set(requested.filter((name) => DEFAULT_PROVIDER_ORDER.includes(name)))];
 }
 
@@ -52,9 +58,17 @@ function normalizeBaseUrl(value, { allowLocalHttp = false, allowPrivateHttp = fa
 function configuredProviders(env = process.env, { apiKey, model } = {}) {
   const providers = {
     gemini: (() => {
-      const key = apiKey || env.GAMEPLAY_VISION_GEMINI_API_KEY || env.GEMINI_API_KEY || env.VIDEO_ANALYSIS_API_KEY;
+      const key = apiKey || env.GAMEPLAY_VISION_GEMINI_API_KEY || env.GEMINI_API_KEY ||
+        env.GOOGLE_API_KEY || env.VIDEO_ANALYSIS_API_KEY;
       return key ? { name: 'gemini', apiKey: String(key), model: String(
         env.GAMEPLAY_VISION_GEMINI_MODEL || env.GEMINI_VISION_MODEL || env.VIDEO_ANALYSIS_MODEL || model || 'gemini-3.8-flash') } : null;
+    })(),
+    grok: (() => {
+      const apiKey = env.GAMEPLAY_VISION_GROK_API_KEY || env.XAI_API_KEY || env.GROK_API_KEY;
+      const baseUrl = normalizeBaseUrl(env.GAMEPLAY_VISION_GROK_BASE_URL || 'https://api.x.ai/v1');
+      return apiKey && baseUrl ? { name: 'grok', apiKey: String(apiKey), baseUrl,
+        model: String(env.GAMEPLAY_VISION_GROK_MODEL || env.GROK_MODEL || 'grok-4.7'),
+        maxImages: resolveImageLimit(env.GAMEPLAY_VISION_GROK_MAX_IMAGES) } : null;
     })(),
     openai: env.GAMEPLAY_VISION_OPENAI_API_KEY
       ? { name: 'openai', apiKey: String(env.GAMEPLAY_VISION_OPENAI_API_KEY),
@@ -193,7 +207,7 @@ function endpointFor(provider) {
     return `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(provider.model)}:generateContent`;
   }
   if (provider.name === 'openai') return 'https://api.openai.com/v1/responses';
-  if (provider.name === 'openai_compatible') return `${provider.baseUrl}/chat/completions`;
+  if (provider.name === 'openai_compatible' || provider.name === 'grok') return `${provider.baseUrl}/chat/completions`;
   if (provider.name === 'anthropic') return 'https://api.anthropic.com/v1/messages';
   return `${provider.baseUrl}/api/chat`;
 }
@@ -212,7 +226,7 @@ function makeRequest(provider, frames, prompt) {
     text: { format: { type: 'json_object' } },
     max_output_tokens: 1800
   };
-  if (provider.name === 'openai_compatible') return {
+  if (provider.name === 'openai_compatible' || provider.name === 'grok') return {
     model: provider.model,
     messages: [{ role: 'user', content: [{ type: 'text', text: prompt },
       ...frames.map((frame) => ({ type: 'image_url',
@@ -237,7 +251,7 @@ function responseText(provider, body) {
     return (body.output || []).flatMap((item) => item.content || [])
       .map((part) => part.text || part.output_text || '').join('');
   }
-  if (provider.name === 'openai_compatible') return getTextContent(body.choices?.[0]?.message?.content);
+  if (provider.name === 'openai_compatible' || provider.name === 'grok') return getTextContent(body.choices?.[0]?.message?.content);
   if (provider.name === 'anthropic') return (body.content || []).map((part) => part.text || '').join('');
   return getTextContent(body.message?.content);
 }
@@ -285,7 +299,7 @@ async function analyzeGameplayFrames(frames, {
       break;
     }
     try {
-      const providerFrames = provider.name === 'openai_compatible'
+      const providerFrames = provider.name === 'openai_compatible' || provider.name === 'grok'
         ? selectRepresentativeFrames(frames, provider.maxImages || DEFAULT_COMPAT_MAX_IMAGES)
         : frames;
       const response = await fetchImpl(endpointFor(provider), {

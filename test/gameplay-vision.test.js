@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { analyzeGameplayFrames, configuredProviders, getGameplayVisionStatus,
-  resolveImageLimit, selectRepresentativeFrames, gameplayEventLabel, buildGameplayPrompt } = require('../src/gameplay-vision');
+  resolveImageLimit, resolveProviderOrder, selectRepresentativeFrames, gameplayEventLabel, buildGameplayPrompt } = require('../src/gameplay-vision');
 const { createModelCircuitBreaker } = require('../src/seo-package');
 
 const frames = Array.from({ length: 5 }, (_, index) => ({
@@ -28,6 +28,17 @@ test('screening auto-enables from provider presence without a positive gameplay 
   assert.deepEqual(status.configuredProviders, ['gemini']);
   assert.equal(status.explicitlyDisabled, false);
   assert.equal(JSON.stringify(status).includes('gemini-secret'), false);
+});
+
+test('Google and xAI standard key names activate redacted Gemini and Grok providers', () => {
+  const env = { GOOGLE_API_KEY: 'google-secret', XAI_API_KEY: 'xai-secret',
+    GAMEPLAY_VISION_PROVIDER_ORDER: 'google,xai' };
+  const providers = configuredProviders(env);
+  assert.deepEqual(resolveProviderOrder(env.GAMEPLAY_VISION_PROVIDER_ORDER), ['gemini', 'grok']);
+  assert.deepEqual(providers.map((provider) => provider.name), ['gemini', 'grok']);
+  assert.equal(providers[1].baseUrl, 'https://api.x.ai/v1');
+  assert.equal(providers[1].model, 'grok-4.7');
+  assert.equal(JSON.stringify(getGameplayVisionStatus(env)).includes('xai-secret'), false);
 });
 
 test('explicit false remains a kill switch and missing providers fail closed', () => {
@@ -93,6 +104,26 @@ test('Gemini transient failure falls through to a Groq-compatible vision endpoin
   assert.equal(requests[1].body.messages[0].content.filter((part) => part.type === 'image_url').length, 3);
   assert.equal(requests[1].body.messages[0].content[1].image_url.url.startsWith('data:image/jpeg;base64,'), true);
   assert.equal(result.provider, 'openai_compatible');
+  assert.deepEqual(result.eventMarkers, [{ eventType: 'fight', frameIndex: 2,
+    offsetSeconds: 48, confidence: 0.94, evidence: 'A player and enemy exchange attacks.' }]);
+});
+
+test('Grok standard key uses xAI image chat and returns verified event markers', async () => {
+  let request;
+  const result = await analyzeGameplayFrames(frames, {
+    env: { GAMEPLAY_VISION_PROVIDER_ORDER: 'grok', XAI_API_KEY: 'xai-secret' },
+    circuitBreaker: createModelCircuitBreaker(),
+    fetchImpl: async (url, options) => {
+      request = { url, headers: options.headers, body: JSON.parse(options.body) };
+      return jsonResponse({ choices: [{ message: { content: JSON.stringify({ ...assessment,
+        frames: assessment.frames.filter((_, index) => [0, 2, 4].includes(index)) }) } }] });
+    }
+  });
+  assert.equal(request.url, 'https://api.x.ai/v1/chat/completions');
+  assert.equal(request.headers.authorization, 'Bearer xai-secret');
+  assert.equal(request.body.model, 'grok-4.7');
+  assert.equal(request.body.messages[0].content.filter((part) => part.type === 'image_url').length, 3);
+  assert.equal(result.provider, 'grok');
   assert.deepEqual(result.eventMarkers, [{ eventType: 'fight', frameIndex: 2,
     offsetSeconds: 48, confidence: 0.94, evidence: 'A player and enemy exchange attacks.' }]);
 });
