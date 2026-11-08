@@ -135,9 +135,9 @@ async function refreshTwitchConnection() {
     markFightButton.disabled = !status.connected;
     markRareLootButton.disabled = !status.connected;
     twitchConnectionHelp.textContent = status.connected && (!highlightStatus || !highlightStatus.visualGameplayVerificationConfigured)
-      ? 'Automatic fight and rare-loot markers need gameplay screening enabled and its vision key configured in Render. Manual backup marks below still work during a Twitch live stream.'
+      ? 'Automatic markers start when any supported gameplay-vision provider is configured in Render. Choose Gemini, OpenAI, Groq or another OpenAI-compatible endpoint, Anthropic, or a reachable Ollama server. Manual backup marks still work during a Twitch live stream.'
       : status.connected
-        ? 'While you are live, Amaana automatically checks sampled Twitch gameplay for fights and rare loot, records verified frame markers, and prepares private Short drafts for your review. No tap is needed.'
+        ? `While you are live, Amaana automatically checks sampled Twitch gameplay for fights and rare loot using ${highlightStatus.gameplayVisionProviders?.join(', ') || 'the configured vision provider'}, records verified frame markers, and prepares private Short drafts for your review. No tap is needed.`
         : (status.error || 'Connect the Twitch account that owns the Saevond channel.');
     twitchConnectButton.disabled = false;
     twitchConnectButton.textContent = status.connected ? 'Reconnect Twitch' : 'Connect Twitch';

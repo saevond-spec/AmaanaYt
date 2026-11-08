@@ -1,6 +1,7 @@
 const { spawn } = require('child_process');
 const fs = require('fs');
 const ffmpegPath = require('ffmpeg-static');
+const { getGameplayVisionStatus } = require('./gameplay-vision');
 
 function convertLandscapeToShort(inputPath, outputPath) {
   if (!ffmpegPath) throw new Error('FFmpeg is not available');
@@ -183,16 +184,21 @@ async function sampleGameplayFrames(inputPath, directory, count = 5) {
   return frames;
 }
 
-async function verifyGameplay(inputPath, { apiKey = process.env.VIDEO_ANALYSIS_API_KEY,
-  model = process.env.VIDEO_ANALYSIS_MODEL || 'gemini-3.8-flash',
-  timeoutMs = process.env.VIDEO_ANALYSIS_TIMEOUT_MS } = {}) {
-  if (process.env.ENABLE_GAMEPLAY_SCREENING !== 'true') {
-    throw new Error('Visual gameplay verification is disabled; enable ENABLE_GAMEPLAY_SCREENING before creating gameplay edits');
+function gameplayVisionStatus(env = process.env) {
+  return getGameplayVisionStatus(env);
+}
+
+async function verifyGameplay(inputPath, { apiKey, model, timeoutMs, env = process.env } = {}) {
+  const effectiveEnv = apiKey ? { ...env, GAMEPLAY_VISION_GEMINI_API_KEY: apiKey } : env;
+  const status = gameplayVisionStatus(effectiveEnv);
+  if (!status.enabled) {
+    throw new Error(status.explicitlyDisabled
+      ? 'Gameplay screening is explicitly disabled by ENABLE_GAMEPLAY_SCREENING'
+      : 'Gameplay screening needs a configured vision provider or a reachable Ollama endpoint');
   }
-  if (!apiKey) throw new Error('Visual gameplay verification is unavailable: configure VIDEO_ANALYSIS_API_KEY');
   const frames = await sampleGameplayFrames(inputPath, require('path').dirname(inputPath), 5);
   const { analyzeGameplayFrames } = require('./video-analysis');
-  return analyzeGameplayFrames(frames, { apiKey, model, timeoutMs });
+  return analyzeGameplayFrames(frames, { apiKey, model, timeoutMs, env: effectiveEnv });
 }
 
 
@@ -422,6 +428,7 @@ async function createThumbnailFromImage(inputPath, outputPath, { headline, sourc
   }
 }
 
-module.exports = { convertLandscapeToShort, assembleHighlights, shortFromHighlight, inspectMedia, sampleGameplayFrames, verifyGameplay,
+module.exports = { convertLandscapeToShort, assembleHighlights, shortFromHighlight, inspectMedia, sampleGameplayFrames,
+  verifyGameplay, gameplayVisionStatus,
   validateHighlight, validateShort, createThumbnail, createThumbnailFromImage, thumbnailHeadline,
   thumbnailDimensions, thumbnailOverlay };
