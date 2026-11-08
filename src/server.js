@@ -311,7 +311,8 @@ async function processTwitchClipDraft(id) {
         lastClipAttemptAt: new Date().toISOString()
       });
     }
-    if (draft.discoverySource === 'twitch_live_capture' && !hasVerifiedLiveGameplayClip(draft)) {
+    if (['twitch_live_capture', 'twitch_auto_marker'].includes(draft.discoverySource) &&
+        !hasVerifiedLiveGameplayClip(draft)) {
       throw new Error('Live Twitch clip did not pass gameplay verification; no YouTube upload was made');
     }
     if (!await twitch.isConnected()) throw new Error('Connect Twitch in Amaana before processing VOD highlights');
@@ -1325,7 +1326,7 @@ app.post('/api/drafts/:id/approve', admin, async (req, res, next) => {
     if (!draft) return res.status(404).json({ error: 'Draft not found' });
     if (draft.status !== 'awaiting_owner_approval') return res.status(409).json({ error: 'Draft was already handled' });
     if (draft.sourceType === 'twitch_vod' &&
-        draft.discoverySource === 'twitch_live_capture' &&
+        ['twitch_live_capture', 'twitch_auto_marker'].includes(draft.discoverySource) &&
         !hasVerifiedLiveGameplayClip(draft)) {
       return res.status(409).json({ error: 'This live clip did not pass gameplay verification and cannot be published.' });
     }

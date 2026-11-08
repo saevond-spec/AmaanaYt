@@ -106,11 +106,11 @@
         <h2>Twitch VOD → 12-minute gameplay highlight → two Shorts</h2>
         <p class="muted">Amaana needs 12 minutes of non-overlapping, visually verified gameplay for a full highlight. It screens Twitch clips with Gemini and uploads only passing edits as private YouTube drafts for your review.</p>
         <div class="manual-marker-panel">
-          <h3>Mark the moment while live on Twitch</h3>
-          <p class="muted">Tap shortly after a fight or rare loot pickup. Amaana keeps about 15 seconds before and 25 seconds after your tap, then makes a private Short for review. This route uses no vidIQ or visual-AI calls. It works with Twitch live streams, not YouTube-only streams.</p>
+          <h3>Automatic fight and rare-loot markers</h3>
+          <p class="muted">While Twitch is connected and gameplay screening is configured, Amaana checks sampled gameplay frames automatically. A visually verified fight or rare pickup gets a timestamped marker and a private Short draft for review—no tap needed. This uses gameplay vision, not vidIQ, and works on Twitch live streams, not YouTube-only streams. Manual marks are available as a backup.</p>
           <div class="draft-actions">
-            <button id="markFightButton" class="twitch" type="button" disabled>Mark fight</button>
-            <button id="markRareLootButton" class="twitch" type="button" disabled>Mark rare loot</button>
+            <button id="markFightButton" class="twitch" type="button" disabled>Optional manual fight mark</button>
+            <button id="markRareLootButton" class="twitch" type="button" disabled>Optional manual rare-loot mark</button>
           </div>
           <p id="liveMarkerStatus" class="muted" role="status" aria-live="polite"></p>
         </div>

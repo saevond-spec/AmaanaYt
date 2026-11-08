@@ -309,6 +309,50 @@ test('rejects unsupported manual event labels and refuses markers when no Twitch
   await assert.rejects(() => notLive.discovery.markLiveMoment('headshot'), /Choose fight or rare_loot/);
 });
 
+test('automatically marks verified fight and rare-loot frames and queues private drafts without a tap', async () => {
+  let clock = Date.parse('2026-10-18T15:00:00.000Z');
+  const streamStartedAt = clock - 60 * MINUTE;
+  const video = {
+    async inspectMedia() { return { durationSeconds: 60, width: 1280, height: 720 }; },
+    async verifyGameplay() {
+      return {
+        verified: true, totalFrames: 5, activeGameplayFrames: 5, confidence: 0.95,
+        gameName: 'Test Game', model: 'fixture',
+        eventTypes: ['fight', 'rare_loot'],
+        eventEvidence: { fight: 'Visible combat.', rare_loot: 'Rare-tier pickup label.' },
+        eventMarkers: [
+          { eventType: 'fight', frameIndex: 2, offsetSeconds: 30, confidence: 0.91,
+            evidence: 'Player is firing at a visible enemy.' },
+          { eventType: 'rare_loot', frameIndex: 4, offsetSeconds: 48, confidence: 0.94,
+            evidence: 'Rare-tier label appears on the pickup.' }
+        ]
+      };
+    }
+  };
+  const h = harness({
+    liveBroadcast: () => makeLiveBroadcast(clock, streamStartedAt),
+    video, startAt: clock, now: () => clock
+  });
+
+  const result = await h.discovery.runLive();
+  const markers = h.drafts.filter((draft) => draft.discoverySource === 'twitch_auto_marker');
+  assert.equal(result.captureAccepted, true);
+  assert.equal(result.automaticMarkersDetected, 2);
+  assert.equal(result.automaticMarkersQueued, 2);
+  assert.equal(markers.length, 2);
+  assert.deepEqual(markers.map((draft) => draft.eventType).sort(), ['fight', 'rare_loot']);
+  assert.ok(markers.every((draft) => draft.status === 'clip_queued' && draft.publicationStatus === 'pending'));
+  assert.ok(markers.every((draft) => draft.liveCapture === true && draft.visualGameplayVerification.verified === true));
+  assert.ok(markers.every((draft) => draft.autoPublishEligible === false));
+  assert.ok(markers.every((draft) => draft.eventMarker && draft.eventMarker.sourceClipId));
+  assert.deepEqual(h.enqueuedClips, markers.map((draft) => draft.id));
+  assert.equal(h.calls.liveClipCreates.length, 1);
+
+  const repeated = await h.discovery.runLive();
+  assert.equal(repeated.automaticMarkersQueued || 0, 0);
+  assert.equal(h.drafts.filter((draft) => draft.discoverySource === 'twitch_auto_marker').length, 2);
+});
+
 test('recovers a Twitch marker when the archived VOD appears only after the stream ends', async () => {
   let clock = Date.parse('2026-10-18T15:00:00.000Z');
   const streamStartedAt = clock - 60 * MINUTE;

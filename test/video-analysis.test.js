@@ -66,6 +66,20 @@ test('gameplay classification requires clear active gameplay in at least four of
   assert.deepEqual(good.eventEvidence, {
     fight: 'An enemy is visibly being attacked.', rare_loot: 'A gold-tier pickup label is shown.'
   });
+  const marked = validateGameplayAssessment({
+    eventTypes: ['fight', 'rare_loot'],
+    eventMarkers: [
+      { eventType: 'fight', frameIndex: 1, confidence: 0.91, evidence: 'Player is firing at a visible enemy.' },
+      { eventType: 'rare_loot', frameIndex: 3, confidence: 0.96, evidence: 'Rare-tier label appears on the pickup.' },
+      { eventType: 'rare_loot', frameIndex: 8, confidence: 0.99, evidence: 'Out of range frame.' }
+    ],
+    frames: Array.from({ length: 5 }, () => ({ activeGameplay: true, confidence: 0.95, evidence: 'Gameplay visible' }))
+  }, Array.from({ length: 5 }, (_, index) => ({ timestampSeconds: index * 12 })), 'fixture');
+  assert.deepEqual(marked.eventMarkers.map(({ eventType, frameIndex, offsetSeconds }) =>
+    ({ eventType, frameIndex, offsetSeconds })), [
+    { eventType: 'fight', frameIndex: 1, offsetSeconds: 12 },
+    { eventType: 'rare_loot', frameIndex: 3, offsetSeconds: 36 }
+  ]);
 
   const weak = validateGameplayAssessment({
     frames: Array.from({ length: 5 }, (_, index) => ({
@@ -77,7 +91,7 @@ test('gameplay classification requires clear active gameplay in at least four of
 
 test('Gemini gameplay screening sends sampled frames as images and returns a strict evidence result', async () => {
   const frames = Array.from({ length: 5 }, (_, index) => ({
-    mimeType: 'image/jpeg', data: Buffer.from('frame-' + index).toString('base64')
+    mimeType: 'image/jpeg', data: Buffer.from('frame-' + index).toString('base64'), timestampSeconds: index * 10
   }));
   let requestBody;
   const result = await analyzeGameplayFrames(frames, {
@@ -92,6 +106,8 @@ test('Gemini gameplay screening sends sampled frames as images and returns a str
             gameName: 'Example game',
             eventTypes: ['fight'],
             eventEvidence: { fight: 'Visible player-vs-enemy combat.' },
+            eventMarkers: [{ eventType: 'fight', frameIndex: 2, confidence: 0.92,
+              evidence: 'Enemy and player exchange attacks.' }],
             frames: Array.from({ length: 5 }, () => ({
               activeGameplay: true, confidence: 0.94, evidence: 'Gameplay fills the frame'
             }))
@@ -108,6 +124,9 @@ test('Gemini gameplay screening sends sampled frames as images and returns a str
   assert.equal(result.gameName, 'Example game');
   assert.deepEqual(result.eventTypes, ['fight']);
   assert.deepEqual(result.eventEvidence, { fight: 'Visible player-vs-enemy combat.' });
+  assert.deepEqual(result.eventMarkers, [{ eventType: 'fight', frameIndex: 2,
+    offsetSeconds: 20, confidence: 0.92, evidence: 'Enemy and player exchange attacks.' }]);
+  assert.match(requestBody.contents[0].parts[0].text, /eventMarkers/);
 });
 
 test('analysis retries 503 on a fallback model and honors short 429 Retry-After', async () => {

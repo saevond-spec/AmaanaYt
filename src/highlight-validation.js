@@ -155,7 +155,8 @@ function hasVerifiedLiveGameplayClip(draft) {
   const total = Number(result && result.totalFrames);
   const active = Number(result && result.activeGameplayFrames);
   const confidence = Number(result && result.confidence);
-  return draft?.discoverySource === 'twitch_live_capture' && draft.liveCapture === true &&
+  return ['twitch_live_capture', 'twitch_auto_marker'].includes(draft?.discoverySource) &&
+    draft.liveCapture === true &&
     result?.verified === true && Number.isFinite(total) && total >= 5 &&
     Number.isFinite(active) && active >= Math.ceil(total * 0.8) && active <= total &&
     Number.isFinite(confidence) && confidence >= 0.8 && confidence <= 1;

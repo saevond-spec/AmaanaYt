@@ -151,10 +151,11 @@ function createTwitchHighlightDiscovery({
     const state = await getState();
     let session = state.liveSessions[streamId];
     if (!session || typeof session !== 'object') {
-      session = { streamId, candidates: [], shortCandidates: [], manualMarkers: [] };
+      session = { streamId, candidates: [], shortCandidates: [], manualMarkers: [], automaticMarkers: [] };
       state.liveSessions[streamId] = session;
     }
     if (!Array.isArray(session.manualMarkers)) session.manualMarkers = [];
+    if (!Array.isArray(session.automaticMarkers)) session.automaticMarkers = [];
     if (vodIsReady && (!session.vodId || String(session.vodId) === String(vod.id))) {
       session.vodId = String(vod.id);
     }
@@ -185,7 +186,9 @@ function createTwitchHighlightDiscovery({
   }
 
   async function queueReadyLiveMarkers(vod, stream, session, result) {
-    if (!vod || vod.type !== 'archive' || !session || !Array.isArray(session.manualMarkers)) return 0;
+    if (!vod || vod.type !== 'archive' || !session) return 0;
+    if (!Array.isArray(session.manualMarkers)) session.manualMarkers = [];
+    if (!Array.isArray(session.automaticMarkers)) session.automaticMarkers = [];
     const vodId = String(vod.id || '');
     const streamId = String(stream && stream.id || session.streamId || '');
     const userId = String(stream && stream.user_id || session.streamUserId || '');
@@ -196,10 +199,18 @@ function createTwitchHighlightDiscovery({
     catch { return 0; }
     let drafts = await store.listDrafts();
     let queued = 0;
+    let automaticQueued = 0;
+    let manualQueued = 0;
     const queuedDraftIds = [];
-    for (const marker of session.manualMarkers) {
+    const markers = [
+      ...session.automaticMarkers.map((marker) => ({ marker, automatic: true })),
+      ...session.manualMarkers.map((marker) => ({ marker, automatic: false }))
+    ];
+    for (const { marker, automatic } of markers) {
       if (!marker || marker.status !== 'waiting_for_vod' ||
           !LIVE_MANUAL_MARKER_TYPES.has(String(marker.eventType || '')) ||
+          automatic && (marker.source !== 'automatic_visual_gameplay' ||
+            marker.visualGameplayVerification?.verified !== true || !clean(marker.eventEvidence || '', 180)) ||
           !Number.isFinite(Number(marker.endSeconds)) || durationSeconds < Number(marker.endSeconds)) continue;
       marker.vodId = vodId;
       const existing = drafts.find((draft) => String(draft && draft.id || '') === String(marker.draftId));
@@ -208,12 +219,24 @@ function createTwitchHighlightDiscovery({
         const gameName = clean(stream && stream.game_name || session.gameName || '', 50);
         const streamTitle = clean(stream && stream.title || session.streamTitle || 'Twitch gameplay', 70);
         const title = clean(`${gameName ? gameName + ' | ' : ''}${eventLabel} moment`, 100);
+        const eventEvidence = clean(marker.eventEvidence || '', 180);
+        const discoverySource = automatic ? 'twitch_auto_marker' : 'twitch_manual_marker';
         const draft = await store.addDraft({
           id: marker.draftId,
           sourceType: 'twitch_vod',
-          discoverySource: 'twitch_manual_marker',
-          manualMarkerId: marker.id,
+          discoverySource,
+          manualMarkerId: automatic ? null : marker.id,
+          automaticMarkerId: automatic ? marker.id : null,
+          eventMarker: automatic ? {
+            sourceClipId: clean(marker.sourceClipId || '', 100),
+            frameIndex: Number(marker.frameIndex),
+            markerOffsetSeconds: Number(marker.markerOffsetSeconds),
+            confidence: Number(marker.confidence),
+            evidence: eventEvidence
+          } : null,
           eventType: marker.eventType,
+          eventTypes: [marker.eventType],
+          eventEvidence: { [marker.eventType]: eventEvidence },
           streamId,
           vodId,
           sourceChannel: clean(stream && (stream.user_name || stream.user_login) || session.sourceChannel, 50),
@@ -223,7 +246,11 @@ function createTwitchHighlightDiscovery({
           endSeconds: Number(marker.endSeconds),
           duration: Number(marker.duration),
           title,
-          reason: `Creator-marked ${eventLabel.toLowerCase()} moment. No vidIQ or visual-AI scan was used; review the private Short before approval.`,
+          reason: automatic
+            ? `Amaana automatically detected a ${eventLabel.toLowerCase()} in a visually verified Twitch gameplay frame. Review the private Short; its marker time is approximate to the sampled frame.`
+            : `Creator-marked ${eventLabel.toLowerCase()} moment. No vidIQ or visual-AI scan was used; review the private Short before approval.`,
+          liveCapture: automatic,
+          visualGameplayVerification: automatic ? marker.visualGameplayVerification : undefined,
           status: 'clip_queued',
           productionState: 'queued',
           publicationStatus: 'pending',
@@ -236,17 +263,83 @@ function createTwitchHighlightDiscovery({
       marker.draftId = String(marker.draftId);
       marker.queuedAt = new Date(now()).toISOString();
       queued += 1;
+      if (automatic) {
+        automaticQueued += 1;
+        result.lastAutomaticMarkerDraftId = marker.draftId;
+      } else manualQueued += 1;
       queuedDraftIds.push(marker.draftId);
       if (logger && typeof logger.info === 'function') {
-        logger.info(`Amaana queued creator-marked ${marker.eventType} Twitch moment ${marker.id} as a private Short draft`);
+        logger.info(`Amaana queued ${automatic ? 'automatic visual' : 'creator'} ${marker.eventType} Twitch marker ${marker.id} as a private Short draft`);
       }
     }
     if (queued) {
       await saveState();
       for (const draftId of queuedDraftIds) enqueueClip(draftId);
-      result.manualMarkersQueued = (Number(result.manualMarkersQueued) || 0) + queued;
+      result.automaticMarkersQueued = (Number(result.automaticMarkersQueued) || 0) + automaticQueued;
+      result.manualMarkersQueued = (Number(result.manualMarkersQueued) || 0) + manualQueued;
     }
     return queued;
+  }
+
+  function recordAutomaticLiveMarkers(gameplay, clipId, requestedStart, requestedDuration, session, result) {
+    if (gameplay?.verified !== true || !Array.isArray(gameplay.eventMarkers)) return 0;
+    if (!Array.isArray(session.automaticMarkers)) session.automaticMarkers = [];
+    let added = 0;
+    for (const event of gameplay.eventMarkers) {
+      const eventType = String(event && event.eventType || '');
+      const offsetSeconds = Number(event && event.offsetSeconds);
+      const confidence = Number(event && event.confidence);
+      const evidence = clean(event && event.evidence || '', 180);
+      const frameIndex = Number(event && event.frameIndex);
+      if (!LIVE_MANUAL_MARKER_TYPES.has(eventType) || !Number.isFinite(offsetSeconds) ||
+          offsetSeconds < 0 || offsetSeconds > requestedDuration || !Number.isFinite(confidence) ||
+          confidence < 0.8 || confidence > 1 || !evidence || !Number.isSafeInteger(frameIndex)) continue;
+      const sourceClipId = String(clipId || '');
+      if (session.automaticMarkers.some((marker) => marker && marker.status !== 'discarded' &&
+          marker.sourceClipId === sourceClipId && marker.eventType === eventType)) continue;
+      const markerOffsetSeconds = Math.floor(requestedStart + offsetSeconds);
+      const clipEnd = requestedStart + requestedDuration;
+      const startSeconds = Math.max(requestedStart, markerOffsetSeconds - LIVE_MANUAL_MARKER_PRE_SECONDS);
+      const endSeconds = Math.min(clipEnd, markerOffsetSeconds + LIVE_MANUAL_MARKER_POST_SECONDS);
+      if (endSeconds - startSeconds < 15) continue;
+      const markerId = idFactory();
+      const marker = {
+        id: markerId,
+        draftId: idFactory(),
+        streamId: session.streamId,
+        vodId: session.vodId || null,
+        eventType,
+        source: 'automatic_visual_gameplay',
+        sourceClipId,
+        frameIndex,
+        markerOffsetSeconds,
+        startSeconds,
+        endSeconds,
+        duration: Math.floor(endSeconds - startSeconds),
+        confidence,
+        eventEvidence: evidence,
+        visualGameplayVerification: {
+          verified: true,
+          activeGameplayFrames: Number(gameplay.activeGameplayFrames),
+          totalFrames: Number(gameplay.totalFrames),
+          confidence: Number(gameplay.confidence),
+          gameName: clean(gameplay.gameName || session.gameName || '', 100),
+          eventTypes: [eventType],
+          eventEvidence: { [eventType]: evidence },
+          eventMarkers: [{ eventType, frameIndex, offsetSeconds, confidence, evidence }],
+          model: clean(gameplay.model || '', 80)
+        },
+        markedAt: new Date(now()).toISOString(),
+        status: 'waiting_for_vod'
+      };
+      session.automaticMarkers.push(marker);
+      added += 1;
+    }
+    if (added) {
+      session.automaticMarkers = session.automaticMarkers.slice(-100);
+      result.automaticMarkersDetected = (Number(result.automaticMarkersDetected) || 0) + added;
+    }
+    return added;
   }
 
   async function queueCommunityClips(clips, context, result, knownDrafts) {
@@ -536,6 +629,7 @@ function createTwitchHighlightDiscovery({
     const result = {
       status: 'idle', live: false, captureAttempted: false, captureAccepted: false,
       candidatesVerified: 0, gameplayRejected: 0, batchesQueued: 0,
+      automaticMarkersDetected: 0, automaticMarkersQueued: 0,
       availableGameplaySeconds: 0
     };
     if (typeof twitch.getLiveBroadcast !== 'function') {
@@ -547,7 +641,7 @@ function createTwitchHighlightDiscovery({
       : !video || typeof video.verifyGameplay !== 'function' || typeof video.inspectMedia !== 'function'
         ? 'visual_gameplay_screening_unavailable' : null;
     let broadcast;
-    let pendingManualMarker = false;
+    let pendingLiveMarker = false;
     if (screeningStatus) {
       const saved = await getState();
       if (!Object.keys(saved.liveSessions).length) {
@@ -557,9 +651,10 @@ function createTwitchHighlightDiscovery({
       broadcast = await twitch.getLiveBroadcast();
       if (broadcast?.stream) {
         const streamKey = String(broadcast.stream.id || '');
-        pendingManualMarker = saved.liveSessions[streamKey]?.manualMarkers?.some((marker) =>
-          marker?.status === 'waiting_for_vod');
-        if (!pendingManualMarker) {
+        const session = saved.liveSessions[streamKey];
+        pendingLiveMarker = [...(session?.manualMarkers || []), ...(session?.automaticMarkers || [])]
+          .some((marker) => marker?.status === 'waiting_for_vod');
+        if (!pendingLiveMarker) {
           result.status = screeningStatus;
           return result;
         }
@@ -587,6 +682,7 @@ function createTwitchHighlightDiscovery({
         if (!Array.isArray(session.shortCandidates)) session.shortCandidates = [];
         if (!Array.isArray(session.candidates)) session.candidates = [];
         if (!Array.isArray(session.manualMarkers)) session.manualMarkers = [];
+        if (!Array.isArray(session.automaticMarkers)) session.automaticMarkers = [];
         if (session.shortCandidates.length) {
           await queueReadyLiveShorts(stream, session, result, { flush: true });
         }
@@ -594,8 +690,9 @@ function createTwitchHighlightDiscovery({
         // Ended sessions can still have enough verified captures for a final batch.
         // Resolve them against the broadcaster-owned archive before consuming them.
         let archivedVod = null;
-        const hasPendingManualMarkers = session.manualMarkers.some((marker) => marker?.status === 'waiting_for_vod');
-        if ((session.candidates.length || hasPendingManualMarkers) && typeof twitch.getVod === 'function' &&
+        const hasPendingMarkers = [...session.manualMarkers, ...session.automaticMarkers]
+          .some((marker) => marker?.status === 'waiting_for_vod');
+        if ((session.candidates.length || hasPendingMarkers) && typeof twitch.getVod === 'function' &&
             /^\d+$/.test(String(session.vodId || ''))) {
           try {
             const candidateVod = await twitch.getVod(String(session.vodId));
@@ -613,7 +710,7 @@ function createTwitchHighlightDiscovery({
           }
         }
 
-        if (!archivedVod && hasPendingManualMarkers && typeof twitch.listRecentArchivedVods === 'function') {
+        if (!archivedVod && hasPendingMarkers && typeof twitch.listRecentArchivedVods === 'function') {
           try {
             const recentVods = await twitch.listRecentArchivedVods({ first: 100, maxPages: 2 });
             archivedVod = (Array.isArray(recentVods) ? recentVods : []).find((candidate) =>
@@ -631,9 +728,10 @@ function createTwitchHighlightDiscovery({
 
         // Do not retain empty stream records forever. If the archive is available,
         // the normal VOD scanner is now the durable source for any unconsumed clips.
-        const markersStillWaiting = session.manualMarkers.some((marker) => marker?.status === 'waiting_for_vod');
+        const markersStillWaiting = [...session.manualMarkers, ...session.automaticMarkers]
+          .some((marker) => marker?.status === 'waiting_for_vod');
         if (!session.shortCandidates.length && (!session.candidates.length || archivedVod) && !markersStillWaiting) {
-          if (archivedVod && !hasPendingManualMarkers) {
+          if (archivedVod && !hasPendingMarkers) {
             try { await scanVod(archivedVod); }
             catch (error) {
               logger.warn?.('Amaana archived VOD scan deferred for ended stream ' + stream.id +
@@ -649,7 +747,7 @@ function createTwitchHighlightDiscovery({
       result.status = 'not_live';
       return result;
     }
-    if (screeningStatus && !pendingManualMarker) {
+    if (screeningStatus && !pendingLiveMarker) {
       result.status = screeningStatus;
       return result;
     }
@@ -709,6 +807,7 @@ function createTwitchHighlightDiscovery({
     let session = state.liveSessions[streamId];
     if (!session || session.vodId && String(session.vodId) !== String(vod.id)) {
       const previousManualMarkers = Array.isArray(session?.manualMarkers) ? session.manualMarkers : [];
+      const previousAutomaticMarkers = Array.isArray(session?.automaticMarkers) ? session.automaticMarkers : [];
       session = {
         streamId,
         vodId: String(vod.id),
@@ -716,6 +815,7 @@ function createTwitchHighlightDiscovery({
         candidates: [],
         shortCandidates: [],
         manualMarkers: previousManualMarkers,
+        automaticMarkers: previousAutomaticMarkers,
         lastCaptureAt: null,
         lastCaptureOffset: null
       };
@@ -732,9 +832,11 @@ function createTwitchHighlightDiscovery({
     if (!Array.isArray(session.candidates)) session.candidates = [];
     if (!Array.isArray(session.shortCandidates)) session.shortCandidates = [];
     if (!Array.isArray(session.manualMarkers)) session.manualMarkers = [];
+    if (!Array.isArray(session.automaticMarkers)) session.automaticMarkers = [];
     await queueReadyLiveMarkers(vod, stream, session, result);
     if (screeningStatus) {
-      result.status = Number(result.manualMarkersQueued) > 0 ? 'manual_markers_queued' : screeningStatus;
+      result.status = Number(result.automaticMarkersQueued) > 0 ? 'automatic_markers_queued'
+        : Number(result.manualMarkersQueued) > 0 ? 'manual_markers_queued' : screeningStatus;
       await saveState();
       return result;
     }
@@ -864,11 +966,12 @@ function createTwitchHighlightDiscovery({
                 : [],
               eventEvidence: gameplay.eventEvidence && typeof gameplay.eventEvidence === 'object'
                 ? gameplay.eventEvidence : {},
+              eventMarkers: Array.isArray(gameplay.eventMarkers) ? gameplay.eventMarkers.slice(0, 6) : [],
               model: clean(gameplay.model || '', 80)
             }
           };
           if (!session.candidates.some((candidate) => String(candidate.clip && candidate.clip.id) === String(clip.id))) {
-            session.candidates.push({
+            const candidate = {
               clip,
               gameId,
               startSeconds: requestedStart,
@@ -876,11 +979,15 @@ function createTwitchHighlightDiscovery({
               viewCount: Math.max(0, Number(metadata && metadata.view_count) || 0),
               createdAt: metadata && metadata.created_at || new Date(timestamp).toISOString(),
               title: clean(metadata && metadata.title || stream.title || 'Live gameplay moment', 100)
-            });
-            session.shortCandidates.push(session.candidates[session.candidates.length - 1]);
+            };
+            session.candidates.push(candidate);
+            const hasDedicatedEventMarker = candidate.clip.visualGameplayVerification.eventMarkers
+              .some((event) => LIVE_MANUAL_MARKER_TYPES.has(String(event && event.eventType || '')));
+            if (!hasDedicatedEventMarker) session.shortCandidates.push(candidate);
             session.candidates = session.candidates.slice(-MAX_LIVE_CANDIDATES);
             session.shortCandidates = session.shortCandidates.slice(-LIVE_SHORT_CANDIDATE_GROUP_SIZE * 2);
           }
+          recordAutomaticLiveMarkers(gameplay, clip.id, requestedStart, requestedDuration, session, result);
           session.lastCaptureError = null;
           await saveState();
           result.captureAccepted = true;
@@ -899,8 +1006,10 @@ function createTwitchHighlightDiscovery({
       }
     }
 
+    await queueReadyLiveMarkers(vod, stream, session, result);
     await queueReadyLiveShorts(stream, session, result);
     await queueReadyLiveBatches(vod, stream, session, result);
+    if (Number(result.automaticMarkersQueued) > 0) result.status = 'automatic_markers_queued';
     await saveState();
     return result;
   }
@@ -910,7 +1019,8 @@ function createTwitchHighlightDiscovery({
     liveRunning = true;
     lastLiveRunError = null;
     let result = { status: 'idle', live: false, captureAttempted: false, captureAccepted: false,
-      candidatesVerified: 0, gameplayRejected: 0, batchesQueued: 0 };
+      candidatesVerified: 0, gameplayRejected: 0, batchesQueued: 0,
+      automaticMarkersDetected: 0, automaticMarkersQueued: 0 };
     try {
       if (typeof twitch.isConnected === 'function' && !await twitch.isConnected()) {
         result.notConnected = true;

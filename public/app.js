@@ -134,10 +134,10 @@ async function refreshTwitchConnection() {
   } else {
     markFightButton.disabled = !status.connected;
     markRareLootButton.disabled = !status.connected;
-    twitchConnectionHelp.textContent = status.connected && highlightStatus && !highlightStatus.visualGameplayVerificationConfigured
-      ? 'Automatic AI screening is off. The two manual moment buttons below still work during a Twitch live stream and do not use AI or vidIQ.'
+    twitchConnectionHelp.textContent = status.connected && (!highlightStatus || !highlightStatus.visualGameplayVerificationConfigured)
+      ? 'Automatic fight and rare-loot markers need gameplay screening enabled and its vision key configured in Render. Manual backup marks below still work during a Twitch live stream.'
       : status.connected
-        ? 'While you are live, Amaana captures and screens Twitch gameplay, then prepares private drafts for your review. Manual fight and rare-loot markers are also available below. Approve a draft separately before it can become public.'
+        ? 'While you are live, Amaana automatically checks sampled Twitch gameplay for fights and rare loot, records verified frame markers, and prepares private Short drafts for your review. No tap is needed.'
         : (status.error || 'Connect the Twitch account that owns the Saevond channel.');
     twitchConnectButton.disabled = false;
     twitchConnectButton.textContent = status.connected ? 'Reconnect Twitch' : 'Connect Twitch';
@@ -316,7 +316,12 @@ function renderDraft(draft, draftsById = new Map()) {
   if (draft.sourceType === 'twitch_vod') {
     const source = element('p', 'draft-meta', `Twitch VOD ${draft.vodId} · ${Math.round(draft.startSeconds || 0)}s–${Math.round(draft.endSeconds || 0)}s`);
     card.append(source);
-    if (draft.discoverySource === 'twitch_manual_marker') {
+    if (draft.discoverySource === 'twitch_auto_marker') {
+      const label = draft.eventType === 'rare_loot' ? 'Rare loot' : 'Fight';
+      const marker = draft.eventMarker || {};
+      card.append(element('p', 'draft-meta',
+        `Automatically detected ${label} · about ${Math.round(Number(marker.markerOffsetSeconds) || 0)}s in the VOD · sampled frame ${Math.round(Number(marker.frameIndex) + 1 || 0)} · ${Math.round(Number(draft.duration) || 0)}s private review draft`));
+    } else if (draft.discoverySource === 'twitch_manual_marker') {
       const label = draft.eventType === 'rare_loot' ? 'Rare loot' : 'Fight';
       card.append(element('p', 'draft-meta', `Creator-marked ${label} · ${(Number(draft.duration) || 0)}s · no vidIQ or visual-AI scan`));
     }
@@ -333,7 +338,10 @@ function renderDraft(draft, draftsById = new Map()) {
     const labels = draft.eventTypes.map((eventType) => ({ fight: 'fight', rare_loot: 'rare loot', clutch: 'clutch' })[eventType])
       .filter(Boolean);
     if (labels.length) {
-      card.append(element('p', 'draft-meta', `Sampled-frame event candidates: ${labels.join(', ')} · AI suggestions for review, not verified full-clip outcomes`));
+      const label = draft.discoverySource === 'twitch_auto_marker'
+        ? `Automatic sampled-frame marker: ${labels.join(', ')} · approximate event time; review the private clip`
+        : `Sampled-frame event candidates: ${labels.join(', ')} · AI suggestions for review, not verified full-clip outcomes`;
+      card.append(element('p', 'draft-meta', label));
       for (const eventType of draft.eventTypes) {
         const evidence = draft.eventEvidence && draft.eventEvidence[eventType];
         if (evidence) card.append(element('p', 'draft-meta', `${eventType.replaceAll('_', ' ')} evidence: ${evidence}`));
