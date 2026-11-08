@@ -6,6 +6,7 @@ const path = require('path');
 const { validateHighlightMoments, verifyCreatedClip, verifyClipCreationRequest } = require('./highlight-validation');
 const { buildHighlightTitle: defaultBuildHighlightTitle, buildShortTitle: defaultBuildShortTitle,
   buildShortDescription: defaultBuildShortDescription } = require('./highlight-metadata');
+const { gameplayEventLabel } = require('./gameplay-vision');
 
 const YOUTUBE_UPLOAD_RECOVERY_GRACE_MS = 15 * 60 * 1000;
 
@@ -596,9 +597,11 @@ function createHighlightProcessor(dependencies) {
         const visual = twitchClips[index]?.visualGameplayVerification || {};
         const detectedEventTypes = Array.isArray(visual.eventTypes)
           ? visual.eventTypes.filter((eventType) => ['fight', 'rare_loot', 'clutch'].includes(eventType)) : [];
-        const eventLabel = detectedEventTypes.includes('rare_loot') ? 'Rare Loot'
-          : detectedEventTypes.includes('fight') ? 'Fight'
-            : detectedEventTypes.includes('clutch') ? 'Clutch' : '';
+        const preferredEventType = ['rare_loot', 'fight', 'clutch']
+          .find((eventType) => detectedEventTypes.includes(eventType));
+        const markerEvidence = visual.eventEvidence?.[preferredEventType] ||
+          visual.eventMarkers?.find((marker) => marker?.eventType === preferredEventType)?.evidence || '';
+        const eventLabel = preferredEventType ? gameplayEventLabel(preferredEventType, markerEvidence) : '';
         const eventTitle = eventLabel
           ? cleanText(`${cleanText(visual.gameName || batch.streamTitle || 'Gameplay', 60)} | ${eventLabel} moment`, 100)
           : buildShortTitle(moment, batch.streamTitle, seenShortTitles);

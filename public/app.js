@@ -42,10 +42,32 @@ const jaAutopilotToggle = document.querySelector('#jaAutopilotToggle');
 const jaAutopilotStatus = document.querySelector('#jaAutopilotStatus');
 const googleSearchImportForm = document.querySelector('#googleSearchImportForm');
 const googleSearchImportStatus = document.querySelector('#googleSearchImportStatus');
+const liveCapturePreview = document.querySelector('#liveCapturePreview');
+const liveCaptureStatus = document.querySelector('#liveCaptureStatus');
+const startLiveCaptureButton = document.querySelector('#startLiveCaptureButton');
+const stopLiveCaptureButton = document.querySelector('#stopLiveCaptureButton');
+const liveCaptureAudio = document.querySelector('#liveCaptureAudio');
 let seoOffset = 0;
 let seoEnabled = true;
 let draftPoll = null;
+let liveGameplayKeepalive = null;
 let tiktokConnected = false;
+let twitchConnected = false;
+let liveGameplayScreeningEnabled = false;
+let liveCaptureStream = null;
+let liveCaptureSessionStartedAt = 0;
+let liveCaptureSessionNumber = 0;
+let liveCaptureSamplingTimer = null;
+let liveCaptureAnalysisTimer = null;
+let liveCaptureSegmentTimer = null;
+let liveCapturePendingTimer = null;
+let liveCaptureActiveRecorders = new Set();
+let liveCaptureSegments = [];
+let liveCaptureFrames = [];
+let liveCapturePendingMarkers = [];
+let liveCaptureSeenMarkers = [];
+let liveCaptureAnalyzing = false;
+let liveCaptureStopping = false;
 let youtubePlaylists = [];
 let channelLocalizationSnapshot = null;
 let japaneseAutopilotState = null;
@@ -81,6 +103,7 @@ async function api(url, options = {}) {
 function showLogin() {
   if (draftPoll) clearInterval(draftPoll);
   draftPoll = null;
+  void stopLiveScreenCapture('Dashboard locked. Live screen sharing stopped.');
   loginView.classList.remove('hidden');
   dashboardView.classList.add('hidden');
 }
@@ -95,6 +118,263 @@ function showDashboard() {
   if (!draftPoll) draftPoll = setInterval(() => {
     if (!document.hidden) loadDrafts();
   }, 12000);
+  if (!liveGameplayKeepalive) liveGameplayKeepalive = setInterval(() => {
+    if ((liveCaptureStream || twitchConnected && liveGameplayScreeningEnabled) &&
+        !dashboardView.classList.contains('hidden')) {
+      api(liveCaptureStream ? '/api/live-gameplay/keepalive' : '/api/twitch/live-scanner/keepalive').catch((error) => {
+        if (error.status === 401) showLogin();
+      });
+    }
+  }, 5 * 60 * 1000);
+}
+
+function screenCaptureMimeType() {
+  if (!window.MediaRecorder) return '';
+  return ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4']
+    .find((type) => MediaRecorder.isTypeSupported(type)) || '';
+}
+
+function captureElapsedSeconds() {
+  return liveCaptureSessionStartedAt ? Math.max(0, (performance.now() - liveCaptureSessionStartedAt) / 1000) : 0;
+}
+
+function captureLiveFrame() {
+  if (!liveCaptureStream || liveCaptureStopping || !liveCapturePreview.videoWidth || !liveCapturePreview.videoHeight) return;
+  const width = Math.min(640, liveCapturePreview.videoWidth);
+  const height = Math.max(1, Math.round(width * liveCapturePreview.videoHeight / liveCapturePreview.videoWidth));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d', { alpha: false });
+  context.drawImage(liveCapturePreview, 0, 0, width, height);
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.55);
+  liveCaptureFrames.push({
+    mimeType: 'image/jpeg',
+    data: dataUrl.slice(dataUrl.indexOf(',') + 1),
+    timestampSeconds: Number(captureElapsedSeconds().toFixed(2))
+  });
+  if (liveCaptureFrames.length > 12) liveCaptureFrames.shift();
+}
+
+function recordLiveCaptureSegment(sessionNumber) {
+  const stream = liveCaptureStream;
+  if (!stream || liveCaptureStopping || sessionNumber !== liveCaptureSessionNumber) return;
+  const mimeType = screenCaptureMimeType();
+  if (!mimeType) {
+    liveCaptureStatus.textContent = 'This browser cannot record a screen-share segment. Try Chrome or Edge.';
+    return;
+  }
+  const recorder = new MediaRecorder(stream, { mimeType });
+  const chunks = [];
+  const startSeconds = captureElapsedSeconds();
+  recorder.ondataavailable = (event) => { if (event.data?.size) chunks.push(event.data); };
+  recorder.onstop = () => {
+    liveCaptureActiveRecorders.delete(recorder);
+    const endSeconds = captureElapsedSeconds();
+    const blob = new Blob(chunks, { type: recorder.mimeType || mimeType });
+    if (blob.size && endSeconds - startSeconds >= 4) {
+      liveCaptureSegments.push({ blob, startSeconds, endSeconds });
+      const retainAfterSeconds = endSeconds - 100;
+      liveCaptureSegments = liveCaptureSegments.filter((segment) => segment.endSeconds >= retainAfterSeconds);
+    }
+    if (liveCaptureStopping && !liveCaptureActiveRecorders.size) void processLiveCaptureMarkers(sessionNumber, true);
+  };
+  liveCaptureActiveRecorders.add(recorder);
+  recorder.start(1000);
+  liveCaptureSegmentTimer = setTimeout(() => {
+    if (sessionNumber !== liveCaptureSessionNumber || liveCaptureStopping || !liveCaptureStream) return;
+    recordLiveCaptureSegment(sessionNumber);
+    setTimeout(() => {
+      if (recorder.state !== 'inactive') {
+        try { recorder.stop(); } catch {}
+      }
+    }, 1000);
+  }, 15000);
+}
+
+function duplicateLiveMarker(marker) {
+  return liveCaptureSeenMarkers.some((seen) => seen.eventType === marker.eventType &&
+    Math.abs(seen.offsetSeconds - Number(marker.offsetSeconds)) < 25);
+}
+
+async function analyzeLiveScreenFrames(sessionNumber) {
+  if (!liveCaptureStream || liveCaptureStopping || liveCaptureAnalyzing || sessionNumber !== liveCaptureSessionNumber) return;
+  const frames = liveCaptureFrames.slice(-8);
+  if (frames.length < 3) return;
+  liveCaptureAnalyzing = true;
+  liveCaptureStatus.textContent = `Checking ${frames.length} recent gameplay frames…`;
+  try {
+    const assessment = await api('/api/live-gameplay/analyze', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ frames })
+    });
+    if (sessionNumber !== liveCaptureSessionNumber || liveCaptureStopping) return;
+    const markers = Array.isArray(assessment.eventMarkers) ? assessment.eventMarkers : [];
+    for (const marker of markers) {
+      if (!marker.captureProof || duplicateLiveMarker(marker)) continue;
+      const item = { ...marker, gameName: assessment.gameName || '', provider: assessment.provider || '',
+        readyAtSeconds: Number(marker.offsetSeconds) + 12 };
+      liveCaptureSeenMarkers.push({ eventType: marker.eventType, offsetSeconds: Number(marker.offsetSeconds) });
+      liveCapturePendingMarkers.push(item);
+    }
+    if (markers.length) {
+      const first = markers[0];
+      liveCaptureStatus.textContent = `${gameplayLabel(first.eventType, first.evidence)} detected at ${formatCaptureTime(first.offsetSeconds)}. Building a private draft…`;
+      void processLiveCaptureMarkers(sessionNumber);
+    } else {
+      liveCaptureStatus.textContent = assessment.verified
+        ? `Screening live gameplay with ${assessment.provider || 'the configured vision provider'}; no verified event in this sample.`
+        : 'The shared frames did not show enough clear gameplay for an event marker.';
+    }
+  } catch (error) {
+    if (error.status === 401) showLogin();
+    else liveCaptureStatus.textContent = error.message || 'Live gameplay analysis failed.';
+  } finally {
+    liveCaptureAnalyzing = false;
+  }
+}
+
+function gameplayLabel(eventType, evidence = '') {
+  if (eventType === 'rare_loot') return 'Rare loot';
+  if (eventType === 'clutch') return 'Clutch';
+  if (/\bkill\s+leader\b/i.test(String(evidence || ''))) return 'Kill Leader';
+  return 'Fight';
+}
+
+function formatCaptureTime(value) {
+  const total = Math.max(0, Math.floor(Number(value) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  return `${hours ? hours + ':' + String(minutes).padStart(2, '0') : minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+async function processLiveCaptureMarkers(sessionNumber, flush = false) {
+  if (sessionNumber !== liveCaptureSessionNumber) return;
+  for (const marker of [...liveCapturePendingMarkers]) {
+    const latestEnd = Math.max(0, ...liveCaptureSegments.map((segment) => segment.endSeconds));
+    if (!flush && (captureElapsedSeconds() < marker.readyAtSeconds || latestEnd < marker.readyAtSeconds)) continue;
+    const targetStart = Math.max(0, Number(marker.offsetSeconds) - 10);
+    const targetEnd = Number(marker.offsetSeconds) + (flush ? 0 : 12);
+    const segments = liveCaptureSegments.filter((segment) => segment.endSeconds >= targetStart &&
+      segment.startSeconds <= targetEnd).sort((a, b) => a.startSeconds - b.startSeconds);
+    if (!segments.length) {
+      liveCapturePendingMarkers = liveCapturePendingMarkers.filter((item) => item !== marker);
+      liveCaptureStatus.textContent = 'The detected moment is older than the local clip buffer; keep sharing the game window for the next moment.';
+      continue;
+    }
+    if (segments.length > 4) segments.splice(4);
+    const form = new FormData();
+    form.set('captureProof', marker.captureProof);
+    form.set('segmentWindows', JSON.stringify(segments.map(({ startSeconds, endSeconds }) => ({ startSeconds, endSeconds }))));
+    segments.forEach((segment, index) => {
+      const extension = segment.blob.type.includes('mp4') ? 'mp4' : 'webm';
+      form.append('segments', segment.blob, `gameplay-${index}.${extension}`);
+    });
+    liveCaptureStatus.textContent = `Uploading ${gameplayLabel(marker.eventType, marker.evidence)} as a private YouTube draft…`;
+    liveCapturePendingMarkers = liveCapturePendingMarkers.filter((item) => item !== marker);
+    try {
+      const draft = await api('/api/live-gameplay/capture-draft', { method: 'POST', body: form });
+      if (sessionNumber !== liveCaptureSessionNumber) return;
+      liveCaptureStatus.textContent = `Private draft ready: ${draft.title}. It is waiting in the owner review queue.`;
+      await loadDrafts();
+    } catch (error) {
+      if (error.status === 401) showLogin();
+      else liveCaptureStatus.textContent = error.message || 'The private gameplay draft could not be created.';
+    }
+  }
+}
+
+async function startLiveScreenCapture() {
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    liveCaptureStatus.textContent = 'This browser does not support choosing a screen or game window for live analysis.';
+    return;
+  }
+  if (!window.MediaRecorder || !screenCaptureMimeType()) {
+    liveCaptureStatus.textContent = 'This browser cannot record a short screen segment. Try Chrome or Edge.';
+    return;
+  }
+  startLiveCaptureButton.disabled = true;
+  try {
+    const visionStatus = await api('/api/live-gameplay/status');
+    if (!visionStatus.enabled) {
+      liveCaptureStatus.textContent = visionStatus.explicitlyDisabled
+        ? 'Live analysis is disabled in Render. Enable a configured vision provider to start.'
+        : 'No supported vision provider is configured in Render yet. Add one, then try again.';
+      return;
+    }
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: 20, max: 30 } },
+      audio: liveCaptureAudio.checked
+    });
+    liveCaptureSessionNumber += 1;
+    const sessionNumber = liveCaptureSessionNumber;
+    liveCaptureStream = stream;
+    liveCaptureStopping = false;
+    liveCaptureAnalyzing = false;
+    liveCaptureSessionStartedAt = performance.now();
+    liveCaptureSegments = [];
+    liveCaptureFrames = [];
+    liveCapturePendingMarkers = [];
+    liveCaptureSeenMarkers = [];
+    liveCapturePreview.srcObject = stream;
+    liveCapturePreview.classList.remove('hidden');
+    await liveCapturePreview.play();
+    stream.getVideoTracks()[0]?.addEventListener('ended', () => {
+      void stopLiveScreenCapture('Screen sharing ended.');
+    }, { once: true });
+    liveCaptureSamplingTimer = setInterval(captureLiveFrame, 2500);
+    liveCaptureAnalysisTimer = setTimeout(() => {
+      void analyzeLiveScreenFrames(sessionNumber);
+      liveCaptureAnalysisTimer = setInterval(() => void analyzeLiveScreenFrames(sessionNumber), 25000);
+    }, 8000);
+    liveCapturePendingTimer = setInterval(() => void processLiveCaptureMarkers(sessionNumber), 1000);
+    recordLiveCaptureSegment(sessionNumber);
+    liveCaptureStatus.textContent = 'Screen sharing is active. Keep this dashboard visible while streaming; the first gameplay check starts in about 8 seconds.';
+    stopLiveCaptureButton.disabled = false;
+  } catch (error) {
+    liveCaptureStatus.textContent = error.name === 'NotAllowedError'
+      ? 'Screen sharing was cancelled. Choose your game window when ready.'
+      : error.message || 'Could not start screen sharing.';
+    if (error.status === 401) showLogin();
+  } finally {
+    startLiveCaptureButton.disabled = Boolean(liveCaptureStream);
+  }
+}
+
+async function stopLiveScreenCapture(message = 'Live screen sharing stopped.') {
+  if (!liveCaptureStream) return;
+  const sessionNumber = liveCaptureSessionNumber;
+  liveCaptureStopping = true;
+  clearInterval(liveCaptureSamplingTimer);
+  clearInterval(liveCaptureAnalysisTimer);
+  clearInterval(liveCapturePendingTimer);
+  clearTimeout(liveCaptureSegmentTimer);
+  liveCaptureSamplingTimer = null;
+  liveCaptureAnalysisTimer = null;
+  liveCapturePendingTimer = null;
+  const recorders = [...liveCaptureActiveRecorders];
+  await Promise.all(recorders.map((recorder) => new Promise((resolve) => {
+    if (recorder.state === 'inactive') return resolve();
+    recorder.addEventListener('stop', resolve, { once: true });
+    try { recorder.stop(); } catch { resolve(); }
+  })));
+  await processLiveCaptureMarkers(sessionNumber, true);
+  const stream = liveCaptureStream;
+  liveCaptureStream = null;
+  stream.getTracks().forEach((track) => track.stop());
+  liveCapturePreview.pause();
+  liveCapturePreview.srcObject = null;
+  liveCapturePreview.classList.add('hidden');
+  liveCaptureActiveRecorders.clear();
+  liveCaptureSegments = [];
+  liveCaptureFrames = [];
+  liveCapturePendingMarkers = [];
+  liveCaptureSeenMarkers = [];
+  liveCaptureStopping = false;
+  startLiveCaptureButton.disabled = false;
+  stopLiveCaptureButton.disabled = true;
+  liveCaptureStatus.textContent = message;
 }
 
 async function refreshConnection() {
@@ -121,6 +401,8 @@ async function refreshConnection() {
 async function refreshTwitchConnection() {
   const status = await api('/api/twitch/status');
   const highlightStatus = await api('/api/twitch/highlight-discovery/status').catch(() => null);
+  twitchConnected = status.connected === true;
+  liveGameplayScreeningEnabled = highlightStatus?.gameplayScreeningEnabled === true;
   twitchConnectionDot.classList.toggle('connected', status.connected);
   twitchConnectionText.textContent = status.connected
     ? `Connected as ${status.displayName || status.login || 'Twitch user'}`
@@ -137,7 +419,7 @@ async function refreshTwitchConnection() {
     twitchConnectionHelp.textContent = status.connected && (!highlightStatus || !highlightStatus.visualGameplayVerificationConfigured)
       ? 'Automatic markers start when any supported gameplay-vision provider is configured in Render. Choose Gemini, OpenAI, Groq or another OpenAI-compatible endpoint, Anthropic, or a reachable Ollama server. Manual backup marks still work during a Twitch live stream.'
       : status.connected
-        ? `While you are live, Amaana automatically checks sampled Twitch gameplay for fights and rare loot using ${highlightStatus.gameplayVisionProviders?.join(', ') || 'the configured vision provider'}, records verified frame markers, and prepares private Short drafts for your review. No tap is needed.`
+        ? `While you are live, Amaana automatically checks sampled Twitch gameplay for fights and rare loot using ${highlightStatus.gameplayVisionProviders?.join(', ') || 'the configured vision provider'}, records verified frame markers, and prepares private Short drafts for your review. Leave this dashboard open while streaming so live checks keep running. No tap is needed.`
         : (status.error || 'Connect the Twitch account that owns the Saevond channel.');
     twitchConnectButton.disabled = false;
     twitchConnectButton.textContent = status.connected ? 'Reconnect Twitch' : 'Connect Twitch';
@@ -333,6 +615,12 @@ function renderDraft(draft, draftsById = new Map()) {
       twitchLink.textContent = 'Open Twitch clip';
       card.append(twitchLink);
     }
+  }
+  if (draft.sourceType === 'live_screen_capture_short') {
+    const label = gameplayLabel(draft.eventType, draft.eventEvidence);
+    card.append(element('p', 'draft-meta',
+      `Automatically detected ${label} from a shared gameplay window at about ${formatCaptureTime(draft.eventOffsetSeconds)} in the capture. Uploaded privately for your review.`));
+    if (draft.eventEvidence) card.append(element('p', 'draft-meta', `Visible evidence: ${draft.eventEvidence}`));
   }
   if (Array.isArray(draft.eventTypes) && draft.eventTypes.length) {
     const labels = draft.eventTypes.map((eventType) => ({ fight: 'fight', rare_loot: 'rare loot', clutch: 'clutch' })[eventType])
@@ -1149,6 +1437,9 @@ loginForm.addEventListener('submit', async (event) => {
     button.textContent = 'Unlock dashboard';
   }
 });
+
+startLiveCaptureButton.addEventListener('click', () => { void startLiveScreenCapture(); });
+stopLiveCaptureButton.addEventListener('click', () => { void stopLiveScreenCapture(); });
 
 uploadForm.addEventListener('submit', async (event) => {
   event.preventDefault();

@@ -201,11 +201,31 @@ async function verifyGameplay(inputPath, { apiKey, model, timeoutMs, env = proce
   return analyzeGameplayFrames(frames, { apiKey, model, timeoutMs, env: effectiveEnv });
 }
 
+async function combineLiveScreenSegments(inputPaths, outputPath) {
+  const path = require('path');
+  if (!Array.isArray(inputPaths) || inputPaths.length < 1 || inputPaths.length > 4 || !outputPath) {
+    throw new Error('Live screen capture requires one to four video segments');
+  }
+  const listPath = outputPath + '.concat.txt';
+  const quote = (value) => String(value).replace(/'/g, "'\\''");
+  await fs.promises.writeFile(listPath, inputPaths.map((inputPath) => `file '${quote(path.resolve(inputPath))}'`).join('\n'));
+  try {
+    await runFfmpeg([
+      '-y', '-f', 'concat', '-safe', '0', '-i', listPath,
+      '-map', '0:v:0', '-map', '0:a?', '-t', '90',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-threads', '1',
+      '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', outputPath
+    ], 6 * 60 * 1000);
+  } finally {
+    await fs.promises.rm(listPath, { force: true }).catch(() => {});
+  }
+}
+
 
 async function shortFromHighlight(highlightPath, start, duration, outputPath) {
   await runFfmpeg(['-y', '-ss', String(start), '-i', highlightPath, '-t', String(duration),
     '-vf', 'split=2[bgsrc][fgsrc];[bgsrc]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=18:2[bg];[fgsrc]scale=720:1280:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p',
-    '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-movflags', '+faststart', outputPath]);
+    '-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-movflags', '+faststart', outputPath]);
 }
 
 
@@ -429,6 +449,6 @@ async function createThumbnailFromImage(inputPath, outputPath, { headline, sourc
 }
 
 module.exports = { convertLandscapeToShort, assembleHighlights, shortFromHighlight, inspectMedia, sampleGameplayFrames,
-  verifyGameplay, gameplayVisionStatus,
+  verifyGameplay, combineLiveScreenSegments, gameplayVisionStatus,
   validateHighlight, validateShort, createThumbnail, createThumbnailFromImage, thumbnailHeadline,
   thumbnailDimensions, thumbnailOverlay };

@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { analyzeGameplayFrames, configuredProviders, getGameplayVisionStatus,
-  resolveImageLimit, selectRepresentativeFrames } = require('../src/gameplay-vision');
+  resolveImageLimit, selectRepresentativeFrames, gameplayEventLabel, buildGameplayPrompt } = require('../src/gameplay-vision');
 const { createModelCircuitBreaker } = require('../src/seo-package');
 
 const frames = Array.from({ length: 5 }, (_, index) => ({
@@ -110,6 +110,28 @@ test('OpenAI Responses adapter sends sampled images and parses text output', asy
   assert.equal(request.headers.authorization, 'Bearer openai-secret');
   assert.equal(request.body.input[0].content[1].type, 'input_image');
   assert.equal(result.provider, 'openai');
+});
+
+test('Apex kill-leader banner is direct fight evidence and gets a distinct private-draft label', async () => {
+  const killLeaderAssessment = {
+    ...assessment,
+    gameName: 'Apex Legends',
+    eventEvidence: { fight: 'Apex KILL LEADER banner is visible in the gameplay HUD.' },
+    eventMarkers: [{ eventType: 'fight', frameIndex: 2, confidence: 0.94,
+      evidence: 'Apex KILL LEADER banner is visible in the gameplay HUD.' }]
+  };
+  let prompt;
+  const result = await analyzeGameplayFrames(frames, {
+    env: { GAMEPLAY_VISION_OPENAI_API_KEY: 'openai-secret' },
+    fetchImpl: async (_url, options) => {
+      prompt = JSON.parse(options.body).input[0].content[0].text;
+      return jsonResponse({ output_text: JSON.stringify(killLeaderAssessment) });
+    }
+  });
+  assert.match(buildGameplayPrompt(), /KILL LEADER.*fight event/i);
+  assert.match(prompt, /KILL LEADER/);
+  assert.equal(result.eventMarkers[0].eventType, 'fight');
+  assert.equal(gameplayEventLabel('fight', result.eventEvidence.fight), 'Kill Leader');
 });
 
 test('Anthropic adapter uses base64 image blocks and parses Messages output', async () => {

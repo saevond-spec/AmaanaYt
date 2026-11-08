@@ -5,7 +5,8 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const ffmpegPath = require('ffmpeg-static');
-const { convertLandscapeToShort, createThumbnail, createThumbnailFromImage, inspectMedia, thumbnailDimensions, thumbnailHeadline, thumbnailOverlay } = require('../src/video');
+const { combineLiveScreenSegments, convertLandscapeToShort, createThumbnail, createThumbnailFromImage,
+  inspectMedia, shortFromHighlight, thumbnailDimensions, thumbnailHeadline, thumbnailOverlay, validateShort } = require('../src/video');
 
 function jpegDimensions(buffer) {
   let offset = 2;
@@ -94,4 +95,28 @@ test('landscape Twitch clips convert to a valid 9:16 Short', async (t) => {
   assert.equal(media.height, 1280);
   assert.ok(Math.abs(media.durationSeconds - 1) <= 0.3);
   assert.ok((await fs.stat(output)).size > 0);
+});
+
+test('browser-recorded WebM segments combine into a valid private Short without audio', async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'amaana-live-screen-test-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const sources = [0, 1].map((index) => path.join(directory, `screen-${index}.webm`));
+  for (const [index, source] of sources.entries()) {
+    const fixture = spawnSync(ffmpegPath, ['-y', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24',
+      '-t', '7', '-an', '-c:v', 'libvpx-vp9', '-deadline', 'realtime', '-cpu-used', '8',
+      '-pix_fmt', 'yuv420p', source], { encoding: 'utf8' });
+    assert.equal(fixture.status, 0, `WebM fixture ${index} should render: ${fixture.stderr || fixture.error?.message}`);
+  }
+  const combined = path.join(directory, 'combined.mp4');
+  const short = path.join(directory, 'short.mp4');
+  await combineLiveScreenSegments(sources, combined);
+  const combinedMedia = await inspectMedia(combined);
+  assert.equal(combinedMedia.width, 320);
+  assert.equal(combinedMedia.height, 180);
+  assert.ok(Math.abs(combinedMedia.durationSeconds - 14) <= 0.3);
+  await shortFromHighlight(combined, 2, 6, short);
+  const shortMedia = await validateShort(short, 6);
+  assert.equal(shortMedia.width, 720);
+  assert.equal(shortMedia.height, 1280);
+  assert.ok((await fs.stat(short)).size > 0);
 });
