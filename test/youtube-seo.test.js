@@ -404,11 +404,13 @@ test('market search keeps only recently published public videos and their observ
     } },
     videos: { list: async () => ({ data: { items: [
       { id: 'public-1', snippet: { title: 'Gameplay A', publishedAt: '2026-10-01T00:00:00Z', channelId: 'other' },
-        statistics: { viewCount: '100' }, status: { privacyStatus: 'public' } },
+        statistics: { viewCount: '100' }, status: { privacyStatus: 'public' },
+        contentDetails: { duration: 'PT10M' } },
       { id: 'private-1', snippet: { title: 'Hidden', publishedAt: '2026-10-01T00:00:00Z' },
         statistics: { viewCount: '9999' }, status: { privacyStatus: 'private' } },
       { id: 'public-2', snippet: { title: 'Gameplay B', publishedAt: '2026-10-01T00:00:00Z', channelId: 'other' },
-        statistics: { viewCount: '500' }, status: { privacyStatus: 'public' } }
+        statistics: { viewCount: '500' }, status: { privacyStatus: 'public' },
+        contentDetails: { duration: 'PT8M' } }
     ] } }) }
   });
   const items = await youtube.recentGameVideos('ARC Raiders', { now: Date.parse('2026-10-02T12:00:00Z') });
@@ -420,6 +422,7 @@ test('market search keeps only recently published public videos and their observ
   assert.ok(queries.every((query) => query.publishedAfter === '2026-09-25T12:00:00.000Z'));
   assert.deepEqual(items.map((item) => item.id), ['public-2', 'public-1']);
   assert.deepEqual(items.map((item) => item.estimatedViewsPerDay), [333, 67]);
+  assert.deepEqual(items.map((item) => item.durationSeconds), [480, 600]);
 });
 
 test('market search ranks recent examples by age-adjusted views per day', async (t) => {
@@ -440,10 +443,12 @@ test('market search ranks recent examples by age-adjusted views per day', async 
     videos: { list: async () => ({ data: { items: [
       { id: 'older-high-total', snippet: { title: 'Older high view count',
         publishedAt: '2026-10-01T12:00:00Z', channelId: 'other' },
-        statistics: { viewCount: '1200' }, status: { privacyStatus: 'public' } },
+        statistics: { viewCount: '1200' }, status: { privacyStatus: 'public' },
+        contentDetails: { duration: 'PT20M' } },
       { id: 'newer-lower-total', snippet: { title: 'Newer rising video',
         publishedAt: '2026-10-06T12:00:00Z', channelId: 'other' },
-        statistics: { viewCount: '250' }, status: { privacyStatus: 'public' } },
+        statistics: { viewCount: '250' }, status: { privacyStatus: 'public' },
+        contentDetails: { duration: 'PT25M' } },
       { id: 'future', snippet: { title: 'Future video',
         publishedAt: '2026-10-09T00:00:00Z', channelId: 'other' },
         statistics: { viewCount: '999999' }, status: { privacyStatus: 'public' } },

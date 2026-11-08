@@ -516,21 +516,29 @@ async function recentGameVideos(game, { now = Date.now() } = {}) {
   const ids = uniqueRecentGameVideoIds(responses);
   if (!ids.length) return [];
   const details = await youtube.videos.list({
-    part: ['snippet', 'statistics', 'status'], id: ids,
-    fields: 'items(id,snippet(title,publishedAt,channelId),statistics(viewCount),status(privacyStatus))'
+    part: ['snippet', 'statistics', 'status', 'contentDetails'], id: ids,
+    fields: 'items(id,snippet(title,publishedAt,channelId),statistics(viewCount),status(privacyStatus),contentDetails(duration))'
   });
   const dayMs = 24 * 60 * 60 * 1000;
+  function parseDurationSeconds(value) {
+    const match = String(value || '').match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$/);
+    if (!match) return null;
+    return Number(match[1] || 0) * 3600 + Number(match[2] || 0) * 60 + Number(match[3] || 0);
+  }
   return (details.data.items || []).filter((item) => {
     const publishedAtMs = Date.parse(item.snippet?.publishedAt || '');
     const viewCount = Number(item.statistics?.viewCount);
     return item.status?.privacyStatus === 'public' && Number.isFinite(publishedAtMs) &&
-      publishedAtMs <= now && Number.isSafeInteger(viewCount) && viewCount >= 0;
+      publishedAtMs <= now && Number.isSafeInteger(viewCount) && viewCount >= 0 &&
+      Number.isFinite(parseDurationSeconds(item.contentDetails?.duration)) &&
+      parseDurationSeconds(item.contentDetails.duration) > 0;
   }).map((item) => {
     const publishedAtMs = Date.parse(item.snippet.publishedAt);
     const viewCount = Number(item.statistics.viewCount);
     const ageDays = Math.max(1, (now - publishedAtMs) / dayMs);
     return { id: item.id, title: String(item.snippet.title || '').slice(0, 150),
       channelId: item.snippet.channelId, publishedAt: item.snippet.publishedAt,
+      durationSeconds: parseDurationSeconds(item.contentDetails.duration),
       viewCount, estimatedViewsPerDay: Math.round(viewCount / ageDays) };
   }).sort((left, right) => right.estimatedViewsPerDay - left.estimatedViewsPerDay ||
     right.viewCount - left.viewCount);

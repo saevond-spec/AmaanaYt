@@ -52,15 +52,16 @@ test('market samples use fresh public data, exclude the creator, and respect a p
     searches.push(game);
     return [
       { id: 'own', title: 'My ARC Raiders match', channelId: 'channel-1',
-        publishedAt: '2026-10-01T00:00:00Z', viewCount: 10 },
+        publishedAt: '2026-10-01T00:00:00Z', viewCount: 10, durationSeconds: 900 },
       { id: 'other', title: 'ARC Raiders parry gameplay', channelId: 'channel-2',
-        publishedAt: '2026-10-01T00:00:00Z', viewCount: 300 }
+        publishedAt: '2026-10-01T00:00:00Z', viewCount: 300, durationSeconds: 900 }
     ];
   } };
   const options = { store, youtube, env: { SEO_MARKET_RESEARCH: 'true' },
     now: () => Date.parse('2026-10-02T12:00:00Z'), logger: { info() {}, warn() {} } };
   const market = createSeoMarket(options);
-  const source = { title: 'ARC Raiders live', privacyStatus: 'public', channelId: 'channel-1' };
+  const source = { title: 'ARC Raiders live', privacyStatus: 'public', channelId: 'channel-1',
+    durationSeconds: 900 };
   const snapshot = await market.research(source);
   assert.deepEqual(snapshot.samples.map((sample) => sample.id), ['other']);
   assert.equal((await market.research(source)).samples[0].viewCount, 300);

@@ -744,6 +744,73 @@ async function saveSeoMarketBudget(budget) {
   [JSON.stringify(budget)]);
 }
 
+function validVidIQSnapshotKey(key) {
+  return /^vidiq_market_[a-f0-9]{24}$/.test(String(key || ''));
+}
+
+async function getVidIQMarketSnapshot(key) {
+  if (!validVidIQSnapshotKey(key)) throw new Error('Invalid VidIQ market snapshot key');
+  await init();
+  const result = await pool.query('SELECT value FROM amaana_state WHERE key = $1', [key]);
+  return result.rows[0]?.value || null;
+}
+
+async function saveVidIQMarketSnapshot(key, snapshot) {
+  if (!validVidIQSnapshotKey(key) || !snapshot || typeof snapshot !== 'object') {
+    throw new Error('Invalid VidIQ market snapshot');
+  }
+  await init();
+  await pool.query(`INSERT INTO amaana_state (key, value, updated_at) VALUES ($1, $2::jsonb, NOW())
+    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+  [key, JSON.stringify(snapshot)]);
+}
+
+async function getVidIQResearchBudget() {
+  await init();
+  const result = await pool.query("SELECT value FROM amaana_state WHERE key = 'vidiq_research_budget'");
+  return result.rows[0]?.value || null;
+}
+
+async function reserveVidIQResearchSlot(period, creditCost, weeklyLimit, reservedAtMs = Date.now()) {
+  if (!/^\d{4}-W\d{2}$/.test(String(period || '')) || !Number.isSafeInteger(creditCost) || creditCost < 1 ||
+      !Number.isSafeInteger(weeklyLimit) || weeklyLimit < creditCost || weeklyLimit > 5 ||
+      !Number.isFinite(reservedAtMs) || reservedAtMs < 0) {
+    throw new Error('Invalid VidIQ weekly credit reservation');
+  }
+  await init();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`INSERT INTO amaana_state (key, value, updated_at)
+      VALUES ('vidiq_research_budget', '{"period":null,"creditsUsed":0}'::jsonb, NOW())
+      ON CONFLICT (key) DO NOTHING`);
+    const selected = await client.query("SELECT value FROM amaana_state WHERE key = 'vidiq_research_budget' FOR UPDATE");
+    const previous = selected.rows[0]?.value || {};
+    const previousReservationMs = Date.parse(previous.lastReservedAt || '');
+    if (Number.isFinite(previousReservationMs) && reservedAtMs - previousReservationMs < 7 * 24 * 60 * 60 * 1000) {
+      await client.query('COMMIT');
+      return { allowed: false, reason: 'rolling_window', period, lastReservedAt: previous.lastReservedAt };
+    }
+    const used = previous.period === period && Number.isSafeInteger(previous.creditsUsed)
+      ? previous.creditsUsed : 0;
+    if (used + creditCost > weeklyLimit) {
+      await client.query('COMMIT');
+      return { allowed: false, period, usedCredits: used, limitCredits: weeklyLimit };
+    }
+    const value = { period, creditsUsed: used + creditCost, lastReservedAt: new Date(reservedAtMs).toISOString(),
+      policy: 'rolling_seven_day_and_iso_week_cap_reserve_before_request_no_automatic_retry' };
+    await client.query("UPDATE amaana_state SET value = $1::jsonb, updated_at = NOW() WHERE key = 'vidiq_research_budget'",
+      [JSON.stringify(value)]);
+    await client.query('COMMIT');
+    return { allowed: true, period, usedCredits: value.creditsUsed, limitCredits: weeklyLimit };
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function upsertSeoVideo(videoId, source) {
   await init();
   // Catalog rescans refresh metadata. External title/description/tag/visibility changes
@@ -1313,6 +1380,10 @@ module.exports = {
   saveSeoMarketSnapshot,
   getSeoMarketBudget,
   saveSeoMarketBudget,
+  getVidIQMarketSnapshot,
+  saveVidIQMarketSnapshot,
+  getVidIQResearchBudget,
+  reserveVidIQResearchSlot,
   reservePlaylistAutoSlot,
   upsertSeoVideo,
   getSeoVideo,

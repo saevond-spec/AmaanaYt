@@ -58,6 +58,19 @@ test('normalizes text and spoken-audio languages separately and keeps public vie
     status: { privacyStatus: 'unlisted' } }).viewCount, null);
 });
 
+test('VidIQ estimates are stored as directional evidence without holding an unrelated package', () => {
+  const marketEvidence = { vidiq: { source: 'vidIQ_MCP_read_only', game: 'NARAKA: BLADEPOINT',
+    query: 'NARAKA BLADEPOINT guide gameplay', observedAt: '2026-10-23T16:00:00Z',
+    estimatedSearchMetrics: true, policy: 'directional_market_evidence_owner_review_required',
+    rows: [{ keyword: 'NARAKA BLADEPOINT guide', estimatedMonthlySearch: { min: 0, max: 749, display: '<750' },
+      searchDemandGrowthPct: null, sourceSupport: 'candidate_phrase_overlap', sourceOwnerTokenOverlap: true,
+      usedForPackaging: false }] } };
+  const pkg = validatePackage(structuredClone(generated), source, context, null, marketEvidence);
+  assert.ok(!pkg.missingEvidence.some((item) => /VidIQ/.test(item)));
+  assert.equal(pkg.evidence.vidiqObservedAt, marketEvidence.vidiq.observedAt);
+  assert.equal(pkg.evidence.vidiqRows[0].estimatedMonthlySearch.max, 749);
+});
+
 test('uses only supplied markers for chapters and clips', () => {
   const pkg = validatePackage(generated, source, context);
   assert.equal(pkg.hook.length, 141);
@@ -143,7 +156,8 @@ test('live market evidence reaches the prompt as observations without replacing 
     apiKey: 'unit-test-key', model: 'test-model',
     marketEvidence: { game: 'NARAKA: BLADEPOINT', query: 'NARAKA: BLADEPOINT gameplay',
       observedAt: '2026-10-02T12:00:00Z', windowDays: 7,
-      metrics: { sampleCount: 10, medianViewsPerDay: 200, p90ViewsPerDay: 450, confidence: 0.42 },
+      metrics: { sampleCount: 10, medianViewsPerDay: 200, p90ViewsPerDay: 450, confidence: 0.42,
+        phraseSuggestionsEligible: true },
       terms: [{ phrase: 'solo parry', score: 0.8, sampleCount: 3 }],
       samples: [{ id: 'sample-1', title: 'NARAKA parry', publishedAt: '2026-10-01T00:00:00Z',
         viewCount: 400, estimatedViewsPerDay: 400 }] },
@@ -157,7 +171,55 @@ test('live market evidence reaches the prompt as observations without replacing 
   assert.match(prompt, /solo parry/);
   assert.match(prompt, /NARAKA parry/);
   assert.match(prompt, /estimatedViewsPerDay/);
+  assert.match(prompt, /same-game duration band/);
+  assert.match(prompt, /A source share can rise when total views fall/);
   assert.match(prompt, /Opening, first round, final fight/);
+});
+
+test('unsupported market phrases are withheld from the model prompt', async () => {
+  let prompt;
+  const result = await generatePackage(source, context, {
+    apiKey: 'unit-test-key', model: 'test-model',
+    marketEvidence: { game: 'NARAKA: BLADEPOINT', observedAt: '2026-10-02T12:00:00Z',
+      metrics: { sampleCount: 4, phraseSuggestionsEligible: false, phraseSuggestionReason: 'too_few_comparable_samples' },
+      terms: [{ phrase: 'unverified trend', score: 0.9, sampleCount: 1 }],
+      samples: [{ id: 'sample-1', title: 'unverified trend', viewCount: 3 }] },
+    fetchImpl: async (_url, options) => {
+      prompt = JSON.parse(options.body).messages[1].content;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) };
+    }
+  });
+  assert.doesNotMatch(prompt, /unverified trend/);
+  assert.match(prompt, /too_few_comparable_samples/);
+  assert.deepEqual(result.evidence.marketTerms, []);
+  assert.equal(result.evidence.marketPhraseSignal, 'too_few_comparable_samples');
+});
+
+test('VidIQ keyword evidence sent to the model is limited to source-supported phrases', async () => {
+  let payload;
+  await generatePackage(source, context, {
+    apiKey: 'unit-test-key', model: 'vidiq-grounding-test',
+    marketEvidence: { game: 'NARAKA: BLADEPOINT', vidiq: { source: 'vidIQ_MCP_read_only',
+      game: 'NARAKA: BLADEPOINT', query: 'NARAKA BLADEPOINT guide gameplay', observedAt: '2026-10-23T16:00:00Z',
+      estimatedSearchMetrics: true, rows: [
+        { keyword: 'NARAKA BLADEPOINT guide', volumeScore: 40,
+          sourceSupport: 'candidate_phrase_overlap', sourceOwnerTokenOverlap: true,
+          supportSources: ['owner_primary_keyword'] },
+        { keyword: 'unverified patch winner', volumeScore: 90, sourceSupport: 'unverified_phrase',
+          sourceOwnerTokenOverlap: false, supportSources: [] }
+      ] } },
+    fetchImpl: async (_url, options) => {
+      const prompt = JSON.parse(options.body).messages[1].content;
+      payload = JSON.parse(prompt.slice(prompt.lastIndexOf('DATA: ') + 6));
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(generated) } }] }) };
+    }
+  });
+  assert.deepEqual(payload.marketEvidence.vidiqResearch.rows.map((row) => row.keyword), ['NARAKA BLADEPOINT guide']);
+  assert.deepEqual(Object.keys(payload.marketEvidence.vidiqResearch.rows[0]).sort(),
+    ['keyword', 'sourceOwnerTokenOverlap', 'sourceSupport', 'supportSources', 'vidiqPriorityOrder']);
+  assert.equal(payload.marketEvidence.vidiqResearch.rows[0].vidiqPriorityOrder, 1);
+  assert.doesNotMatch(JSON.stringify(payload.marketEvidence.vidiqResearch), /volumeScore|competitionScore|estimatedMonthlySearch|searchDemandGrowthPct|40/);
+  assert.doesNotMatch(JSON.stringify(payload), /unverified patch winner/);
 });
 
 test('SEO prompt context is compact while duplicate checks still use the full catalog', async () => {

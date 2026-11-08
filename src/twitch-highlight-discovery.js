@@ -299,7 +299,6 @@ function createTwitchHighlightDiscovery({
         String(draft.vodId) === requestedId &&
         Number(draft.targetHighlightDurationSeconds) !== Number(targetDurationSeconds));
       if (!visualGameplayVerificationAvailable()) {
-        await markScanned(requestedId);
         return { status: 'visual_gameplay_screening_disabled', vodId: requestedId,
           targetDurationSeconds };
       }
@@ -547,11 +546,27 @@ function createTwitchHighlightDiscovery({
       ? 'visual_gameplay_screening_disabled'
       : !video || typeof video.verifyGameplay !== 'function' || typeof video.inspectMedia !== 'function'
         ? 'visual_gameplay_screening_unavailable' : null;
-    if (screeningStatus && !Object.keys((await getState()).liveSessions).length) {
-      result.status = screeningStatus;
-      return result;
+    let broadcast;
+    let pendingManualMarker = false;
+    if (screeningStatus) {
+      const saved = await getState();
+      if (!Object.keys(saved.liveSessions).length) {
+        result.status = screeningStatus;
+        return result;
+      }
+      broadcast = await twitch.getLiveBroadcast();
+      if (broadcast?.stream) {
+        const streamKey = String(broadcast.stream.id || '');
+        pendingManualMarker = saved.liveSessions[streamKey]?.manualMarkers?.some((marker) =>
+          marker?.status === 'waiting_for_vod');
+        if (!pendingManualMarker) {
+          result.status = screeningStatus;
+          return result;
+        }
+      }
+    } else {
+      broadcast = await twitch.getLiveBroadcast();
     }
-    const broadcast = await twitch.getLiveBroadcast();
     if (!broadcast || !broadcast.stream) {
       const state = await getState();
       const endedSessions = Object.entries(state.liveSessions)
@@ -632,6 +647,10 @@ function createTwitchHighlightDiscovery({
       }
       await saveState();
       result.status = 'not_live';
+      return result;
+    }
+    if (screeningStatus && !pendingManualMarker) {
+      result.status = screeningStatus;
       return result;
     }
     result.live = true;
@@ -934,6 +953,24 @@ function createTwitchHighlightDiscovery({
       const drafts = await store.listDrafts();
       const state = await getState();
       const timestamp = now();
+      const gameplayScreeningAvailable = Boolean(visualGameplayVerificationAvailable());
+      let screeningStateChanged = false;
+      if (state.gameplayScreeningStateVersion !== 1) {
+        // Prior scan timestamps may have been written while visual analysis was unavailable.
+        // Recheck once after this migration so eligible VODs are not left stale for a day.
+        state.lastScannedAt = {};
+        state.gameplayScreeningStateVersion = 1;
+        screeningStateChanged = true;
+      } else if (state.visualGameplayScreeningAvailable === false && gameplayScreeningAvailable) {
+        // Screening has recovered; re-evaluate the VOD inventory immediately.
+        state.lastScannedAt = {};
+        screeningStateChanged = true;
+      }
+      if (state.visualGameplayScreeningAvailable !== gameplayScreeningAvailable) {
+        state.visualGameplayScreeningAvailable = gameplayScreeningAvailable;
+        screeningStateChanged = true;
+      }
+      if (screeningStateChanged) await saveState();
       result.vodsSeen = Array.isArray(vods) ? vods.length : 0;
       for (const vod of Array.isArray(vods) ? vods : []) {
         const vodId = String(vod && vod.id || '');

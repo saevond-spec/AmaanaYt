@@ -69,8 +69,14 @@ function findHighlightBatchByVodId(drafts, vodId) {
 }
 
 function findDueHighlightRetries(drafts, now = Date.now()) {
-  return drafts.filter((draft) => draft.sourceType === 'twitch_highlight_batch' &&
-    draft.status === 'clip_retry_wait' && Date.parse(draft.nextClipAttemptAt || 0) <= now);
+  const timestamp = now instanceof Date ? now.getTime() : Number(now);
+  if (!Number.isFinite(timestamp) || !Array.isArray(drafts)) return [];
+  return drafts.filter((draft) => {
+    const retryAt = typeof draft?.nextClipAttemptAt === 'string'
+      ? Date.parse(draft.nextClipAttemptAt) : NaN;
+    return draft?.sourceType === 'twitch_highlight_batch' &&
+      draft.status === 'clip_retry_wait' && Number.isFinite(retryAt) && retryAt <= timestamp;
+  });
 }
 
 function shouldRequeueUnexpectedTwitchDownloadHost(draft) {

@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { auditVideo, automaticVideoEdit, channelSuggestions, channelEdit,
   retryablePublishError, createSeoPublisher } = require('../src/seo-publish');
 const SEO_AUTOPILOT_VERSION = require('../src/seo-autopilot-version');
-const { createSeoWorker } = require('../src/seo-worker');
+const { createSeoWorker, addVidIQReviewGate, VIDIQ_OWNER_REVIEW_REASON } = require('../src/seo-worker');
 const { descriptionChapters } = require('../src/seo-package');
 
 function item(overrides = {}) {
@@ -39,6 +39,67 @@ test('automatic copy preserves existing links and disclosures without inserting 
   assert.doesNotMatch(edit.description, /\[add URL\]|Chapters/);
   assert.deepEqual(edit.tags, ['ARC Raiders', 'gaming highlights', '@saevond']);
   assert.ok(auditVideo(item()).some((finding) => finding.includes('keyword')));
+});
+
+test('VidIQ keyword suggestions cannot trigger an automatic metadata or thumbnail write', async () => {
+  const row = item({ package: { ...item().package,
+    missingEvidence: [VIDIQ_OWNER_REVIEW_REASON]
+  } });
+  let youtubeReads = 0;
+  let metadataWrites = 0;
+  let thumbnailWrites = 0;
+  let recorded;
+  const publisher = createSeoPublisher({
+    store: {
+      getSeoVideo: async () => row,
+      getSeoSyncState: async () => ({ channelId: 'channel-1' }),
+      markSeoAutoResult: async (_id, value) => { recorded = value; }
+    },
+    youtube: {
+      ownedChannel: async () => ({ id: 'channel-1' }),
+      assertTargetChannel: async () => {},
+      getVideo: async () => { youtubeReads += 1; return {
+        snippet: { ...row.source, categoryId: '20', liveBroadcastContent: 'none' },
+        status: { privacyStatus: 'public' }
+      }; },
+      updateVideoSeo: async () => { metadataWrites += 1; },
+      setThumbnail: async () => { thumbnailWrites += 1; }
+    },
+    logger: { info() {}, warn() {} }
+  });
+  const edit = () => automaticVideoEdit(row);
+  assert.throws(edit, /VidIQ keyword evidence requires owner review/);
+  await publisher.publishVideo(row.videoId);
+  assert.equal(youtubeReads, 0, 'owner review gate must stop before reading/writing YouTube');
+  assert.equal(metadataWrites, 0);
+  assert.equal(thumbnailWrites, 0);
+  assert.equal(recorded.state, 'skipped');
+  assert.match(recorded.reason, /VidIQ keyword evidence requires owner review/);
+});
+
+test('VidIQ prompt, review gate, and stored evidence use the same ranked top-12 phrases', () => {
+  const rows = Array.from({ length: 13 }, (_value, index) => ({
+    keyword: `market phrase ${index}`, overallScore: 100 - index,
+    sourceOwnerTokenOverlap: true, sourceSupport: 'candidate_phrase_overlap', supportSources: ['source_title']
+  }));
+  const generated = { ...item().package,
+    titles: { search: ['ARC Raiders Market Phrase 12'], hybrid: ['ARC Raiders Market Phrase 12'] } };
+  const result = addVidIQReviewGate(generated, { rows,
+    sourceTitle: 'ARC Raiders first look', ownerPrimaryKeyword: 'ARC Raiders',
+    observedAt: '2026-10-23T16:00:00Z', query: 'ARC Raiders gameplay' });
+  assert.equal(result.missingEvidence.includes(VIDIQ_OWNER_REVIEW_REASON), false,
+    'the lower-ranked phrase was not sent to the model and cannot trigger a hold');
+  assert.equal(result.evidence.vidiqRows.length, 12);
+  assert.deepEqual(result.evidence.vidiqRows.map((row) => row.keyword),
+    Array.from({ length: 12 }, (_value, index) => `market phrase ${index}`));
+  assert.equal(result.evidence.vidiqRows.some((row) => row.keyword === 'market phrase 12'), false);
+
+  const selectedTitle = { ...generated,
+    titles: { search: ['ARC Raiders Market Phrase 0'], hybrid: ['ARC Raiders Market Phrase 0'] } };
+  const selected = addVidIQReviewGate(selectedTitle, { rows,
+    sourceTitle: 'ARC Raiders first look', ownerPrimaryKeyword: 'ARC Raiders' });
+  assert.equal(selected.missingEvidence.includes(VIDIQ_OWNER_REVIEW_REASON), true);
+  assert.equal(selected.evidence.vidiqRows[0].usedForPackaging, true);
 });
 
 test('autopilot shortens long titles, improves context, and adds only verified chapter markers', () => {
@@ -679,6 +740,15 @@ test('worker analyzes a public upload, publishes its SEO, and updates channel ke
     }
   };
   const diagnostics = [];
+  const vidiqCalls = [];
+  const vidiqMarket = { research: async (source) => {
+    vidiqCalls.push(source);
+    assert.equal(source.privacyStatus, 'public', 'private and unlisted catalog entries must not be sent to VidIQ');
+    return { source: 'vidIQ_MCP_read_only', query: 'ARC Raiders gameplay',
+      observedAt: '2026-10-03T12:00:00.000Z', rows: [{ keyword: 'ARC Raiders match 0',
+        sourceSupport: 'candidate_phrase_overlap', sourceOwnerTokenOverlap: true,
+        supportSources: ['source_title'], usedForPackaging: false }] };
+  } };
   const worker = createSeoWorker({ store, youtube, env: {
     SEO_AUTO_PUBLISH: 'true', ENABLE_VIDEO_ANALYSIS: 'true',
     SEO_AI_API_KEY: 'fixture-key', SEO_AI_MODEL: 'fixture-model',
@@ -686,7 +756,7 @@ test('worker analyzes a public upload, publishes its SEO, and updates channel ke
   }, logger: {
     info: (message) => diagnostics.push(message), warn: (message) => diagnostics.push(message),
     error: (message) => diagnostics.push(message)
-  }, analyze: async (url) => {
+  }, vidiqMarket, analyze: async (url) => {
     assert.match(url, /video-0$/);
     events.push(['analysis', 'video-0']);
     return { summary: 'An ARC Raiders match' };
@@ -694,6 +764,7 @@ test('worker analyzes a public upload, publishes its SEO, and updates channel ke
     const id = 'video-' + source.title.split(' ').at(-1);
     assert.equal(source.privacyStatus, 'public');
     assert.equal(options.analysis.summary, 'An ARC Raiders match');
+    assert.equal(options.marketEvidence.vidiq.rows[0].keyword, 'ARC Raiders match 0');
     events.push(['package', id]);
     return { ...item().package, missingEvidence: [] };
   } });
@@ -702,6 +773,10 @@ test('worker analyzes a public upload, publishes its SEO, and updates channel ke
   assert.equal(rows.get('video-0').autoResult.state, 'applied');
   assert.equal(rows.get('video-0').applied.privacyStatus, 'public');
   assert.equal(rows.get('video-0').source.privacyStatus, 'public');
+  assert.equal(vidiqCalls.length, 1);
+  assert.equal(rows.get('video-0').package.evidence.vidiqRows[0].usedForPackaging, false);
+  assert.equal(rows.get('video-0').package.missingEvidence.some((warning) => /VidIQ-informed phrase/.test(warning)), false,
+    'an unused VidIQ suggestion must not slow normal automatic SEO publishing');
   for (const id of ['video-1', 'video-2']) {
     assert.equal(rows.get(id).package, undefined);
     assert.equal(rows.get(id).autoResult, undefined);

@@ -64,6 +64,18 @@ test('separates Google external views and marks 25-row detail results incomplete
   assert.equal(cappedWithGoogle.googleSearchReferralComplete, false);
 });
 
+test('rejects missing, coerced, fractional, negative, and overflowing Analytics counts', () => {
+  for (const value of [null, undefined, '', '  ', '1.5', '-1', '1e2', false, NaN, Infinity]) {
+    assert.throws(() => summarizeYoutubeSearchPerformance([['YT_SEARCH', value]], []),
+      /invalid YouTube Search view count/);
+  }
+  assert.equal(summarizeYoutubeSearchPerformance([['YT_SEARCH', 0], ['YT_SEARCH', '12']], [])
+    .youtubeSearchViews, 12);
+  assert.throws(() => summarizeYoutubeSearchPerformance([
+    ['YT_SEARCH', Number.MAX_SAFE_INTEGER], ['YT_SEARCH', 1]
+  ], []), /invalid YouTube Search view total/);
+});
+
 test('autopilot runs one rotating low-view-first batch per day and saves equal windows', async () => {
   const requests = [];
   const saved = [];
@@ -220,5 +232,34 @@ test('autopilot records an empty window without fabricating metrics', async () =
   assert.equal(result.status, 'complete');
   assert.equal(result.updatedCount, 0);
   assert.equal(result.state.youtubeSearchAnalyticsRunDate, '2026-10-05');
+  assert.equal(states.length, 1);
+});
+
+test('a nonempty public catalog with an empty candidate page stays incomplete and retries', async () => {
+  const now = new Date('2026-10-05T18:30:00.000Z');
+  const states = [];
+  let analyticsCalls = 0;
+  const store = {
+    async countPublicSeoVideos() { return 12; },
+    async listYoutubeSearchCandidates() { return []; },
+    async saveYoutubeSearchSnapshots() { throw new Error('no snapshots should be written'); },
+    async saveSeoSyncState(state) { states.push(state); }
+  };
+  const result = await runYoutubeSearchAutopilot({ store,
+    youtube: {
+      async hasAnalyticsReadAccess() { return true; },
+      async googleSearchTraffic() { analyticsCalls += 1; }
+    }, state: { youtubeSearchAnalyticsCursor: 4 }, now,
+    logger: { info() {}, warn() {} } });
+
+  assert.equal(result.status, 'retry_scheduled');
+  assert.equal(result.candidatePageEmpty, true);
+  assert.equal(result.state.youtubeSearchAnalyticsCursor, 4);
+  assert.equal(result.state.youtubeSearchAnalyticsRunDate, null);
+  assert.equal(result.state.youtubeSearchAnalyticsAttempted, 0);
+  assert.equal(result.state.youtubeSearchAnalyticsUpdated, 0);
+  assert.equal(Date.parse(result.state.youtubeSearchAnalyticsRetryAfter), now.getTime() + 60 * 60 * 1000);
+  assert.match(result.state.youtubeSearchAnalyticsLastError, /candidate page was empty/);
+  assert.equal(analyticsCalls, 0);
   assert.equal(states.length, 1);
 });

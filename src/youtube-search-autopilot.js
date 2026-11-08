@@ -67,6 +67,28 @@ async function runYoutubeSearchAutopilot({ store, youtube, state = {}, now = new
   const limit = Math.max(1, Math.min(50, configuredBatch));
   const offset = safeCursor(state.youtubeSearchAnalyticsCursor, total);
   const candidates = total ? await store.listYoutubeSearchCandidates(limit, offset) : [];
+  if (!Array.isArray(candidates)) throw new Error('YouTube Analytics candidate query returned an invalid page');
+  if (total > 0 && candidates.length === 0) {
+    const retryAfter = new Date(timestamp.getTime() + 60 * 60 * 1000).toISOString();
+    const incompleteState = {
+      ...state,
+      youtubeSearchAnalyticsCursor: offset,
+      youtubeSearchAnalyticsAttempted: 0,
+      youtubeSearchAnalyticsUpdated: 0,
+      youtubeSearchAnalyticsFailed: 0,
+      youtubeSearchAnalyticsPeriodStart: windows.current.startDate,
+      youtubeSearchAnalyticsPeriodEnd: windows.current.endDate,
+      youtubeSearchAnalyticsLastAttemptAt: timestamp.toISOString(),
+      youtubeSearchAnalyticsLastError: 'The public catalog count was nonzero but the candidate page was empty',
+      youtubeSearchAnalyticsNeedsReconnect: false,
+      youtubeSearchAnalyticsRetryAfter: retryAfter,
+      youtubeSearchAnalyticsRunDate: null
+    };
+    await store.saveSeoSyncState(incompleteState);
+    logger.warn?.('YouTube Search analytics candidate page was empty despite a nonempty public catalog; retry scheduled');
+    return { state: incompleteState, status: 'retry_scheduled', updatedCount: 0,
+      failedCount: 0, windows, candidatePageEmpty: true };
+  }
   const errors = [];
   let updatedCount = 0;
   let attemptedCount = 0;

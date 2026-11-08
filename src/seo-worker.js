@@ -1,4 +1,5 @@
-const { normalizeSource, normalizeContext, generatePackage, createModelCircuitBreaker } = require('./seo-package');
+const { normalizeSource, normalizeContext, generatePackage, createModelCircuitBreaker,
+  selectVidIQPromptRows } = require('./seo-package');
 const { analyzeVideo } = require('./video-analysis');
 const { createSeoPublisher } = require('./seo-publish');
 const { isYouTubeAuthorizationError } = require('./channel-tags');
@@ -7,8 +8,59 @@ const { runYoutubeQualityAutopilot } = require('./youtube-quality-autopilot');
 const { isYouTubeQuotaError, youtubeQuotaRetryAt, getYouTubeDataApiQuotaBlock,
   recordYouTubeDataApiQuotaBlock, callYouTubeDataApi } = require('./youtube-quota');
 
+const VIDIQ_OWNER_REVIEW_REASON = 'The selected title adds a new VidIQ-informed phrase; owner review is required before applying market-led metadata';
+
+function normalizedPhrase(value) {
+  return String(value || '').normalize('NFKC').toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
+
+function containsExactPhrase(text, phrase) {
+  const haystack = ` ${normalizedPhrase(text)} `;
+  const needle = ` ${normalizedPhrase(phrase)} `;
+  return needle.length > 2 && haystack.includes(needle);
+}
+
+function addVidIQReviewGate(generated, evidence) {
+  const promptRows = selectVidIQPromptRows(evidence?.rows);
+  if (!generated || !promptRows.length) return generated;
+  const selectedTitle = String(evidence.sourceTitle || '').length > 70
+    ? generated.titles?.search?.[0] || generated.titles?.hybrid?.[0]
+    : generated.titles?.hybrid?.[0] || generated.titles?.search?.[0];
+  const generatedDescription = typeof generated.description === 'string'
+    ? generated.description : [generated.hook, ...(generated.paragraphs || []), ...(generated.hashtags || [])]
+      .filter((value) => typeof value === 'string').join('\n');
+  const publishableFields = [selectedTitle, generatedDescription,
+    ...(generated.tags || []), ...(generated.hashtags || [])].filter((value) => typeof value === 'string');
+  let usedNewMarketPhrase = false;
+  const rows = promptRows.map((row) => {
+    const supported = row.sourceOwnerTokenOverlap === true;
+    // Keep fields separate so a phrase split across two independent tags cannot
+    // be recorded as if it appeared in the metadata that the publisher applies.
+    const used = supported && publishableFields.some((field) => containsExactPhrase(field, row.keyword));
+    // A phrase may be supported by the description or owner notes but still be
+    // a new search promise when promoted into the title. Only that selected,
+    // actually publishable title triggers review; unused alternatives do not.
+    const usedInSelectedTitle = supported && containsExactPhrase(selectedTitle, row.keyword);
+    const newTitlePhrase = usedInSelectedTitle &&
+      !containsExactPhrase(evidence.sourceTitle, row.keyword) &&
+      !containsExactPhrase(evidence.ownerPrimaryKeyword, row.keyword);
+    if (newTitlePhrase) usedNewMarketPhrase = true;
+    return { ...row, usedForPackaging: used };
+  });
+  const missingEvidence = Array.isArray(generated.missingEvidence) ? generated.missingEvidence : [];
+  const nextMissingEvidence = usedNewMarketPhrase
+    ? [...new Set([...missingEvidence, VIDIQ_OWNER_REVIEW_REASON])] : missingEvidence;
+  return { ...generated, missingEvidence: nextMissingEvidence, evidence: { ...(generated.evidence || {}),
+    vidiqObservedAt: evidence.observedAt || null,
+    vidiqQuery: evidence.query || null,
+    vidiqRows: rows,
+    vidiqPolicy: usedNewMarketPhrase ? 'directional_estimate_new_phrase_owner_review_required'
+      : 'directional_estimate_never_a_fact_or_forecast' } };
+}
+
 function createSeoWorker({ store, youtube, env = process.env, logger = console, sleep,
-  generate = generatePackage, analyze = analyzeVideo, market = null, playlistAuto = null,
+  generate = generatePackage, analyze = analyzeVideo, market = null, vidiqMarket = null, playlistAuto = null,
   setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout, setImmediateFn = setImmediate }) {
   let running = false;
   let scheduled = false;
@@ -453,9 +505,19 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
           const finalNativeModel = fallbackModel
             ? env.SEO_AI_FINAL_MODEL || 'gemini-3.8-flash' : null;
           const analysis = await videoAnalysis(job, state);
-          const marketEvidence = Date.parse(state.youtubeDataApiBlockedUntil) > Date.now()
+          let marketEvidence = Date.parse(state.youtubeDataApiBlockedUntil) > Date.now()
             ? null : await market?.research(job.source)
             .catch((error) => { logger.warn?.(`SEO market lookup ${job.videoId} failed: ${error.message}`); }) || null;
+          const vidiqEvidence = await vidiqMarket?.research(job.source, context, analysis)
+            .catch((error) => { logger.warn?.(`VidIQ lookup ${job.videoId} failed: ${error.message}`); }) || null;
+          if (vidiqEvidence) {
+            marketEvidence = marketEvidence
+              ? { ...marketEvidence, vidiq: vidiqEvidence }
+              : { game: vidiqEvidence.game, query: null, observedAt: null,
+                metrics: { sampleCount: 0, phraseSuggestionsEligible: false,
+                  phraseSuggestionReason: 'vidIQ keyword estimates are separate from YouTube search-result samples' },
+                terms: [], samples: [], vidiq: vidiqEvidence };
+          }
           if (Number(market?.getQuotaBlockedUntil?.() || 0) > Date.now()) {
             await markYouTubeQuotaBlocked(state, market.getQuotaBlockedUntil());
           }
@@ -472,6 +534,11 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
             onSecondNativeFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying second native model ${fallback}`),
             onFinalNativeFallback: (fallback) => logger.info?.(`SEO provider HTTP 503; trying final native model ${fallback}`)
           });
+          generated = addVidIQReviewGate(generated, vidiqEvidence ? {
+            ...vidiqEvidence, sourceTitle: job.source.title,
+            sourceDescription: job.source.description, ownerPrimaryKeyword: context.primaryKeyword,
+            ownerTopic: context.topic, ownerTakeaways: context.takeaways, ownerVideoType: context.videoType
+          } : null);
           if (job.source.privacyStatus === 'public') {
             generated.metadataCatalogComplete = metadataPeerCatalogComplete;
             if (!metadataPeerCatalogComplete) {
@@ -606,14 +673,16 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   }
 
   async function status() {
-    const [state, counts, youtubeAnalyticsAuthorized] = await Promise.all([
+    const [state, counts, youtubeAnalyticsAuthorized, vidiqStatus] = await Promise.all([
       store.getSeoSyncState(), store.seoCounts(),
-      typeof youtube.hasAnalyticsReadAccess === 'function' ? youtube.hasAnalyticsReadAccess() : false
+      typeof youtube.hasAnalyticsReadAccess === 'function' ? youtube.hasAnalyticsReadAccess() : false,
+      vidiqMarket?.status?.() || null
     ]);
     return { ...state, ...counts, dailyLimit, analysisBatchSize, aiRequestIntervalMs,
       videoAnalysisEnabled: analysisEnabled,
       providerConfigured: Boolean(env.SEO_AI_API_KEY && env.SEO_AI_MODEL), autoPublishEnabled,
-      youtubeAnalyticsAuthorized, catalogPagesPerRun, recentScanIntervalMs, running };
+      youtubeAnalyticsAuthorized, vidiqMarket: vidiqStatus,
+      catalogPagesPerRun, recentScanIntervalMs, running };
   }
 
   async function setBackfill(enabled, restart = false) {
@@ -663,4 +732,4 @@ function createSeoWorker({ store, youtube, env = process.env, logger = console, 
   return { schedule, run, registerUpload, status, setBackfill, resumeAfterYouTubeReconnect };
 }
 
-module.exports = { createSeoWorker };
+module.exports = { VIDIQ_OWNER_REVIEW_REASON, addVidIQReviewGate, createSeoWorker };
