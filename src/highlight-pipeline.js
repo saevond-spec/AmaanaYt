@@ -80,6 +80,32 @@ function shouldRequeueUnexpectedTwitchDownloadHost(draft) {
     !draft.twitchDownloadHostDiagnosticRetryAt;
 }
 
+function selectEventAwareShortIndexes({ currentIndexes, twitchClips, selectionEvidence, highlightCount,
+  maxShorts = 2 }) {
+  const count = Number.isSafeInteger(highlightCount) && highlightCount > 0 ? highlightCount : 0;
+  const limit = Number.isSafeInteger(maxShorts) && maxShorts > 0 ? maxShorts : 0;
+  if (!count || !limit) return [];
+  const score = (index) => Number(selectionEvidence?.[index]?.selectionScore) || 0;
+  const valid = [...new Set((Array.isArray(currentIndexes) ? currentIndexes : [])
+    .filter((index) => Number.isInteger(index) && index >= 0 && index < count))];
+  const all = Array.from({ length: count }, (_value, index) => index);
+  const chosen = [];
+  for (const eventType of ['fight', 'rare_loot']) {
+    const index = all.filter((candidateIndex) => {
+      const visual = twitchClips?.[candidateIndex]?.visualGameplayVerification;
+      return visual?.verified === true && Array.isArray(visual.eventTypes) &&
+        visual.eventTypes.includes(eventType);
+    }).sort((left, right) => score(right) - score(left) || left - right)
+      .find((candidateIndex) => !chosen.includes(candidateIndex));
+    if (Number.isInteger(index) && !chosen.includes(index) && chosen.length < limit) chosen.push(index);
+  }
+  if (!chosen.length) return valid.slice(0, limit);
+  for (const index of valid) {
+    if (!chosen.includes(index) && chosen.length < limit) chosen.push(index);
+  }
+  return chosen;
+}
+
 function shouldRequeueTwitchSegmentDurationFailure(draft) {
   return draft?.sourceType === 'twitch_highlight_batch' &&
     ['clip_failed', 'clip_retry_wait'].includes(draft.status) &&
@@ -380,6 +406,11 @@ function createHighlightProcessor(dependencies) {
             totalFrames: Number(visualGameplay.totalFrames),
             confidence: Number(visualGameplay.confidence),
             gameName: cleanText(visualGameplay.gameName || '', 100),
+            eventTypes: Array.isArray(visualGameplay.eventTypes)
+              ? visualGameplay.eventTypes.filter((eventType) => ['fight', 'rare_loot', 'clutch'].includes(eventType)).slice(0, 3)
+              : [],
+            eventEvidence: visualGameplay.eventEvidence && typeof visualGameplay.eventEvidence === 'object'
+              ? visualGameplay.eventEvidence : {},
             model: cleanText(visualGameplay.model || '', 80)
           }
         };
@@ -526,6 +557,17 @@ function createHighlightProcessor(dependencies) {
       }
 
       const existingShorts = (await store.listDrafts()).filter((draft) => draft.parentId === id);
+      if (!existingShorts.length) {
+        const eventAwareIndexes = selectEventAwareShortIndexes({
+          currentIndexes: batch.shortCandidateIndexes,
+          twitchClips,
+          selectionEvidence: batch.sourceClipEvidence,
+          highlightCount: batch.highlights.length
+        });
+        if (JSON.stringify(eventAwareIndexes) !== JSON.stringify(batch.shortCandidateIndexes || [])) {
+          batch = await store.updateDraft(id, { shortCandidateIndexes: eventAwareIndexes });
+        }
+      }
       const shortsByIndex = new Map(existingShorts.map((draft) => [draft.highlightIndex, draft]));
       const shortIndexes = new Set(Array.isArray(batch.shortCandidateIndexes)
         ? batch.shortCandidateIndexes.filter((index) => Number.isInteger(index) && index >= 0 && index < batch.highlights.length)
@@ -545,7 +587,16 @@ function createHighlightProcessor(dependencies) {
         const seenShortTitles = [highlightTitle, ...[...shortsByIndex.entries()]
           .filter(([shortIndex]) => Number(shortIndex) !== index)
           .map(([, short]) => short.title).filter(Boolean)];
-        const shortTitle = existingShort?.title || buildShortTitle(moment, batch.streamTitle, seenShortTitles);
+        const visual = twitchClips[index]?.visualGameplayVerification || {};
+        const detectedEventTypes = Array.isArray(visual.eventTypes)
+          ? visual.eventTypes.filter((eventType) => ['fight', 'rare_loot', 'clutch'].includes(eventType)) : [];
+        const eventLabel = detectedEventTypes.includes('rare_loot') ? 'Rare Loot'
+          : detectedEventTypes.includes('fight') ? 'Fight'
+            : detectedEventTypes.includes('clutch') ? 'Clutch' : '';
+        const eventTitle = eventLabel
+          ? cleanText(`${cleanText(visual.gameName || batch.streamTitle || 'Gameplay', 60)} | ${eventLabel} moment`, 100)
+          : buildShortTitle(moment, batch.streamTitle, seenShortTitles);
+        const shortTitle = existingShort?.title || eventTitle;
         const shortDescription = existingShort?.description ||
           buildShortDescription(batch.vodId, highlight.id, moment, batch.streamTitle);
         if (existingShort && existingShort.youtubeVideoId) {
@@ -598,6 +649,7 @@ function createHighlightProcessor(dependencies) {
             shortDraft = {
               id: idFactory(), sourceType: 'twitch_highlight_short', parentId: id,
               highlightIndex: index, vodId: batch.vodId, title: shortTitle,
+              eventTypes: detectedEventTypes, eventEvidence: visual.eventEvidence || {},
               description: shortDescription, tags: shortTags, youtubeVideoId: null,
               duration: length, youtubeUploadIntentId: intentId,
               youtubeUploadIntentCreatedAt: intentAt, youtubeUploadError: null,
@@ -902,6 +954,6 @@ module.exports = {
   findHighlightBatchByVodId, isTransientError, shouldPullForwardTwitchMetadataRetry,
   shouldRequeueUnexpectedTwitchDownloadHost, shouldPullForwardAllowedTwitchDownloadHost,
   shouldRequeueTwitchSegmentDurationFailure,
-  waitForVerifiedClipMetadata, requireCompletedYouTubeOutput
+  waitForVerifiedClipMetadata, requireCompletedYouTubeOutput, selectEventAwareShortIndexes
 };
 

@@ -53,6 +53,8 @@ test('Gemini receives a public YouTube URL and returns bounded reviewable eviden
 test('gameplay classification requires clear active gameplay in at least four of five sampled frames', () => {
   const good = validateGameplayAssessment({
     gameName: 'Example game',
+    eventTypes: ['fight', 'rare_loot', 'unsupported'],
+    eventEvidence: { fight: 'An enemy is visibly being attacked.', rare_loot: 'A gold-tier pickup label is shown.' },
     frames: Array.from({ length: 5 }, (_, index) => ({
       activeGameplay: index < 4, confidence: index < 4 ? 0.95 : 0.7,
       evidence: index < 4 ? 'Game world and active HUD are visible' : 'Facecam only'
@@ -60,6 +62,10 @@ test('gameplay classification requires clear active gameplay in at least four of
   }, 5, 'gemini-3.8-flash');
   assert.equal(good.verified, true);
   assert.equal(good.activeGameplayFrames, 4);
+  assert.deepEqual(good.eventTypes, ['fight', 'rare_loot']);
+  assert.deepEqual(good.eventEvidence, {
+    fight: 'An enemy is visibly being attacked.', rare_loot: 'A gold-tier pickup label is shown.'
+  });
 
   const weak = validateGameplayAssessment({
     frames: Array.from({ length: 5 }, (_, index) => ({
@@ -84,6 +90,8 @@ test('Gemini gameplay screening sends sampled frames as images and returns a str
         async json() {
           return { candidates: [{ content: { parts: [{ text: JSON.stringify({
             gameName: 'Example game',
+            eventTypes: ['fight'],
+            eventEvidence: { fight: 'Visible player-vs-enemy combat.' },
             frames: Array.from({ length: 5 }, () => ({
               activeGameplay: true, confidence: 0.94, evidence: 'Gameplay fills the frame'
             }))
@@ -98,6 +106,8 @@ test('Gemini gameplay screening sends sampled frames as images and returns a str
   assert.equal(result.verified, true);
   assert.equal(result.activeGameplayFrames, 5);
   assert.equal(result.gameName, 'Example game');
+  assert.deepEqual(result.eventTypes, ['fight']);
+  assert.deepEqual(result.eventEvidence, { fight: 'Visible player-vs-enemy combat.' });
 });
 
 test('analysis retries 503 on a fallback model and honors short 429 Retry-After', async () => {

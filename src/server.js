@@ -929,6 +929,31 @@ app.get('/api/twitch/highlight-discovery/status', admin, async (_req, res, next)
   }
 });
 
+app.post('/api/twitch/live-marker', admin, async (req, res, next) => {
+  try {
+    const eventType = cleanText(req.body?.eventType, 30);
+    if (!['fight', 'rare_loot'].includes(eventType)) {
+      return res.status(400).json({ error: 'eventType must be fight or rare_loot' });
+    }
+    const connection = await twitch.connectionStatus();
+    if (!connection.connected) {
+      return res.status(409).json({ error: connection.error || 'Connect Twitch in Amaana first' });
+    }
+    const result = await twitchHighlightDiscovery.markLiveMoment(eventType);
+    if (result.status === 'not_live') {
+      return res.status(409).json({ status: result.status,
+        error: 'No active Twitch stream was found. Manual markers work during a Twitch live stream.' });
+    }
+    if (result.status === 'test_stream_skipped') {
+      return res.status(409).json({ status: result.status, error: 'Test streams are not eligible for clip drafts.' });
+    }
+    return res.status(202).json({ ...result,
+      message: 'Moment marked. Amaana will wait for the Twitch VOD to contain the full segment, then create a private YouTube Short draft for your review. This manual route does not call vidIQ or visual AI.' });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get('/api/tiktok/status', admin, async (_req, res, next) => {
   try {
     res.json(await tiktok.connectionStatus());

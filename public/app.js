@@ -8,6 +8,9 @@ const playlistCreateButton = document.querySelector('#playlistCreateButton');
 const notice = document.querySelector('#notice');
 const vodScanForm = document.querySelector('#vodScanForm');
 const vodScanStatus = document.querySelector('#vodScanStatus');
+const markFightButton = document.querySelector('#markFightButton');
+const markRareLootButton = document.querySelector('#markRareLootButton');
+const liveMarkerStatus = document.querySelector('#liveMarkerStatus');
 const connectionDot = document.querySelector('#connectionDot');
 const connectionText = document.querySelector('#connectionText');
 const connectionHelp = document.querySelector('#connectionHelp');
@@ -126,11 +129,15 @@ async function refreshTwitchConnection() {
     twitchConnectionHelp.textContent = 'Add the Twitch Client ID and Client Secret in Render first.';
     twitchConnectButton.disabled = true;
     twitchConnectButton.textContent = 'Setup required';
+    markFightButton.disabled = true;
+    markRareLootButton.disabled = true;
   } else {
+    markFightButton.disabled = !status.connected;
+    markRareLootButton.disabled = !status.connected;
     twitchConnectionHelp.textContent = status.connected && highlightStatus && !highlightStatus.visualGameplayVerificationConfigured
-      ? 'Visual gameplay screening is off. Amaana holds edits until ENABLE_GAMEPLAY_SCREENING and VIDEO_ANALYSIS_API_KEY are configured.'
+      ? 'Automatic AI screening is off. The two manual moment buttons below still work during a Twitch live stream and do not use AI or vidIQ.'
       : status.connected
-        ? 'While you are live, Amaana captures a 60-second segment every 3 minutes and checks for real gameplay. Every five verified captures (about 15 minutes of stream), it uploads a private Short for review. After collecting 12 minutes of verified gameplay footage, it also uploads the 12-minute highlight. Approve each video before it goes public.'
+        ? 'While you are live, Amaana captures and screens Twitch gameplay, then prepares private drafts for your review. Manual fight and rare-loot markers are also available below. Approve a draft separately before it can become public.'
         : (status.error || 'Connect the Twitch account that owns the Saevond channel.');
     twitchConnectButton.disabled = false;
     twitchConnectButton.textContent = status.connected ? 'Reconnect Twitch' : 'Connect Twitch';
@@ -309,6 +316,10 @@ function renderDraft(draft, draftsById = new Map()) {
   if (draft.sourceType === 'twitch_vod') {
     const source = element('p', 'draft-meta', `Twitch VOD ${draft.vodId} · ${Math.round(draft.startSeconds || 0)}s–${Math.round(draft.endSeconds || 0)}s`);
     card.append(source);
+    if (draft.discoverySource === 'twitch_manual_marker') {
+      const label = draft.eventType === 'rare_loot' ? 'Rare loot' : 'Fight';
+      card.append(element('p', 'draft-meta', `Creator-marked ${label} · ${(Number(draft.duration) || 0)}s · no vidIQ or visual-AI scan`));
+    }
     if (draft.twitchUrl) {
       const twitchLink = element('a', 'ghost video-link');
       twitchLink.href = draft.twitchUrl;
@@ -316,6 +327,17 @@ function renderDraft(draft, draftsById = new Map()) {
       twitchLink.rel = 'noopener noreferrer';
       twitchLink.textContent = 'Open Twitch clip';
       card.append(twitchLink);
+    }
+  }
+  if (Array.isArray(draft.eventTypes) && draft.eventTypes.length) {
+    const labels = draft.eventTypes.map((eventType) => ({ fight: 'fight', rare_loot: 'rare loot', clutch: 'clutch' })[eventType])
+      .filter(Boolean);
+    if (labels.length) {
+      card.append(element('p', 'draft-meta', `Sampled-frame event candidates: ${labels.join(', ')} · AI suggestions for review, not verified full-clip outcomes`));
+      for (const eventType of draft.eventTypes) {
+        const evidence = draft.eventEvidence && draft.eventEvidence[eventType];
+        if (evidence) card.append(element('p', 'draft-meta', `${eventType.replaceAll('_', ' ')} evidence: ${evidence}`));
+      }
     }
   }
   if (isHighlight) {
@@ -1194,6 +1216,26 @@ vodScanForm.addEventListener('submit', async (event) => {
     submitButton.disabled = false;
   }
 });
+
+async function markLiveMoment(eventType, button, label) {
+  button.disabled = true;
+  liveMarkerStatus.textContent = `Saving ${label.toLowerCase()} marker…`;
+  try {
+    const result = await api('/api/twitch/live-marker', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ eventType })
+    });
+    liveMarkerStatus.textContent = result.message ||
+      `Marked ${label.toLowerCase()}. Amaana is waiting for the Twitch VOD segment before making a private Short draft.`;
+  } catch (error) {
+    liveMarkerStatus.textContent = error.message || 'Could not save the marker.';
+  } finally {
+    button.disabled = false;
+  }
+}
+
+markFightButton.addEventListener('click', () => markLiveMoment('fight', markFightButton, 'Fight'));
+markRareLootButton.addEventListener('click', () => markLiveMoment('rare_loot', markRareLootButton, 'Rare loot'));
 
 connectButton.addEventListener('click', () => window.location.assign('/auth/google'));
 twitchConnectButton.addEventListener('click', () => window.location.assign('/auth/twitch'));

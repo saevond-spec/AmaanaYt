@@ -238,6 +238,85 @@ test('holds Twitch VOD work when opt-in visual gameplay screening is disabled', 
   assert.equal(h.drafts.length, 0);
 });
 
+test('manual fight and rare-loot markers queue private review drafts without visual AI', async () => {
+  let h;
+  const clock = Date.parse('2026-10-18T15:00:00.000Z');
+  const streamStartedAt = clock - 60 * MINUTE;
+  h = harness({ startAt: clock,
+    liveBroadcast: () => makeLiveBroadcast(h.getNow(), streamStartedAt),
+    visualGameplayVerificationAvailable: false });
+
+  const marked = await h.discovery.markLiveMoment('rare_loot');
+  assert.equal(marked.status, 'marked');
+  assert.equal(marked.marker.eventType, 'rare_loot');
+  assert.equal(marked.marker.startSeconds, 60 * 60 - 15);
+  assert.equal(marked.marker.endSeconds, 60 * 60 + 25);
+  assert.equal(marked.marker.duration, 40);
+  assert.equal(marked.marker.vodReady, true);
+  assert.equal(h.drafts.length, 0);
+
+  h.setNow(clock + 30 * 1000);
+  const result = await h.discovery.runLive();
+  assert.equal(result.manualMarkersQueued, 1);
+  assert.equal(result.status, 'manual_markers_queued');
+  assert.equal(h.drafts.length, 1);
+  assert.equal(h.drafts[0].id, marked.marker.draftId);
+  assert.equal(h.drafts[0].sourceType, 'twitch_vod');
+  assert.equal(h.drafts[0].discoverySource, 'twitch_manual_marker');
+  assert.equal(h.drafts[0].eventType, 'rare_loot');
+  assert.equal(h.drafts[0].startSeconds, marked.marker.startSeconds);
+  assert.equal(h.drafts[0].endSeconds, marked.marker.endSeconds);
+  assert.equal(h.drafts[0].duration, 40);
+  assert.equal(h.drafts[0].autoPublishEligible, false);
+  assert.match(h.drafts[0].reason, /No vidIQ or visual-AI scan was used/);
+  assert.deepEqual(h.enqueuedClips, [marked.marker.draftId]);
+  assert.equal(h.calls.liveCommunityClipLookups, 0);
+  assert.equal(h.calls.liveClipCreates.length, 0);
+
+  const repeated = await h.discovery.runLive();
+  assert.equal(repeated.manualMarkersQueued || 0, 0);
+  assert.equal(h.drafts.length, 1);
+  assert.deepEqual(h.enqueuedClips, [marked.marker.draftId]);
+});
+
+test('rejects unsupported manual event labels and refuses markers when no Twitch stream is live', async () => {
+  const notLive = harness({ liveBroadcast: null });
+  assert.equal((await notLive.discovery.markLiveMoment('fight')).status, 'not_live');
+  await assert.rejects(() => notLive.discovery.markLiveMoment('headshot'), /Choose fight or rare_loot/);
+});
+
+test('recovers a Twitch marker when the archived VOD appears only after the stream ends', async () => {
+  let clock = Date.parse('2026-10-18T15:00:00.000Z');
+  const streamStartedAt = clock - 60 * MINUTE;
+  let isLive = true;
+  const broadcast = makeLiveBroadcast(clock, streamStartedAt);
+  broadcast.vod = null;
+  const archivedVod = makeVod('9001', { user_id: '1001', stream_id: '7777' });
+  const h = harness({
+    vods: [archivedVod],
+    liveBroadcast: () => isLive ? broadcast : null,
+    startAt: clock,
+    now: () => clock,
+    visualGameplayVerificationAvailable: false
+  });
+
+  const marked = await h.discovery.markLiveMoment('fight');
+  assert.equal(marked.status, 'marked');
+  assert.equal(marked.marker.vodReady, false);
+  clock += 30 * 1000;
+  h.setNow(clock);
+  await h.discovery.runLive();
+  assert.equal(h.drafts.length, 0);
+
+  isLive = false;
+  const result = await h.discovery.runLive();
+  assert.equal(result.manualMarkersQueued, 1);
+  assert.equal(h.drafts.length, 1);
+  assert.equal(h.drafts[0].vodId, archivedVod.id);
+  assert.equal(h.drafts[0].eventType, 'fight');
+  assert.deepEqual(h.enqueuedClips, [marked.marker.draftId]);
+});
+
 test('creates one private-pipeline batch from Amaana-discovered Twitch clip evidence', async () => {
   const vod = makeVod();
   const clips = Array.from({ length: 20 }, (_, index) =>
@@ -314,7 +393,8 @@ test('captures and screens live segments, then queues the 12-minute review batch
     async inspectMedia() { return { durationSeconds: 60, width: 1280, height: 720 }; },
     async verifyGameplay() {
       return { verified: true, totalFrames: 5, activeGameplayFrames: 5,
-        confidence: 0.95, gameName: 'Test Game', model: 'fixture' };
+        confidence: 0.95, gameName: 'Test Game', model: 'fixture',
+        eventTypes: ['fight', 'rare_loot'], eventEvidence: { fight: 'combat', rare_loot: 'rare item label' } };
     }
   };
   const h = harness({
@@ -326,6 +406,8 @@ test('captures and screens live segments, then queues the 12-minute review batch
   assert.equal(first.captureAccepted, true);
   assert.equal(first.batchesQueued, 0);
   assert.equal(h.state.liveSessions['7777'].candidates.length, 1);
+  assert.deepEqual(h.state.liveSessions['7777'].candidates[0].clip.visualGameplayVerification.eventTypes,
+    ['fight', 'rare_loot']);
 
   let finalResult = first;
   for (let index = 1; index < 12; index += 1) {
