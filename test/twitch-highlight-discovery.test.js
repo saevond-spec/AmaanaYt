@@ -128,7 +128,8 @@ function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], init
       persistedState = structuredClone(state);
     }
   };
-  const logger = { info() {}, warn() {}, error() {} };
+  const loggedInfo = [];
+  const logger = { info(message) { loggedInfo.push(String(message)); }, warn() {}, error() {} };
   const discovery = createTwitchHighlightDiscovery({
     twitch, store, video, enqueueBatch: (id) => enqueued.push(id),
     enqueueClip: (id) => enqueuedClips.push(id), logger,
@@ -138,7 +139,7 @@ function harness({ vods = [makeVod()], clipsByVod = {}, initialDrafts = [], init
     visualGameplayVerificationAvailable: visualScreeningAvailable
   });
   return {
-    discovery, twitch, store, drafts, enqueued, enqueuedClips, calls,
+    discovery, twitch, store, drafts, enqueued, enqueuedClips, calls, loggedInfo,
     get state() { return persistedState; },
     setNow(value) { clock = value; startAt = value; },
     getNow() { return clock; }
@@ -317,12 +318,12 @@ test('automatically marks verified fight and rare-loot frames and queues private
     async verifyGameplay() {
       return {
         verified: true, totalFrames: 5, activeGameplayFrames: 5, confidence: 0.95,
-        gameName: 'Test Game', model: 'fixture',
+        gameName: 'Apex Legends', model: 'fixture', provider: 'gemini',
         eventTypes: ['fight', 'rare_loot'],
-        eventEvidence: { fight: 'Visible combat.', rare_loot: 'Rare-tier pickup label.' },
+        eventEvidence: { fight: 'Apex KILL LEADER banner is visible in the gameplay HUD.', rare_loot: 'Rare-tier pickup label.' },
         eventMarkers: [
           { eventType: 'fight', frameIndex: 2, offsetSeconds: 30, confidence: 0.91,
-            evidence: 'Player is firing at a visible enemy.' },
+            evidence: 'Apex KILL LEADER banner is visible in the gameplay HUD.' },
           { eventType: 'rare_loot', frameIndex: 4, offsetSeconds: 48, confidence: 0.94,
             evidence: 'Rare-tier label appears on the pickup.' }
         ]
@@ -344,6 +345,7 @@ test('automatically marks verified fight and rare-loot frames and queues private
   assert.ok(markers.every((draft) => draft.status === 'clip_queued' && draft.publicationStatus === 'pending'));
   assert.ok(markers.every((draft) => draft.liveCapture === true && draft.visualGameplayVerification.verified === true));
   assert.ok(markers.every((draft) => draft.autoPublishEligible === false));
+  assert.match(markers.find((draft) => draft.eventType === 'fight').title, /Kill Leader/);
   assert.ok(markers.every((draft) => draft.eventMarker && draft.eventMarker.sourceClipId));
   assert.deepEqual(h.enqueuedClips, markers.map((draft) => draft.id));
   assert.equal(h.calls.liveClipCreates.length, 1);
@@ -351,6 +353,14 @@ test('automatically marks verified fight and rare-loot frames and queues private
   const repeated = await h.discovery.runLive();
   assert.equal(repeated.automaticMarkersQueued || 0, 0);
   assert.equal(h.drafts.filter((draft) => draft.discoverySource === 'twitch_auto_marker').length, 2);
+  const scanLogs = h.loggedInfo.filter((message) => message.includes('"event":"twitch_live_scan"'))
+    .map((message) => JSON.parse(message));
+  assert.equal(scanLogs.length, 2);
+  assert.equal(scanLogs[0].automaticMarkersQueued, 2);
+  assert.equal(scanLogs[0].live, true);
+  assert.equal(scanLogs[0].visionProvider, 'gemini');
+  assert.equal('streamId' in scanLogs[0], false);
+  assert.equal('title' in scanLogs[0], false);
 });
 
 test('recovers a Twitch marker when the archived VOD appears only after the stream ends', async () => {

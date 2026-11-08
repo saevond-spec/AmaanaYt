@@ -9,10 +9,12 @@ const { selectGameplayHighlights, TARGET_HIGHLIGHT_DURATION_SECONDS,
 const { parseTwitchDuration } = require('./highlight-validation');
 const { buildCommunityClipDrafts } = require('./twitch-community-clips');
 const { isPlaceholderTestTitle, isNonGameplayTestClip } = require('./gameplay-intake-guard');
+const { gameplayEventLabel } = require('./gameplay-vision');
 
 const DEFAULT_SCAN_INTERVAL_MS = 15 * 60 * 1000;
 const DEFAULT_LIVE_SCAN_INTERVAL_MS = 60 * 1000;
 const DEFAULT_LIVE_CAPTURE_INTERVAL_MS = 3 * 60 * 1000;
+const DEFAULT_LIVE_SCAN_LOG_INTERVAL_MS = 5 * 60 * 1000;
 const DEFAULT_LIVE_CAPTURE_DURATION_SECONDS = 60;
 const DEFAULT_LIVE_CAPTURE_BUFFER_SECONDS = 90;
 const LIVE_SHORT_CANDIDATE_GROUP_SIZE = 5;
@@ -92,6 +94,8 @@ function createTwitchHighlightDiscovery({
   let lastLiveRunAt = null;
   let lastLiveRunResult = null;
   let lastLiveRunError = null;
+  let lastLiveLogAt = 0;
+  let lastLiveLogSignature = '';
   let stateSavePromise = Promise.resolve();
   const inFlightVodIds = new Set();
 
@@ -215,7 +219,7 @@ function createTwitchHighlightDiscovery({
       marker.vodId = vodId;
       const existing = drafts.find((draft) => String(draft && draft.id || '') === String(marker.draftId));
       if (!existing) {
-        const eventLabel = marker.eventType === 'rare_loot' ? 'Rare loot' : 'Fight';
+        const eventLabel = gameplayEventLabel(marker.eventType, marker.eventEvidence);
         const gameName = clean(stream && stream.game_name || session.gameName || '', 50);
         const streamTitle = clean(stream && stream.title || session.streamTitle || 'Twitch gameplay', 70);
         const title = clean(`${gameName ? gameName + ' | ' : ''}${eventLabel} moment`, 100);
@@ -906,6 +910,8 @@ function createTwitchHighlightDiscovery({
           throw new Error('Live Twitch clip failed landscape gameplay media checks');
         }
         const gameplay = await video.verifyGameplay(source);
+        result.visionProvider = clean(gameplay && gameplay.provider || '', 40);
+        result.visionModel = clean(gameplay && gameplay.model || '', 80);
         const totalFrames = Number(gameplay && gameplay.totalFrames);
         const activeFrames = Number(gameplay && gameplay.activeGameplayFrames);
         const confidence = Number(gameplay && gameplay.confidence);
@@ -1029,6 +1035,7 @@ function createTwitchHighlightDiscovery({
       }
       lastLiveRunAt = new Date(now()).toISOString();
       lastLiveRunResult = result;
+      logLiveScan(result);
       return result;
     } catch (error) {
       lastLiveRunAt = new Date(now()).toISOString();
@@ -1037,10 +1044,39 @@ function createTwitchHighlightDiscovery({
       if (logger && typeof logger.error === 'function') {
         logger.error('Amaana live Twitch highlight scan failed: ' + error.message);
       }
+      logLiveScan(result);
       return result;
     } finally {
       liveRunning = false;
     }
+  }
+
+  function logLiveScan(result) {
+    if (!logger || typeof logger.info !== 'function') return;
+    const summary = {
+      event: 'twitch_live_scan',
+      status: clean(result?.status || 'unknown', 60),
+      connected: result?.notConnected !== true,
+      live: result?.live === true,
+      captureAttempted: result?.captureAttempted === true,
+      captureAccepted: result?.captureAccepted === true,
+      candidatesVerified: Number(result?.candidatesVerified) || 0,
+      gameplayRejected: Number(result?.gameplayRejected) || 0,
+      automaticMarkersDetected: Number(result?.automaticMarkersDetected) || 0,
+      automaticMarkersQueued: Number(result?.automaticMarkersQueued) || 0,
+      manualMarkersQueued: Number(result?.manualMarkersQueued) || 0,
+      batchesQueued: Number(result?.batchesQueued) || 0,
+      liveShortsQueued: Number(result?.liveShortsQueued) || 0,
+      visionProvider: clean(result?.visionProvider || '', 40) || null,
+      visionModel: clean(result?.visionModel || '', 80) || null,
+      failed: Boolean(lastLiveRunError || result?.captureError || result?.communityClipScanError)
+    };
+    const signature = JSON.stringify(summary);
+    const timestamp = now();
+    if (signature === lastLiveLogSignature && timestamp - lastLiveLogAt < DEFAULT_LIVE_SCAN_LOG_INTERVAL_MS) return;
+    lastLiveLogSignature = signature;
+    lastLiveLogAt = timestamp;
+    logger.info(JSON.stringify({ ...summary, scannedAt: new Date(timestamp).toISOString() }));
   }
 
   async function run() {
@@ -1168,6 +1204,7 @@ module.exports = {
   scanIntervalForVod,
   DEFAULT_SCAN_INTERVAL_MS,
   DEFAULT_LIVE_SCAN_INTERVAL_MS,
+  DEFAULT_LIVE_SCAN_LOG_INTERVAL_MS,
   DEFAULT_LIVE_CAPTURE_INTERVAL_MS,
   DEFAULT_LIVE_CAPTURE_DURATION_SECONDS,
   DEFAULT_LIVE_CAPTURE_BUFFER_SECONDS,

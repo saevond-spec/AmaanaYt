@@ -26,7 +26,8 @@ const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
   shouldRequeueStaleYoutubeUploadIntent,
   shouldPullForwardTwitchMetadataRetry, shouldRequeueUnexpectedTwitchDownloadHost,
   shouldPullForwardAllowedTwitchDownloadHost, shouldRequeueTwitchSegmentDurationFailure } = require('./highlight-pipeline');
-const { createTwitchHighlightDiscovery } = require('./twitch-highlight-discovery');
+const { createTwitchHighlightDiscovery, DEFAULT_LIVE_SCAN_INTERVAL_MS,
+  DEFAULT_LIVE_CAPTURE_INTERVAL_MS } = require('./twitch-highlight-discovery');
 const { resumableTwitchClipDrafts, resumableHighlightBatchDrafts } = require('./highlight-job-recovery');
 const { clipRetryDelayMs, isRetryableCommunityClipError, isVerifiedGameplayResult, reuseOrVerifyGameplay } = require('./twitch-community-clips');
 const { publishApprovedDraft } = require('./draft-publication');
@@ -37,6 +38,9 @@ const { normalizeHttpError } = require('./http-error-response');
 const { canAddVideoToPlaylist } = require('./youtube-playlists');
 const { parseGoogleSearchConsoleCsv } = require('./google-search-console');
 const { createPlaylistAutoAssigner } = require('./playlist-auto');
+const { analyzeGameplayFrames } = require('./video-analysis');
+const { gameplayEventLabel } = require('./gameplay-vision');
+const { planScreenCaptureShort, MAX_CAPTURE_SEGMENTS } = require('./live-screen-capture');
 
 for (const name of ['BASE_URL', 'DATABASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SESSION_SECRET', 'TOKEN_ENCRYPTION_KEY', 'AGENT_KEY', 'ADMIN_KEY']) {
   if (!process.env[name]) throw new Error(`Missing required environment variable: ${name}`);
@@ -57,6 +61,14 @@ const googleSearchCsvUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024, files: 1 }
 });
+const liveCaptureUpload = multer({
+  dest: uploadDir,
+  limits: { fileSize: 40 * 1024 * 1024, files: MAX_CAPTURE_SEGMENTS },
+  fileFilter: (_req, file, cb) => cb(null, file.mimetype.startsWith('video/'))
+});
+const usedLiveCaptureProofs = new Map();
+const lastLiveScreenAnalysisBySession = new Map();
+const LIVE_SCREEN_MIN_ANALYSIS_INTERVAL_MS = 20 * 1000;
 
 function uploadGoogleSearchCsv(req, res, next) {
   googleSearchCsvUpload.single('file')(req, res, (error) => {
@@ -81,7 +93,7 @@ app.use((req, res, next) => {
   res.set('X-Request-Id', req.requestId);
   next();
 });
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: false }));
 let sessionMiddleware;
 app.use((req, res, next) => sessionMiddleware(req, res, next));
@@ -288,6 +300,54 @@ function agentOrAdmin(req, res, next) {
 
 function cleanText(value, maxLength) {
   return String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maxLength);
+}
+
+function signLiveCaptureProof(marker, assessment, now = Date.now()) {
+  const payload = {
+    nonce: crypto.randomUUID(),
+    issuedAt: now,
+    eventType: cleanText(marker.eventType, 30),
+    offsetSeconds: Number(marker.offsetSeconds),
+    confidence: Number(marker.confidence),
+    evidence: cleanText(marker.evidence, 180),
+    gameName: cleanText(assessment.gameName, 100),
+    provider: cleanText(assessment.provider, 40),
+    model: cleanText(assessment.model, 80)
+  };
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const signature = crypto.createHmac('sha256', process.env.SESSION_SECRET).update(body).digest('base64url');
+  return `${body}.${signature}`;
+}
+
+function verifyLiveCaptureProof(token, now = Date.now()) {
+  const [body, signature, extra] = String(token || '').split('.');
+  if (!body || !signature || extra || body.length > 3000 || signature.length > 100) {
+    throw Object.assign(new Error('A recent server-verified gameplay marker is required'), { status: 400 });
+  }
+  const expected = crypto.createHmac('sha256', process.env.SESSION_SECRET).update(body).digest();
+  let supplied;
+  try { supplied = Buffer.from(signature, 'base64url'); }
+  catch { supplied = Buffer.alloc(0); }
+  if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) {
+    throw Object.assign(new Error('Gameplay marker verification expired; analyze the live window again'), { status: 403 });
+  }
+  let payload;
+  try { payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')); }
+  catch { throw Object.assign(new Error('Gameplay marker verification is malformed'), { status: 400 }); }
+  if (!payload || !/^[0-9a-f-]{36}$/i.test(payload.nonce || '') ||
+      !Number.isFinite(payload.issuedAt) || now - payload.issuedAt > 10 * 60 * 1000 ||
+      payload.issuedAt > now + 30 * 1000 || !['fight', 'rare_loot', 'clutch'].includes(payload.eventType) ||
+      !Number.isFinite(payload.offsetSeconds) || payload.offsetSeconds < 0 ||
+      !Number.isFinite(payload.confidence) || payload.confidence < 0.8 || payload.confidence > 1 ||
+      !payload.evidence || !payload.provider || !payload.model) {
+    throw Object.assign(new Error('Gameplay marker verification is invalid or expired'), { status: 403 });
+  }
+  const previous = usedLiveCaptureProofs.get(payload.nonce);
+  if (previous) throw Object.assign(new Error('This gameplay marker has already been used'), { status: 409 });
+  for (const [nonce, usedAt] of usedLiveCaptureProofs) {
+    if (now - usedAt > 10 * 60 * 1000) usedLiveCaptureProofs.delete(nonce);
+  }
+  return payload;
 }
 
 function unlinkQuietly(filePath) {
@@ -657,6 +717,186 @@ app.get('/api/youtube/status', admin, async (_req, res, next) => {
   }
 });
 
+app.get('/api/live-gameplay/status', admin, (_req, res) => {
+  const vision = video.gameplayVisionStatus();
+  console.info(JSON.stringify({ event: 'live_gameplay_readiness_checked', enabled: vision.enabled,
+    providers: vision.configuredProviders, unavailableReason: vision.unavailableReason || null,
+    checkedAt: new Date().toISOString() }));
+  res.set('Cache-Control', 'no-store');
+  res.json({ enabled: vision.enabled, explicitlyDisabled: vision.explicitlyDisabled,
+    configuredProviders: vision.configuredProviders, unavailableReason: vision.unavailableReason || null });
+});
+
+app.get('/api/live-gameplay/keepalive', admin, (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  console.info(JSON.stringify({ event: 'live_screen_capture_keepalive', at: new Date().toISOString() }));
+  res.json({ ok: true });
+});
+
+app.post('/api/live-gameplay/analyze', admin, async (req, res, next) => {
+  try {
+    const vision = video.gameplayVisionStatus();
+    if (!vision.enabled) return res.status(503).json({
+      error: vision.explicitlyDisabled
+        ? 'Gameplay screening is disabled in Render.'
+        : 'Configure a gameplay vision provider in Render before starting live analysis.'
+    });
+    const sessionKey = String(req.sessionID || 'admin-session');
+    const timestamp = Date.now();
+    const previous = lastLiveScreenAnalysisBySession.get(sessionKey) || 0;
+    if (timestamp - previous < LIVE_SCREEN_MIN_ANALYSIS_INTERVAL_MS) {
+      res.set('Retry-After', String(Math.ceil((LIVE_SCREEN_MIN_ANALYSIS_INTERVAL_MS - (timestamp - previous)) / 1000)));
+      return res.status(429).json({ error: 'Live gameplay analysis is already running; wait for the next sample.' });
+    }
+    const frames = req.body?.frames;
+    if (!Array.isArray(frames) || frames.length < 3 || frames.length > 8 ||
+        frames.some((frame) => !frame || frame.mimeType !== 'image/jpeg' ||
+          typeof frame.data !== 'string' || frame.data.length > 500000 ||
+          !Number.isFinite(Number(frame.timestampSeconds)) || Number(frame.timestampSeconds) < 0)) {
+      return res.status(400).json({ error: 'Send three to eight timestamped JPEG samples from the shared game window.' });
+    }
+    lastLiveScreenAnalysisBySession.set(sessionKey, timestamp);
+    const assessment = await analyzeGameplayFrames(frames);
+    const markers = assessment.verified === true ? (assessment.eventMarkers || []).map((marker) => ({
+      ...marker,
+      captureProof: signLiveCaptureProof(marker, assessment)
+    })) : [];
+    console.info(JSON.stringify({
+      event: 'live_gameplay_screen_analysis',
+      verified: assessment.verified === true,
+      provider: cleanText(assessment.provider, 40),
+      model: cleanText(assessment.model, 80),
+      sampledFrames: assessment.totalFrames,
+      activeGameplayFrames: assessment.activeGameplayFrames,
+      eventMarkers: markers.length,
+      scannedAt: new Date().toISOString()
+    }));
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      verified: assessment.verified === true,
+      confidence: assessment.confidence,
+      totalFrames: assessment.totalFrames,
+      activeGameplayFrames: assessment.activeGameplayFrames,
+      gameName: assessment.gameName,
+      provider: assessment.provider,
+      model: assessment.model,
+      eventEvidence: assessment.eventEvidence,
+      eventMarkers: markers
+    });
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'live_gameplay_screen_analysis_failed',
+      code: cleanText(error.code || '', 80) || null,
+      provider: cleanText(error.provider || '', 40) || null,
+      status: Number(error.status) || null,
+      message: cleanText(error.message, 180), scannedAt: new Date().toISOString() }));
+    next(error);
+  }
+});
+
+app.post('/api/live-gameplay/capture-draft', admin, (req, res, next) => {
+  liveCaptureUpload.array('segments', MAX_CAPTURE_SEGMENTS)(req, res, async (uploadError) => {
+    if (uploadError) {
+      const status = uploadError.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+      return res.status(status).json({ error: status === 413
+        ? 'A live gameplay segment exceeded the 40 MB limit.'
+        : 'Upload one to four screen-capture video segments.' });
+    }
+    const uploadedFiles = Array.isArray(req.files) ? req.files : [];
+    let combinedPath;
+    let shortPath;
+    let intentId;
+    try {
+      if (!uploadedFiles.length) return res.status(400).json({ error: 'Captured gameplay segments are required.' });
+      let segmentWindows;
+      try { segmentWindows = JSON.parse(String(req.body?.segmentWindows || '')); }
+      catch { return res.status(400).json({ error: 'Live capture segment timing is invalid.' }); }
+      if (!Array.isArray(segmentWindows) || segmentWindows.length !== uploadedFiles.length) {
+        return res.status(400).json({ error: 'Live capture timing does not match the uploaded segments.' });
+      }
+      const proof = verifyLiveCaptureProof(req.body?.captureProof);
+      usedLiveCaptureProofs.set(proof.nonce, Date.now());
+      const media = await Promise.all(uploadedFiles.map((file) => video.inspectMedia(file.path)));
+      const plan = planScreenCaptureShort(segmentWindows, media.map((item) => Number(item.durationSeconds)),
+        proof.offsetSeconds);
+      const selectedFiles = uploadedFiles.slice(plan.firstIndex, plan.lastIndex + 1);
+      const temporaryId = crypto.randomUUID();
+      combinedPath = path.join(uploadDir, `${temporaryId}-capture.mp4`);
+      shortPath = path.join(uploadDir, `${temporaryId}-short.mp4`);
+      await video.combineLiveScreenSegments(selectedFiles.map((file) => file.path), combinedPath);
+      await video.shortFromHighlight(combinedPath, plan.clipStartSeconds, plan.durationSeconds, shortPath);
+      await video.validateShort(shortPath, plan.durationSeconds);
+
+      const label = gameplayEventLabel(proof.eventType, proof.evidence);
+      const title = cleanText(`${proof.gameName ? proof.gameName + ' | ' : ''}${label} moment`, 100);
+      const description = [
+        `A ${label.toLowerCase()} moment detected from the gameplay window shared by the channel owner.`,
+        `Visible evidence: ${proof.evidence}`,
+        'This clip was uploaded privately for owner review.',
+        '', '#Saevond #Gaming #Shorts'
+      ].join('\n');
+      intentId = crypto.randomUUID();
+      await store.addDraft({
+        id: intentId,
+        sourceType: 'live_screen_capture_short',
+        status: 'uploading_private_to_youtube',
+        title,
+        eventType: proof.eventType,
+        eventEvidence: proof.evidence,
+        eventOffsetSeconds: proof.offsetSeconds,
+        duration: plan.durationSeconds,
+        gameName: proof.gameName,
+        sourcePlatform: 'browser_screen_capture',
+        visualGameplayVerification: {
+          verified: true,
+          confidence: proof.confidence,
+          provider: proof.provider,
+          model: proof.model,
+          eventType: proof.eventType,
+          evidence: proof.evidence,
+          analyzedAt: new Date(proof.issuedAt).toISOString()
+        },
+        uploadIntentAt: new Date().toISOString(),
+        createdAt: new Date().toISOString()
+      });
+      try {
+        const uploaded = await youtube.uploadPrivate({
+          filePath: shortPath,
+          title,
+          description,
+          tags: ['@saevond', proof.gameName, label, 'gaming', 'Shorts'].filter(Boolean).slice(0, 10),
+          madeForKids: false
+        });
+        const draft = await store.updateDraft(intentId, {
+          youtubeVideoId: uploaded.id,
+          youtubePrivacyStatus: 'private',
+          status: 'awaiting_owner_approval',
+          processedAt: new Date().toISOString(),
+          error: null
+        });
+        console.info(JSON.stringify({ event: 'live_screen_capture_private_draft_ready',
+          draftId: intentId, eventType: proof.eventType, provider: proof.provider,
+          model: proof.model, scannedAt: new Date().toISOString() }));
+        res.status(201).json({ id: draft.id, title: draft.title, status: draft.status });
+      } catch (error) {
+        const authFailure = /invalid_grant|invalid credentials|reconnect youtube|unauthenticated/i.test(String(error.message || ''));
+        const state = authFailure ? 'upload_failed' : 'upload_outcome_unknown';
+        await store.updateDraft(intentId, { status: state, error: cleanText(error.message, 300) });
+        console.error(JSON.stringify({ event: 'live_screen_capture_private_upload_failed',
+          draftId: intentId, state, error: cleanText(error.message, 180), scannedAt: new Date().toISOString() }));
+        res.status(authFailure ? 409 : 503).json({ error: authFailure
+          ? 'Reconnect YouTube in the owner dashboard. No private draft was confirmed.'
+          : 'YouTube upload could not be confirmed. Check YouTube Studio before retrying this moment.' });
+      }
+    } catch (error) {
+      next(error);
+    } finally {
+      uploadedFiles.forEach((file) => unlinkQuietly(file.path));
+      unlinkQuietly(combinedPath);
+      unlinkQuietly(shortPath);
+    }
+  });
+});
+
 app.get('/api/seo/status', admin, async (_req, res, next) => {
   try { res.set('Cache-Control', 'no-store'); res.json(await seo.status()); }
   catch (error) { next(error); }
@@ -931,6 +1171,12 @@ app.get('/api/twitch/highlight-discovery/status', admin, async (_req, res, next)
   } catch (error) {
     next(error);
   }
+});
+
+app.get('/api/twitch/live-scanner/keepalive', admin, (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  console.info(JSON.stringify({ event: 'twitch_live_scanner_keepalive', at: new Date().toISOString() }));
+  res.json({ ok: true });
 });
 
 app.post('/api/twitch/live-marker', admin, async (req, res, next) => {
@@ -1404,6 +1650,15 @@ store.init()
       monetization.schedule();
       market.schedule();
       void scheduleDueHighlightRetries();
+      const gameplayVision = video.gameplayVisionStatus();
+      console.info(JSON.stringify({
+        event: 'gameplay_vision_config',
+        enabled: gameplayVision.enabled,
+        providers: gameplayVision.configuredProviders,
+        unavailableReason: gameplayVision.unavailableReason || null,
+        liveScanIntervalMs: DEFAULT_LIVE_SCAN_INTERVAL_MS,
+        liveCaptureIntervalMs: DEFAULT_LIVE_CAPTURE_INTERVAL_MS
+      }));
       twitchHighlightDiscovery.start();
       try {
         const drafts = await store.listDrafts();
