@@ -186,10 +186,22 @@ function getTextContent(value) {
     typeof item?.text === 'string' ? item.text : '').join('');
 }
 
-function requestError(provider, response) {
+function providerErrorDetail(body) {
+  const value = typeof body?.error === 'string' ? body.error :
+    body?.error?.message || body?.message || body?.detail;
+  if (typeof value !== 'string') return '';
+  return value.replace(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi, '[image data]')
+    .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/\b(?:sk|xai|AIza)[-_a-z0-9]{12,}\b/gi, '[redacted key]')
+    .replace(/https?:\/\/\S+/g, '[endpoint]')
+    .replace(/\s+/g, ' ').trim().slice(0, 240);
+}
+
+function requestError(provider, response, detail = '') {
   const error = new Error(`${provider.name} gameplay screening returned HTTP ${response.status}`);
   error.provider = provider.name;
   error.status = Number(response.status) || 502;
+  error.detail = detail;
   if (error.status === 429) Object.assign(error, retryAfterDetails(response));
   return error;
 }
@@ -319,10 +331,12 @@ async function analyzeGameplayFrames(frames, {
         signal: AbortSignal.timeout(requestTimeout)
       });
       if (!response.ok) {
-        const error = requestError(provider, response);
+        let errorBody = null;
+        try { errorBody = await response.json(); } catch {}
+        const error = requestError(provider, response, providerErrorDetail(errorBody));
         if (typeof circuitBreaker.record === 'function') circuitBreaker.record(circuitKey,
           error.status >= 500 ? 503 : error.status);
-        failures.push(`${provider.name}: HTTP ${error.status}`);
+        failures.push(`${provider.name}: HTTP ${error.status}${error.detail ? ` (${error.detail})` : ''}`);
         continue;
       }
       const body = await response.json();
