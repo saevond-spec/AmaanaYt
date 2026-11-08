@@ -354,8 +354,7 @@ async function processTwitchClipDraft(id) {
     if (draft.discoverySource === 'twitch_community_clip') {
       const reusableGameplay = isVerifiedGameplayResult(draft.visualGameplayVerification);
       if (typeof video.inspectMedia !== 'function' || (!reusableGameplay &&
-          (process.env.ENABLE_GAMEPLAY_SCREENING !== 'true' || !process.env.VIDEO_ANALYSIS_API_KEY ||
-           typeof video.verifyGameplay !== 'function'))) {
+          (!video.gameplayVisionStatus().enabled || typeof video.verifyGameplay !== 'function'))) {
         throw new Error('Community Twitch clip is held because visual gameplay verification is unavailable');
       }
       const media = await video.inspectMedia(sourcePath);
@@ -498,8 +497,7 @@ function enqueueHighlightBatch(id) {
 }
 const twitchHighlightDiscovery = createTwitchHighlightDiscovery({
   twitch, store, video, enqueueBatch: enqueueHighlightBatch, enqueueClip: enqueueClipProcessing,
-  visualGameplayVerificationAvailable: () => process.env.ENABLE_GAMEPLAY_SCREENING === 'true' &&
-    Boolean(process.env.VIDEO_ANALYSIS_API_KEY)
+  visualGameplayVerificationAvailable: () => video.gameplayVisionStatus().enabled
 });
 let highlightRetryScanRunning = false;
 async function scheduleDueHighlightRetries() {
@@ -919,12 +917,15 @@ app.get('/api/twitch/status', admin, async (_req, res, next) => {
 
 app.get('/api/twitch/highlight-discovery/status', admin, async (_req, res, next) => {
   try {
-    const gameplayScreeningEnabled = process.env.ENABLE_GAMEPLAY_SCREENING === 'true';
-    const gameplayVisionKeyConfigured = Boolean(process.env.VIDEO_ANALYSIS_API_KEY);
+    const gameplayVision = video.gameplayVisionStatus();
     res.set('Cache-Control', 'no-store');
-    res.json({ ...twitchHighlightDiscovery.status(), gameplayScreeningEnabled,
-      gameplayVisionKeyConfigured,
-      visualGameplayVerificationConfigured: gameplayScreeningEnabled && gameplayVisionKeyConfigured,
+    res.json({ ...twitchHighlightDiscovery.status(),
+      gameplayScreeningEnabled: gameplayVision.enabled,
+      gameplayVisionKeyConfigured: gameplayVision.configuredProviders.some((name) => name !== 'ollama'),
+      gameplayVisionProviderConfigured: gameplayVision.configuredProviders.length > 0,
+      gameplayVisionProviders: gameplayVision.configuredProviders,
+      gameplayScreeningExplicitlyDisabled: gameplayVision.explicitlyDisabled,
+      visualGameplayVerificationConfigured: gameplayVision.enabled,
       highlightAutoPublishEnabled: process.env.HIGHLIGHT_AUTO_PUBLISH === 'true',
       youtubeCanPublish: await youtube.canApprove() });
   } catch (error) {
@@ -1249,7 +1250,7 @@ app.post('/api/twitch/vod-clips', admin, async (req, res, next) => {
     const result = await twitchHighlightDiscovery.scanVod(vodId);
     if (result.status === 'visual_gameplay_screening_disabled') {
       return res.json({ accepted: false, retryScheduled: true,
-        message: 'Visual gameplay screening is off. Enable ENABLE_GAMEPLAY_SCREENING and configure VIDEO_ANALYSIS_API_KEY to create gaming edits.' });
+        message: 'Gameplay screening needs a configured vision provider (Gemini, OpenAI, OpenAI-compatible such as Groq, Anthropic, or a reachable Ollama server). Set ENABLE_GAMEPLAY_SCREENING=false only to turn it off.' });
     }
     const communityClipsQueued = Number(result.communityClipsQueued) || 0;
     if (['no_gameplay_candidates', 'insufficient_gameplay_duration',
@@ -1261,7 +1262,7 @@ app.post('/api/twitch/vod-clips', admin, async (req, res, next) => {
           ? 'The available clips did not meet the gameplay-quality threshold for a 12-minute highlight.'
           : `Only ${Math.floor(available / 60)}m ${Math.floor(available % 60)}s of non-overlapping game-category footage is available; a 12-minute highlight needs 12m.`;
       const queuedNotice = communityClipsQueued
-        ? ` Queued ${communityClipsQueued} Twitch clip${communityClipsQueued === 1 ? '' : 's'} for Gemini gameplay screening; passing clips become private YouTube drafts for your review.`
+        ? ` Queued ${communityClipsQueued} Twitch clip${communityClipsQueued === 1 ? '' : 's'} for gameplay screening; passing clips become private YouTube drafts for your review.`
         : '';
       return res.status(communityClipsQueued ? 202 : 200).json({
         accepted: communityClipsQueued > 0,
