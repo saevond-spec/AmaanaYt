@@ -207,7 +207,8 @@ function endpointFor(provider) {
     return `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(provider.model)}:generateContent`;
   }
   if (provider.name === 'openai') return 'https://api.openai.com/v1/responses';
-  if (provider.name === 'openai_compatible' || provider.name === 'grok') return `${provider.baseUrl}/chat/completions`;
+  if (provider.name === 'grok') return `${provider.baseUrl}/responses`;
+  if (provider.name === 'openai_compatible') return `${provider.baseUrl}/chat/completions`;
   if (provider.name === 'anthropic') return 'https://api.anthropic.com/v1/messages';
   return `${provider.baseUrl}/api/chat`;
 }
@@ -224,9 +225,19 @@ function makeRequest(provider, frames, prompt) {
       ...frames.map((frame) => ({ type: 'input_image', detail: 'high',
         image_url: `data:${frame.mimeType};base64,${frame.data}` }))] }],
     text: { format: { type: 'json_object' } },
+    store: false,
     max_output_tokens: 1800
   };
-  if (provider.name === 'openai_compatible' || provider.name === 'grok') return {
+  if (provider.name === 'grok') return {
+    model: provider.model,
+    input: [{ role: 'user', content: [{ type: 'input_text', text: prompt },
+      ...frames.map((frame) => ({ type: 'input_image', detail: 'high',
+        image_url: `data:${frame.mimeType};base64,${frame.data}` }))] }],
+    text: { format: { type: 'json_object' } },
+    store: false,
+    max_output_tokens: 1800
+  };
+  if (provider.name === 'openai_compatible') return {
     model: provider.model,
     messages: [{ role: 'user', content: [{ type: 'text', text: prompt },
       ...frames.map((frame) => ({ type: 'image_url',
@@ -246,7 +257,7 @@ function makeRequest(provider, frames, prompt) {
 function responseText(provider, body) {
   if (provider.name === 'gemini') return (body.candidates?.[0]?.content?.parts || [])
     .filter((part) => !part.thought).map((part) => part.text || '').join('');
-  if (provider.name === 'openai') {
+  if (provider.name === 'openai' || provider.name === 'grok') {
     if (typeof body.output_text === 'string') return body.output_text;
     return (body.output || []).flatMap((item) => item.content || [])
       .map((part) => part.text || part.output_text || '').join('');

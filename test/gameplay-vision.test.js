@@ -108,21 +108,25 @@ test('Gemini transient failure falls through to a Groq-compatible vision endpoin
     offsetSeconds: 48, confidence: 0.94, evidence: 'A player and enemy exchange attacks.' }]);
 });
 
-test('Grok standard key uses xAI image chat and returns verified event markers', async () => {
+test('Grok standard key uses the xAI Responses image API and returns verified event markers', async () => {
   let request;
   const result = await analyzeGameplayFrames(frames, {
     env: { GAMEPLAY_VISION_PROVIDER_ORDER: 'grok', XAI_API_KEY: 'xai-secret' },
     circuitBreaker: createModelCircuitBreaker(),
     fetchImpl: async (url, options) => {
       request = { url, headers: options.headers, body: JSON.parse(options.body) };
-      return jsonResponse({ choices: [{ message: { content: JSON.stringify({ ...assessment,
-        frames: assessment.frames.filter((_, index) => [0, 2, 4].includes(index)) }) } }] });
+      return jsonResponse({ output: [{ type: 'message', content: [{ type: 'output_text',
+        text: JSON.stringify({ ...assessment,
+          frames: assessment.frames.filter((_, index) => [0, 2, 4].includes(index)) }) }] }] });
     }
   });
-  assert.equal(request.url, 'https://api.x.ai/v1/chat/completions');
+  assert.equal(request.url, 'https://api.x.ai/v1/responses');
   assert.equal(request.headers.authorization, 'Bearer xai-secret');
   assert.equal(request.body.model, 'grok-4.7');
-  assert.equal(request.body.messages[0].content.filter((part) => part.type === 'image_url').length, 3);
+  assert.equal(request.body.input[0].content.filter((part) => part.type === 'input_image').length, 3);
+  assert.equal(request.body.input[0].content[1].image_url.startsWith('data:image/jpeg;base64,'), true);
+  assert.deepEqual(request.body.text, { format: { type: 'json_object' } });
+  assert.equal(request.body.store, false);
   assert.equal(result.provider, 'grok');
   assert.deepEqual(result.eventMarkers, [{ eventType: 'fight', frameIndex: 2,
     offsetSeconds: 48, confidence: 0.94, evidence: 'A player and enemy exchange attacks.' }]);
