@@ -135,6 +135,7 @@ test('live-captured Shorts require strong gameplay verification evidence', () =>
     }
   };
   assert.equal(hasVerifiedLiveGameplayClip(valid), true);
+  assert.equal(hasVerifiedLiveGameplayClip({ ...valid, discoverySource: 'twitch_auto_marker' }), true);
   assert.equal(hasVerifiedLiveGameplayClip({ ...valid, liveCapture: false }), false);
   assert.equal(hasVerifiedLiveGameplayClip({ ...valid, visualGameplayVerification: {
     ...valid.visualGameplayVerification, activeGameplayFrames: 3

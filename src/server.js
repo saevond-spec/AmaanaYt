@@ -311,7 +311,8 @@ async function processTwitchClipDraft(id) {
         lastClipAttemptAt: new Date().toISOString()
       });
     }
-    if (draft.discoverySource === 'twitch_live_capture' && !hasVerifiedLiveGameplayClip(draft)) {
+    if (['twitch_live_capture', 'twitch_auto_marker'].includes(draft.discoverySource) &&
+        !hasVerifiedLiveGameplayClip(draft)) {
       throw new Error('Live Twitch clip did not pass gameplay verification; no YouTube upload was made');
     }
     if (!await twitch.isConnected()) throw new Error('Connect Twitch in Amaana before processing VOD highlights');
@@ -931,6 +932,31 @@ app.get('/api/twitch/highlight-discovery/status', admin, async (_req, res, next)
   }
 });
 
+app.post('/api/twitch/live-marker', admin, async (req, res, next) => {
+  try {
+    const eventType = cleanText(req.body?.eventType, 30);
+    if (!['fight', 'rare_loot'].includes(eventType)) {
+      return res.status(400).json({ error: 'eventType must be fight or rare_loot' });
+    }
+    const connection = await twitch.connectionStatus();
+    if (!connection.connected) {
+      return res.status(409).json({ error: connection.error || 'Connect Twitch in Amaana first' });
+    }
+    const result = await twitchHighlightDiscovery.markLiveMoment(eventType);
+    if (result.status === 'not_live') {
+      return res.status(409).json({ status: result.status,
+        error: 'No active Twitch stream was found. Manual markers work during a Twitch live stream.' });
+    }
+    if (result.status === 'test_stream_skipped') {
+      return res.status(409).json({ status: result.status, error: 'Test streams are not eligible for clip drafts.' });
+    }
+    return res.status(202).json({ ...result,
+      message: 'Moment marked. Amaana will wait for the Twitch VOD to contain the full segment, then create a private YouTube Short draft for your review. This manual route does not call vidIQ or visual AI.' });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get('/api/tiktok/status', admin, async (_req, res, next) => {
   try {
     res.json(await tiktok.connectionStatus());
@@ -1300,7 +1326,7 @@ app.post('/api/drafts/:id/approve', admin, async (req, res, next) => {
     if (!draft) return res.status(404).json({ error: 'Draft not found' });
     if (draft.status !== 'awaiting_owner_approval') return res.status(409).json({ error: 'Draft was already handled' });
     if (draft.sourceType === 'twitch_vod' &&
-        draft.discoverySource === 'twitch_live_capture' &&
+        ['twitch_live_capture', 'twitch_auto_marker'].includes(draft.discoverySource) &&
         !hasVerifiedLiveGameplayClip(draft)) {
       return res.status(409).json({ error: 'This live clip did not pass gameplay verification and cannot be published.' });
     }

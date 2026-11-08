@@ -10,6 +10,7 @@ const { createBatchQueue, createHighlightProcessor, findDueHighlightRetries,
   shouldRequeueUnexpectedTwitchDownloadHost, shouldPullForwardAllowedTwitchDownloadHost,
   shouldRequeueTwitchSegmentDurationFailure, isAmbiguousYoutubeUploadError,
   shouldRequeueStaleYoutubeUploadIntent, YOUTUBE_UPLOAD_RECOVERY_GRACE_MS } = require('../src/highlight-pipeline');
+const { selectEventAwareShortIndexes } = require('../src/highlight-pipeline');
 const { buildHighlightTimeline, buildHighlightDescription } = require('../src/highlight-metadata');
 const { downloadClip } = require('../src/twitch');
 
@@ -44,6 +45,48 @@ test('ambiguous YouTube upload outcomes are held, while explicit quota rejection
   assert.equal(shouldRequeueStaleYoutubeUploadIntent({ sourceType: 'twitch_highlight_batch',
     status: 'uploading_private_to_youtube', youtubeUploadIntentId: 'intent',
     youtubeUploadIntentCreatedAt: new Date(now - 1).toISOString() }, now), false);
+});
+
+test('event-aware Short selection gives verified fight and rare-loot clips priority', () => {
+  const selected = selectEventAwareShortIndexes({
+    currentIndexes: [0, 1],
+    highlightCount: 4,
+    selectionEvidence: [10, 9, 7, 2].map((selectionScore) => ({ selectionScore })),
+    twitchClips: [
+      { visualGameplayVerification: { verified: true, eventTypes: ['fight'] } },
+      { visualGameplayVerification: { verified: true, eventTypes: [] } },
+      { visualGameplayVerification: { verified: true, eventTypes: ['rare_loot'] } },
+      { visualGameplayVerification: { verified: false, eventTypes: ['fight', 'rare_loot'] } }
+    ]
+  });
+  assert.deepEqual(selected, [0, 2]);
+});
+
+test('event-aware selection uses a separate rare-loot clip when one clip has both labels', () => {
+  const selected = selectEventAwareShortIndexes({
+    currentIndexes: [0, 1],
+    highlightCount: 3,
+    selectionEvidence: [{ selectionScore: 10 }, { selectionScore: 9 }, { selectionScore: 8 }],
+    twitchClips: [
+      { visualGameplayVerification: { verified: true, eventTypes: ['fight', 'rare_loot'] } },
+      { visualGameplayVerification: { verified: true, eventTypes: ['rare_loot'] } },
+      { visualGameplayVerification: { verified: true, eventTypes: [] } }
+    ]
+  });
+  assert.deepEqual(selected, [0, 1]);
+});
+
+test('event-aware Short selection preserves score order when no verified event is found', () => {
+  const selected = selectEventAwareShortIndexes({
+    currentIndexes: [3, 0, 1],
+    highlightCount: 4,
+    selectionEvidence: [{ selectionScore: 5 }, { selectionScore: 10 },
+      { selectionScore: 1 }, { selectionScore: 8 }],
+    twitchClips: Array.from({ length: 4 }, () => ({
+      visualGameplayVerification: { verified: true, eventTypes: [] }
+    }))
+  });
+  assert.deepEqual(selected, [3, 0]);
 });
 
 test('accepts only Amaana\'s observed Twitch CloudFront download host', async (t) => {

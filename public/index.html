@@ -105,6 +105,15 @@
         <p class="eyebrow">AUTOMATIC CLIP WORKFLOW</p>
         <h2>Twitch VOD → 12-minute gameplay highlight → two Shorts</h2>
         <p class="muted">Amaana needs 12 minutes of non-overlapping, visually verified gameplay for a full highlight. It screens Twitch clips with Gemini and uploads only passing edits as private YouTube drafts for your review.</p>
+        <div class="manual-marker-panel">
+          <h3>Automatic fight and rare-loot markers</h3>
+          <p class="muted">While Twitch is connected and gameplay screening is configured, Amaana checks sampled gameplay frames automatically. A visually verified fight or rare pickup gets a timestamped marker and a private Short draft for review—no tap needed. This uses gameplay vision, not vidIQ, and works on Twitch live streams, not YouTube-only streams. Manual marks are available as a backup.</p>
+          <div class="draft-actions">
+            <button id="markFightButton" class="twitch" type="button" disabled>Optional manual fight mark</button>
+            <button id="markRareLootButton" class="twitch" type="button" disabled>Optional manual rare-loot mark</button>
+          </div>
+          <p id="liveMarkerStatus" class="muted" role="status" aria-live="polite"></p>
+        </div>
         <form id="vodScanForm">
           <label for="twitchVodId">Rescan an archived Twitch VOD</label>
           <input id="twitchVodId" name="vodId" type="text" inputmode="numeric" pattern="[0-9]+" autocomplete="off" placeholder="Twitch VOD ID" required>
@@ -125,6 +134,7 @@
         <form id="uploadForm">
           <label for="video">Video file</label>
           <input id="video" name="video" type="file" accept="video/*" required>
+          <p class="fine-print">For YouTube-only streams, export a locally trimmed fight or rare-loot moment from your recording, then upload that clip here. Amaana saves it as a private draft; it cannot extract segments directly from a YouTube archive.</p>
 
           <label for="title">Title</label>
           <input id="title" name="title" maxlength="100" placeholder="Your Short title" required>

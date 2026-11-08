@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 11200)
+Total output lines: 331
+
 # AmaanaYt
 
 YouTube Shorts, TikTok inbox, and video SEO service for **@saevond**.
@@ -126,59 +129,7 @@ Optional VidIQ MCP research augments YouTube search observations with read-only 
 
 On HTTP 503, alternate models are tried with 1, 5, and 15 second delays plus up to 1 second of jitter; three consecutive 503s open that model's in-process circuit for 30 minutes. The queue pauses for 30, 60, then 120 minutes on successive 503 failures (maximum 120 minutes). On HTTP 429, a model request retries once after `Retry-After` (default 60 seconds) when the delay is at most one minute. If it still fails, the queue uses a valid `Retry-After` header for its pause, or pauses for 60 minutes when the header is absent or invalid. Longer headers pause the queue immediately without holding a request open.
 
-Video analysis is enabled in the Render blueprint and off in the local example. Automatic publication requires video analysis or owner-entered takeaways; without either, Amaana skips the public video and shows the reason in the dashboard. Older public packages without footage analysis are requeued one at a time after six hours when the provider is available. For a Gemini SEO base URL, Amaana reuses `SEO_AI_API_KEY`; for an OpenAI SEO base URL, provide a separate Gemini key as `VIDEO_ANALYSIS_API_KEY`. `VIDEO_ANALYSIS_MODEL` defaults to the configured Gemini SEO model, or `gemini-3.8-flash` with a separate key. `VIDEO_ANALYSIS_TIMEOUT_MS` defaults to 180000 milliseconds. No extra npm dependency is needed: this feature uses the existing HTTPS request path.
-
-Generate independent secrets with:
-
-```bash
-openssl rand -hex 32
-```
-
-Run it three times for `TOKEN_ENCRYPTION_KEY`, `AGENT_KEY`, and `ADMIN_KEY`.
-
-## 3. Google Cloud setup
-
-1. Create a Google Cloud project.
-2. Enable **YouTube Data API v3**.
-3. Configure the Google Auth consent screen.
-4. Create an OAuth client of type **Web application**.
-5. Add the exact authorized redirect URI:
-   `https://YOUR-RENDER-DOMAIN/oauth2/callback`
-6. Store the client ID and secret only in Render.
-
-The app requests:
-
-`https://www.googleapis.com/auth/youtube.upload`
-
-`https://www.googleapis.com/auth/youtube.force-ssl` (required by YouTube for the owner approval and scheduling actions; reconnect YouTube after upgrading an existing installation)
-
-## 4. Twitch developer setup
-
-1. Open the Twitch Developer Console and register a dedicated application for Amaana.
-2. Add this exact OAuth redirect URL:
-   `https://YOUR-RENDER-DOMAIN/oauth/twitch/callback`
-3. Copy the Client ID and generate a Client Secret.
-4. Store them only in Render as `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET`.
-5. Redeploy Amaana, open the dashboard, and tap **Connect Twitch**.
-6. Sign in with the Twitch account that owns the Saevond channel and approve `channel:manage:clips`.
-
-In Twitch **Creator Dashboard → Settings → Stream → VOD Settings**, enable **Store past broadcasts**. Automatic post-stream clipping cannot work if Twitch never creates the archive VOD.
-
-## TikTok developer setup
-
-1. Register an app with TikTok for Developers. Enable Login Kit for Web and Content Posting API, and obtain the approved `user.info.basic` and `video.upload` scopes.
-2. Register this exact Login Kit redirect URI: `https://YOUR-RENDER-DOMAIN/oauth/tiktok/callback`.
-3. In TikTok's **URL properties** for this app, verify the URL prefix `https://YOUR-RENDER-DOMAIN/tiktok-media/`. TikTok gives you a signature file: put its filename in `TIKTOK_VERIFICATION_FILENAME` and its exact contents in `TIKTOK_VERIFICATION_CONTENT` in Render, then verify the file at `https://YOUR-RENDER-DOMAIN/tiktok-media/YOUR-FILENAME` before clicking Verify in TikTok. TikTok must be able to pull HTTPS MP4 files under that prefix without redirects. Amaana serves a newly generated file after the owner requests a transfer; it is not a permanent media archive.
-4. Store the app's client key and client secret as `TIKTOK_CLIENT_KEY` and `TIKTOK_CLIENT_SECRET` in Amaana's Render environment. Keep the secret out of GitHub and chat.
-5. Redeploy Amaana, open the owner dashboard, and choose **Connect TikTok**. Authorize the TikTok account you want to receive your stream Shorts.
-
-After a Short appears in Amaana, open its private YouTube preview and review the audio and footage. For that Short, check the automatic delivery consent box and select **Enable automatic TikTok delivery**. Once the Short is public on YouTube and YouTube reports **more than 2,000 views** (2,001 or higher), Amaana automatically sends it to your TikTok inbox. You can revoke consent before delivery. You can also use **Check YouTube views** and send an eligible Short manually after confirming consent. TikTok will notify the connected creator account: open the inbox notification to edit and publish it. Use **Check TikTok status** in Amaana to see delivery or publication status.
-
-Amaana checks its own generated stream Shorts on startup, while awake, and when the owner dashboard is opened. The GitHub Actions workflow in `.github/workflows/check-short-views.yml` pings the service every 15 minutes to wake a sleeping Render Free instance. GitHub's scheduled workflows can run late or be disabled for inactive repositories, so delivery is conditional on a successful check; the owner can always select **Check YouTube views** in the dashboard. Amaana checks each Short again before it sends its media to TikTok, and spaces automatic sends to at most one per 55 minutes and five attempts per 24 hours. Each eligible clip needs its own explicit opt-in. This monitors only Shorts Amaana created from stream highlights, not every Short already on the channel.
-
-TikTok may limit pending inbox shares (its documentation notes at most five within a 24-hour period), and a stopped or restarted free Render instance may lose the temporary media file before TikTok finishes pulling it. If TikTok reports a failed pull, retry the Short from the owner dashboard.
-
-TikTok's Direct Post API for automatic public publication requires an audited app and per-post review and consent in the app. TikTok's published criteria also say an internal utility for just one account is not an acceptable Direct Post app. The TikTok inbox route above lets the creator complete public posting inside TikTok without claiming that the bot can publish public posts unattended.
+Video analysis is enabled in the Render blueprint and off in the local example. Automatic publication requires video analysis or owner-entered takeaways; without either, Amaana skips the public video and shows the reason in the dashboard. Older public packages without footage analysis are requeued one at a time after six hours when the provide…1200 tokens truncated…ok's Direct Post API for automatic public publication requires an audited app and per-post review and consent in the app. TikTok's published criteria also say an internal utility for just one account is not an acceptable Direct Post app. The TikTok inbox route above lets the creator complete public posting inside TikTok without claiming that the bot can publish public posts unattended.
 
 ## 5. Verify deployment
 
@@ -269,7 +220,7 @@ curl -X POST "$AMAANA_YT_URL/api/twitch/vod-clips" \
 
 Amaana accepts up to eight moments per VOD. It creates official Twitch clips (each at most 60 seconds), joins them in time order into one landscape highlight video, then cuts a 9:16 Short from each segment of that video. The maximum assembled length is about eight minutes, depending on the moments found. The YouTube highlight and Shorts are private drafts until the owner approves each one. Processing starts after the stream ends and the archive is available; a continuous 24/7 stream does not produce an end event. Creating source clips on Twitch may make those Twitch clips visible independently of the private YouTube drafts.
 
-The VOD detector remains an external prerequisite: it must send the actual VOD ID and grounded timestamps to this endpoint. Amaana does not invent timestamps or discover highlight moments by itself. A batch is marked ready for owner review only after the private highlight, its Shorts, the generated and applied thumbnail, and SEO queue registration all succeed. Partial output stays private and shows a retry action. Transient HTTP 408/425/429/5xx and common network failures retry automatically with bounded backoff (up to four attempts); permanent permission failures need an owner retry. SEO text remains in its owner review flow, and no pipeline step changes an existing video's visibility.
+For archived-VOD requests, the caller must send the real VOD ID and grounded timestamps; this endpoint does not guess them. Separately, while a Twitch broadcast is live and visual gameplay screening is configured, Amaana samples a 60-second segment about every three minutes. The vision check can mark a fight or rare-loot event only when a sampled active-gameplay frame contains direct evidence, and it maps that frame to an approximate VOD timestamp. Amaana saves a short window around the marker and queues a private Short draft after the VOD segment is available; no tap or vidIQ call is required. The time is approximate to the sampled frame, and gaps between samples can miss events. If screening is unavailable or a frame is ambiguous, no automatic event marker is made; the manual marker remains an optional backup. New marker Shorts stay private for owner review. A VOD batch is marked ready for owner review only after the private highlight, its Shorts, the generated and applied thumbnail, and SEO queue registration all succeed. Partial output stays private and shows a retry action. Transient HTTP 408/425/429/5xx and common network failures retry automatically with bounded backoff (up to four attempts); permanent permission failures need an owner retry. SEO text remains in its owner review flow, and no pipeline step changes an existing video's visibility.
 
 ### Upload a private Short
 
@@ -328,3 +279,6 @@ YouTube's current guidance says tags can help correct common spelling mistakes b
 On its first run after deployment, the worker rescans the existing catalog so older videos also have view counts for triage; the normal sync continues to refresh recent uploads. Videos with unknown counts follow those with known counts. Automatic publication still keeps ready packages ahead of packages needing review and remains limited to public videos. Its SEO metadata writes do not include visibility or status fields.
 
 Use YouTube Studio to diagnose performance before changing titles, thumbnails, or descriptions. Compare impressions and click-through rate with traffic source and audience context, then inspect watch time and retention. YouTube notes that click-through rates for newer videos and videos under 100 views can vary widely, and advises comparing over time. Amaana does not measure Google Search placement. See [YouTube guidance on content performance and tags](https://support.google.com/youtube/answer/16559650?hl=en), [impressions and click-through rate](https://support.google.com/youtube/answer/7628154?hl=en), and [reading impressions and CTR in Analytics](https://support.google.com/youtube/answer/16767369?hl=en).
+# Gameplay clipping research
+
+See [`docs/gameplay-clipping-options.md`](docs/gameplay-clipping-options.md) for the 1,000-workflow option matrix, current shortlist, and Twitch versus YouTube source limits.

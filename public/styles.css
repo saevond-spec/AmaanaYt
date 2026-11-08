@@ -132,6 +132,9 @@ button:disabled { cursor: wait; opacity: .58; }
 .status-dot.connected { background: var(--green); box-shadow: 0 0 0 4px rgba(39, 217, 155, .12); }
 .connection-card .muted { margin-bottom: 0; font-size: .9rem; }
 .workflow-card .muted { margin-bottom: 0; line-height: 1.55; }
+.manual-marker-panel { margin: 18px 0; padding: 16px; border: 1px solid var(--border, #293642); border-radius: 12px; }
+.manual-marker-panel h3 { margin-top: 0; }
+.manual-marker-panel .draft-actions { margin: 12px 0; }
 
 .safe-badge, .draft-status {
   border: 1px solid rgba(39, 217, 155, .25);
