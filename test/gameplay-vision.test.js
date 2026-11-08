@@ -132,6 +132,21 @@ test('Grok standard key uses the xAI Responses image API and returns verified ev
     offsetSeconds: 48, confidence: 0.94, evidence: 'A player and enemy exchange attacks.' }]);
 });
 
+test('provider failures include a sanitized upstream reason without request data', async () => {
+  await assert.rejects(analyzeGameplayFrames(frames, {
+    env: { GAMEPLAY_VISION_PROVIDER_ORDER: 'grok', XAI_API_KEY: 'xai-secret' },
+    circuitBreaker: createModelCircuitBreaker(),
+    fetchImpl: async () => jsonResponse({ error: { message:
+      'Invalid image URL data:image/jpeg;base64,SECRETCONTENT Bearer private-token https://api.x.ai/v1/responses' } }, 400)
+  }), (error) => {
+    assert.match(error.message, /grok: HTTP 400 \(Invalid image URL \[image data\] Bearer \[redacted\] \[endpoint\]\)/);
+    assert.equal(error.message.includes('SECRETCONTENT'), false);
+    assert.equal(error.message.includes('private-token'), false);
+    assert.equal(error.message.includes('xai-secret'), false);
+    return true;
+  });
+});
+
 test('OpenAI Responses adapter sends sampled images and parses text output', async () => {
   let request;
   const result = await analyzeGameplayFrames(frames, {
