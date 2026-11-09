@@ -559,6 +559,7 @@ function enqueueHighlightBatch(id) {
 }
 const twitchHighlightDiscovery = createTwitchHighlightDiscovery({
   twitch, store, video, enqueueBatch: enqueueHighlightBatch, enqueueClip: enqueueClipProcessing,
+  liveAgentMode: process.env.LIVE_HIGHLIGHT_AGENTS !== 'false',
   visualGameplayVerificationAvailable: () => video.gameplayVisionStatus().enabled
 });
 let highlightRetryScanRunning = false;
