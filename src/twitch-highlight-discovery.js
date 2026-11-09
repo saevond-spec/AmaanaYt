@@ -78,6 +78,7 @@ function createTwitchHighlightDiscovery({
   vodMaxPages = RECENT_VOD_MAX_PAGES,
   targetDurationSeconds = TARGET_HIGHLIGHT_DURATION_SECONDS,
   liveTargetDurationSeconds = LIVE_TARGET_SECONDS,
+  liveAgentMode = false,
   video,
   visualGameplayVerificationAvailable = () => false
 }) {
@@ -172,8 +173,8 @@ function createTwitchHighlightDiscovery({
     session.streamTitle = clean(stream.title, 100);
     session.gameName = clean(stream.game_name || session.gameName || '', 50);
     session.lastSeenAt = new Date(timestamp).toISOString();
-    session.liveAutopilotMode = true;
-    session.shortCandidates = [];
+    session.liveAutopilotMode = liveAgentMode;
+    if (liveAgentMode) session.shortCandidates = [];
     const marker = {
       id: idFactory(),
       draftId: idFactory(),
@@ -493,7 +494,9 @@ function createTwitchHighlightDiscovery({
         title: candidate.title,
         created_at: candidate.createdAt
       }));
-      const selected = selectCommunityHighlights(liveClips, vod, { targetDurationSeconds: liveTargetDurationSeconds });
+      const selected = selectCommunityHighlights(liveClips, vod, {
+        targetDurationSeconds: liveAgentMode ? liveTargetDurationSeconds : targetDurationSeconds
+      });
       result.availableGameplaySeconds = selected.availableGameplaySeconds || 0;
       if (!selected.highlights.length) break;
 
@@ -505,9 +508,9 @@ function createTwitchHighlightDiscovery({
       if (selectedCandidates.length !== selected.highlights.length) break;
 
       const batchIndex = (Number(session.batchIndex) || 0) + 1;
-      const plan = buildLiveHighlightAgentPlan({ selection: selected, candidateById,
-        streamId: stream.id, batchIndex });
-      if (!plan.ready) {
+      const plan = liveAgentMode ? buildLiveHighlightAgentPlan({ selection: selected, candidateById,
+        streamId: stream.id, batchIndex }) : null;
+      if (plan && !plan.ready) {
         result.agentHoldReason = plan.reason;
         break;
       }
@@ -533,9 +536,10 @@ function createTwitchHighlightDiscovery({
           streamTitle,
           title: clean((streamTitle || 'Twitch livestream') + ' | Best moments', 100),
           highlights: selected.highlights,
-          // Three ranked Shorts are produced from this verified 15-minute live montage.
-          shortCandidateIndexes: plan.shortCandidateIndexes,
-          agentPlan: plan.agentPlan,
+          // In agent mode, create three ranked Shorts from the verified live montage.
+          // Legacy mode retains its separate private live Short drafts.
+          shortCandidateIndexes: plan ? plan.shortCandidateIndexes : [],
+          ...(plan ? { agentPlan: plan.agentPlan } : {}),
           sourceClipEvidence: selected.evidence,
           twitchClips: selectedCandidates.map((candidate) => candidate.clip),
           candidateClipCount: liveClips.length,
@@ -698,7 +702,7 @@ function createTwitchHighlightDiscovery({
         if (!Array.isArray(session.manualMarkers)) session.manualMarkers = [];
         if (!Array.isArray(session.automaticMarkers)) session.automaticMarkers = [];
         // New live autoplay batches produce their own three Shorts; do not duplicate them.
-        if (session.shortCandidates.length && session.liveAutopilotMode !== true) {
+        if (session.shortCandidates.length && !liveAgentMode) {
           await queueReadyLiveShorts(stream, session, result, { flush: true });
         }
 
@@ -870,6 +874,7 @@ function createTwitchHighlightDiscovery({
       return result;
     }
 
+    if (!liveAgentMode) await queueReadyLiveShorts(stream, session, result);
     await queueReadyLiveBatches(vod, stream, session, result);
 
     const lastCaptureAt = Date.parse(session.lastCaptureAt || '');
@@ -1000,7 +1005,7 @@ function createTwitchHighlightDiscovery({
             const hasDedicatedEventMarker = candidate.clip.visualGameplayVerification.eventMarkers
               .some((event) => LIVE_MANUAL_MARKER_TYPES.has(String(event && event.eventType || '')));
             // Shorts are selected from the verified 15-minute highlight batch.
-            if (!hasDedicatedEventMarker && session.liveAutopilotMode !== true) session.shortCandidates.push(candidate);
+            if (!hasDedicatedEventMarker && !liveAgentMode) session.shortCandidates.push(candidate);
             session.candidates = session.candidates.slice(-MAX_LIVE_CANDIDATES);
             session.shortCandidates = session.shortCandidates.slice(-LIVE_SHORT_CANDIDATE_GROUP_SIZE * 2);
           }
@@ -1024,6 +1029,7 @@ function createTwitchHighlightDiscovery({
     }
 
     await queueReadyLiveMarkers(vod, stream, session, result);
+    if (!liveAgentMode) await queueReadyLiveShorts(stream, session, result);
     await queueReadyLiveBatches(vod, stream, session, result);
     if (Number(result.automaticMarkersQueued) > 0) result.status = 'automatic_markers_queued';
     await saveState();
