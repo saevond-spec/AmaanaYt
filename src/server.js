@@ -538,6 +538,8 @@ const processHighlightBatch = createHighlightProcessor({
   buildHighlightTimeline, buildHighlightDescription, cleanText,
   maxAutoAttempts: highlightMaxAutoAttempts,
   autoPublish: process.env.HIGHLIGHT_AUTO_PUBLISH === 'true',
+  // Only new, evidence-gated live batches use the live autopilot default.
+  liveAutoPublish: process.env.LIVE_HIGHLIGHT_AUTO_PUBLISH !== 'false',
   canAutoPublish: () => youtube.canApprove(),
   logError: (id, error) => console.error('Highlight batch ' + id + ' failed:', error.message),
   logHeld: (id, reason) => console.warn(JSON.stringify({
@@ -557,6 +559,7 @@ function enqueueHighlightBatch(id) {
 }
 const twitchHighlightDiscovery = createTwitchHighlightDiscovery({
   twitch, store, video, enqueueBatch: enqueueHighlightBatch, enqueueClip: enqueueClipProcessing,
+  liveAgentMode: process.env.LIVE_HIGHLIGHT_AGENTS !== 'false',
   visualGameplayVerificationAvailable: () => video.gameplayVisionStatus().enabled
 });
 let highlightRetryScanRunning = false;
