@@ -569,7 +569,8 @@ function createHighlightProcessor(dependencies) {
           currentIndexes: batch.shortCandidateIndexes,
           twitchClips,
           selectionEvidence: batch.sourceClipEvidence,
-          highlightCount: batch.highlights.length
+          highlightCount: batch.highlights.length,
+          maxShorts: batch.agentPlan?.mode === 'live_highlight_autopilot' ? 3 : 2
         });
         if (JSON.stringify(eventAwareIndexes) !== JSON.stringify(batch.shortCandidateIndexes || [])) {
           batch = await store.updateDraft(id, { shortCandidateIndexes: eventAwareIndexes });
