@@ -249,7 +249,7 @@ function createHighlightProcessor(dependencies) {
     buildShortDescription = defaultBuildShortDescription, cleanText,
     idFactory = () => crypto.randomUUID(), logError = () => {}, logSuccess = () => {},
     logHeld = () => {}, logPublished = () => {}, canAutoPublish = async () => true,
-    maxAutoAttempts = 12, autoPublish = true, now = () => Date.now(),
+    maxAutoAttempts = 12, autoPublish = true, liveAutoPublish = false, now = () => Date.now(),
     sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     clipMetadataPollIntervalMs = 5000, clipMetadataMaxAttempts = 72
   } = dependencies;
@@ -758,9 +758,16 @@ function createHighlightProcessor(dependencies) {
       const automaticPublicationSource = batch.sourceType === 'twitch_highlight_batch' &&
         ['twitch_clips_api', 'twitch_live_capture'].includes(batch.discoverySource) &&
         batch.autoPublishEligible === true;
+      const liveAgentPublicationSource = batch.discoverySource === 'twitch_live_capture' &&
+        batch.agentPlan?.mode === 'live_highlight_autopilot' &&
+        batch.agentPlan?.requirements?.highlightDurationSeconds === 900 &&
+        batch.agentPlan?.requirements?.shorts === 3 && expectedShortCount === 3 &&
+        Number(batch.targetHighlightDurationSeconds) === 900;
+      const publicationRequested = (autoPublish && automaticPublicationSource) ||
+        (liveAutoPublish && automaticPublicationSource && liveAgentPublicationSource);
       let publishPermission = false;
       let publishHoldReason = null;
-      if (autoPublish && automaticPublicationSource) {
+      if (publicationRequested) {
         try {
           publishPermission = await canAutoPublish() === true;
           if (!publishPermission) publishHoldReason = 'youtube_force_ssl_scope_missing';
@@ -768,7 +775,7 @@ function createHighlightProcessor(dependencies) {
           publishHoldReason = 'youtube_publish_permission_check_failed';
         }
       }
-      const shouldAutoPublish = autoPublish && automaticPublicationSource && publishPermission;
+      const shouldAutoPublish = publicationRequested && publishPermission;
       const localProductionReady = failures.length === 0 &&
         registeredShortIndexes.size === expectedShortCount && allOutputIdsPresent &&
         seoReady && mediaReady && (batch.pipelineVersion < 2 || thumbnailStatus === 'applied');
@@ -825,7 +832,7 @@ function createHighlightProcessor(dependencies) {
           processedAt: new Date(now()).toISOString()
         });
       } else if (!shouldAutoPublish) {
-        if (autoPublish && automaticPublicationSource && publishHoldReason) {
+        if (publicationRequested && publishHoldReason) {
           logHeld(id, publishHoldReason);
         }
         for (const short of finalShorts) {
