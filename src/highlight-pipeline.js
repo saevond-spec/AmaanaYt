@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { planGameplayShort } = require('./video-edit-plan');
 const fs = require('fs');
 const path = require('path');
 const { validateHighlightMoments, verifyCreatedClip, verifyClipCreationRequest } = require('./highlight-validation');
@@ -418,6 +419,7 @@ function createHighlightProcessor(dependencies) {
               : [],
             eventEvidence: visualGameplay.eventEvidence && typeof visualGameplay.eventEvidence === 'object'
               ? visualGameplay.eventEvidence : {},
+            eventMarkers: Array.isArray(visualGameplay.eventMarkers) ? visualGameplay.eventMarkers : [],
             model: cleanText(visualGameplay.model || '', 80)
           }
         };
@@ -589,13 +591,17 @@ function createHighlightProcessor(dependencies) {
           offset += durations[index];
           continue;
         }
-        const length = Math.min(60, durations[index]);
+        let length = Math.min(60, durations[index]);
         const shortTags = ['@saevond', 'gaming', 'Shorts'];
         const existingShort = shortsByIndex.get(index);
         const seenShortTitles = [highlightTitle, ...[...shortsByIndex.entries()]
           .filter(([shortIndex]) => Number(shortIndex) !== index)
           .map(([, short]) => short.title).filter(Boolean)];
         const visual = twitchClips[index]?.visualGameplayVerification || {};
+        const editPlan = planGameplayShort(durations[index], visual);
+        // Already uploaded media retains its original duration during SEO recovery.
+        if (!existingShort?.youtubeVideoId) length = editPlan.durationSeconds;
+        else if (Number.isFinite(existingShort.duration) && existingShort.duration > 0) length = existingShort.duration;
         const detectedEventTypes = Array.isArray(visual.eventTypes)
           ? visual.eventTypes.filter((eventType) => ['fight', 'rare_loot', 'clutch'].includes(eventType)) : [];
         const preferredEventType = ['rare_loot', 'fight', 'clutch']
@@ -650,7 +656,7 @@ function createHighlightProcessor(dependencies) {
 
         const shortPath = path.join(directory, 'short-' + index + '.mp4');
         try {
-          await video.shortFromHighlight(montage, offset, length, shortPath);
+          await video.shortFromHighlight(montage, offset + editPlan.startSeconds, length, shortPath);
           await video.validateShort(shortPath, length);
           let shortDraft = existingShort;
           const intentId = crypto.randomUUID();
@@ -661,7 +667,7 @@ function createHighlightProcessor(dependencies) {
               highlightIndex: index, vodId: batch.vodId, title: shortTitle,
               eventTypes: detectedEventTypes, eventEvidence: visual.eventEvidence || {},
               description: shortDescription, tags: shortTags, youtubeVideoId: null,
-              duration: length, youtubeUploadIntentId: intentId,
+              duration: length, editPlan, youtubeUploadIntentId: intentId,
               youtubeUploadIntentCreatedAt: intentAt, youtubeUploadError: null,
               mediaValidation: 'passed', playlistAssignment: { state: 'pending' },
               status: 'uploading_private_to_youtube', productionState: 'uploading_private_to_youtube',
@@ -688,6 +694,7 @@ function createHighlightProcessor(dependencies) {
               youtubeUploadError: null
             });
           }
+          await store.updateDraft(shortDraft.id, { duration: length, editPlan });
           let uploaded;
           try {
             uploaded = await youtube.uploadPrivate({

@@ -341,6 +341,7 @@ async function harness(t, options = {}) {
     },
     async shortFromHighlight(_source, _offset, _length, destination) {
       counters.shortRenders += 1;
+      (counters.editWindows ||= []).push({ start: _offset, duration: _length });
       await fs.writeFile(destination, 'fixture short');
     }
   };
@@ -1101,3 +1102,19 @@ test('permanent publication permission failure stops with owner review and leave
   assert.equal(h.counters.publications.length, 1);
 });
 
+
+
+test('verified loot timestamps survive screening and drive montage-relative edits', async (t) => {
+  const h = await harness(t, { autoPublish: false, gameplayVerificationResult: {
+    verified: true, activeGameplayFrames: 5, totalFrames: 5, confidence: 0.98,
+    eventTypes: ['rare_loot'], eventMarkers: [{ eventType: 'rare_loot', offsetSeconds: 22,
+      confidence: 0.95, evidence: 'Rare item pickup label' }]
+  } });
+  await h.processor(h.batch.id);
+  assert.ok(h.counters.editWindows.length > 0);
+  assert.deepEqual(h.counters.editWindows[0], { start: 13, duration: 15 });
+  const short = [...h.drafts.values()].find(d => d.parentId === h.batch.id);
+  assert.equal(short.duration, 15);
+  assert.equal(short.editPlan.mode, 'event_window');
+  assert.equal(h.drafts.get(h.batch.id).twitchClips[0].visualGameplayVerification.eventMarkers.length, 1);
+});

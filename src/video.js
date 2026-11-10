@@ -223,9 +223,14 @@ async function combineLiveScreenSegments(inputPaths, outputPath) {
 
 
 async function shortFromHighlight(highlightPath, start, duration, outputPath) {
+  if (!Number.isFinite(start) || start < 0 || !Number.isFinite(duration) || duration <= 0 || duration > 60) {
+    throw new Error('Short edit requires a non-negative start and duration up to 60 seconds');
+  }
   await runFfmpeg(['-y', '-ss', String(start), '-i', highlightPath, '-t', String(duration),
     '-vf', 'split=2[bgsrc][fgsrc];[bgsrc]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=18:2[bg];[fgsrc]scale=720:1280:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p',
-    '-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-movflags', '+faststart', outputPath]);
+    '-map', '0:v:0', '-map', '0:a:0?',
+    '-af', `afade=t=in:d=0.04,afade=t=out:st=${Math.max(0, duration - 0.08)}:d=0.08`,
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-movflags', '+faststart', outputPath]);
 }
 
 
