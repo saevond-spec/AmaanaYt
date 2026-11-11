@@ -158,6 +158,7 @@ test('retry delays are deterministic, exponential with bounded jitter, and cappe
   assert.ok(delays.every((delay) => delay > 0 && delay <= 6 * 60 * 60 * 1000));
   assert.equal(isRetryableCommunityClipError(Object.assign(new Error('clip not ready'), { status: 425 })), true);
   assert.equal(isRetryableCommunityClipError(Object.assign(new Error('rate limited'), { status: 429 })), true);
+  assert.equal(isRetryableCommunityClipError(Object.assign(new Error('bad provider key'), { status: 503, retryable: false })), false);
   assert.equal(isRetryableCommunityClipError(Object.assign(new Error('forbidden'), { status: 403 })), false);
   assert.equal(isRetryableCommunityClipError(new Error('gameplay verification failed')), false);
 });

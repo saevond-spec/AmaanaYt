@@ -24,7 +24,7 @@ These roles share an `agentPlan` attached to each new batch for dashboard/diagno
 
 ## Controls
 
-- `LIVE_HIGHLIGHT_AUTO_PUBLISH=false` disables automatic publication for the new live-agent batches.
+- `LIVE_HIGHLIGHT_AUTO_PUBLISH` defaults to `false`; keep it false in production to leave every new live-agent batch private for owner review.
 - `HIGHLIGHT_AUTO_PUBLISH` continues to control older/archived highlight batches according to its existing behavior.
 - Gameplay vision provider(s), Twitch authentication, YouTube publish permission, sufficient active VOD footage, FFmpeg, reliable persistent storage and Render compute are required.
 - There is no promise of a completed video during a stream if Twitch active VOD or verified segment availability is insufficient.

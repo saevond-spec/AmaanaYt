@@ -147,6 +147,75 @@ test('provider failures include a sanitized upstream reason without request data
   });
 });
 
+test('a stalled provider gets a bounded slice of the total deadline so the fallback can run', async () => {
+  const originalTimeout = AbortSignal.timeout;
+  const timeouts = [];
+  const calls = [];
+  AbortSignal.timeout = (ms) => { timeouts.push(ms); return originalTimeout(ms); };
+  try {
+    const result = await analyzeGameplayFrames(frames, {
+      timeoutMs: '60000',
+      env: { GAMEPLAY_VISION_PROVIDER_ORDER: 'gemini,grok',
+        GAMEPLAY_VISION_GEMINI_API_KEY: 'gemini-secret', XAI_API_KEY: 'xai-secret',
+        GAMEPLAY_VISION_PROVIDER_TIMEOUT_MS: '12000' },
+      circuitBreaker: createModelCircuitBreaker(),
+      fetchImpl: async (url) => {
+        calls.push(url);
+        if (calls.length === 1) { const error = new Error('model timeout'); error.name = 'TimeoutError'; throw error; }
+        return jsonResponse({ output: [{ type: 'message', content: [{ type: 'output_text',
+          text: JSON.stringify({ ...assessment, frames: assessment.frames.filter((_, index) => [0, 2, 4].includes(index)) }) }] }] });
+      }
+    });
+    assert.equal(result.provider, 'grok');
+    assert.equal(calls.length, 2);
+    assert.deepEqual(timeouts, [12000, 12000]);
+  } finally {
+    AbortSignal.timeout = originalTimeout;
+  }
+});
+
+test('Gemini 429 honors Retry-After and is skipped while its cooldown remains active', async () => {
+  let now = 1_000_000;
+  const circuitBreaker = createModelCircuitBreaker({ now: () => now });
+  const calls = [];
+  const options = {
+    env: { GAMEPLAY_VISION_PROVIDER_ORDER: 'gemini,grok',
+      GAMEPLAY_VISION_GEMINI_API_KEY: 'gemini-secret', XAI_API_KEY: 'xai-secret' },
+    now: () => now, circuitBreaker,
+    fetchImpl: async (url) => {
+      calls.push(url);
+      if (url.includes('generativelanguage')) return { ...jsonResponse({ error: { message: 'quota exceeded' } }, 429),
+        headers: { get: (name) => name.toLowerCase() === 'retry-after' ? '120' : null } };
+      return jsonResponse({ output: [{ type: 'message', content: [{ type: 'output_text',
+        text: JSON.stringify({ ...assessment, frames: assessment.frames.filter((_, index) => [0, 2, 4].includes(index)) }) }] }] });
+    }
+  };
+  assert.equal((await analyzeGameplayFrames(frames, options)).provider, 'grok');
+  now += 30_000;
+  assert.equal((await analyzeGameplayFrames(frames, options)).provider, 'grok');
+  assert.equal(circuitBreaker.remaining('gemini:gemini-3.8-flash'), 90_000);
+  assert.equal(calls.filter((url) => url.includes('generativelanguage')).length, 1);
+  assert.equal(calls.length, 3);
+});
+
+test('invalid provider credentials stop queue retries and suppress repeated calls', async () => {
+  const circuitBreaker = createModelCircuitBreaker();
+  let calls = 0;
+  const options = {
+    env: { GAMEPLAY_VISION_PROVIDER_ORDER: 'grok', XAI_API_KEY: 'xai-secret' },
+    circuitBreaker,
+    fetchImpl: async () => { calls += 1; return jsonResponse({ error: { message: 'Incorrect API key provided' } }, 400); }
+  };
+  await assert.rejects(analyzeGameplayFrames(frames, options), (error) => {
+    assert.equal(error.code, 'GAMEPLAY_VISION_CREDENTIALS_INVALID');
+    assert.equal(error.status, 400);
+    assert.equal(error.retryable, false);
+    return true;
+  });
+  await assert.rejects(analyzeGameplayFrames(frames, options), (error) => error.retryable === false);
+  assert.equal(calls, 1);
+});
+
 test('OpenAI Responses adapter sends sampled images and parses text output', async () => {
   let request;
   const result = await analyzeGameplayFrames(frames, {

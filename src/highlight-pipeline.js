@@ -138,6 +138,7 @@ function shouldPullForwardTwitchMetadataRetry(draft, now = Date.now(), minimumDe
 }
 
 function isTransientError(error) {
+  if (error && error.retryable === false) return false;
   const status = Number(error && (error.status || error.statusCode || error.response && error.response.status));
   if ([408, 425, 429].includes(status) || status >= 500 && status <= 599) return true;
   const code = String(error && (error.code || error.cause && error.cause.code) || '').toUpperCase();
@@ -945,9 +946,12 @@ function createHighlightProcessor(dependencies) {
       const attemptCount = (Number(batch && batch.clipAttemptCount) || 0) + 1;
       const canAutoRetry = isTransientError(error) && attemptCount <
         (Number.isSafeInteger(maxAutoAttempts) && maxAutoAttempts > 0 ? maxAutoAttempts : 12);
-      const retryDelay = error.code === 'TWITCH_CLIP_METADATA_PENDING'
+      const baseRetryDelay = error.code === 'TWITCH_CLIP_METADATA_PENDING'
         ? 2 * 60 * 1000
         : Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, attemptCount - 1)));
+      const requestedRetryAfter = Number(error.retryAfterMs);
+      const retryDelay = Math.min(6 * 60 * 60 * 1000, Math.max(baseRetryDelay,
+        Number.isFinite(requestedRetryAfter) && requestedRetryAfter > 0 ? requestedRetryAfter : 0));
       logError(id, error);
       await store.updateDraft(id, {
         status: canAutoRetry ? 'clip_retry_wait' : 'clip_failed',

@@ -437,6 +437,21 @@ test('opens a model circuit after three 503s and closes it after 30 minutes', as
   assert.equal(requests, 4);
 });
 
+test('model circuits honor provider rate limits and clear permanent credential blocks only after success', () => {
+  let now = 1_000_000;
+  const circuitBreaker = createModelCircuitBreaker({ now: () => now });
+  circuitBreaker.record('quota-model', 429, { retryAfterMs: 120_000 });
+  assert.equal(circuitBreaker.remaining('quota-model'), 120_000);
+  now += 120_001;
+  assert.equal(circuitBreaker.remaining('quota-model'), 0);
+  circuitBreaker.record('bad-key-model', 400, { permanent: true });
+  assert.equal(circuitBreaker.isPermanent('bad-key-model'), true);
+  assert.equal(circuitBreaker.remaining('bad-key-model'), Number.POSITIVE_INFINITY);
+  circuitBreaker.record('bad-key-model', 200);
+  assert.equal(circuitBreaker.isPermanent('bad-key-model'), false);
+  assert.equal(circuitBreaker.remaining('bad-key-model'), 0);
+});
+
 test('uses SEO_AI_TIMEOUT_MS for model request signals', async () => {
   const originalTimeout = AbortSignal.timeout;
   const durations = [];

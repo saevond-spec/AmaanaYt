@@ -206,6 +206,12 @@ function requestError(provider, response, detail = '') {
   return error;
 }
 
+function isInvalidProviderCredential(status, detail) {
+  if ([401, 403].includes(Number(status))) return true;
+  return Number(status) === 400 && /(?:incorrect|invalid|expired|revoked)\s+(?:api\s+)?key|api\s+key.{0,30}(?:invalid|incorrect|not\s+valid)|unauthori[sz]ed.{0,30}(?:api\s+)?key/i
+    .test(String(detail || ''));
+}
+
 function authHeaders(provider) {
   if (provider.name === 'gemini') return { 'x-goog-api-key': provider.apiKey, 'content-type': 'application/json' };
   if (provider.name === 'anthropic') return { 'x-api-key': provider.apiKey,
@@ -306,6 +312,9 @@ async function analyzeGameplayFrames(frames, {
   const configuredTimeout = Number(timeoutMs || env.GAMEPLAY_VISION_TIMEOUT_MS || env.VIDEO_ANALYSIS_TIMEOUT_MS);
   const totalTimeout = Number.isSafeInteger(configuredTimeout) && configuredTimeout >= 1000
     ? Math.min(configuredTimeout, 10 * 60 * 1000) : 180000;
+  const configuredProviderTimeout = Number(env.GAMEPLAY_VISION_PROVIDER_TIMEOUT_MS);
+  const providerTimeout = Number.isSafeInteger(configuredProviderTimeout) && configuredProviderTimeout >= 1000
+    ? Math.min(configuredProviderTimeout, 3 * 60 * 1000) : 45000;
   const deadline = now() + totalTimeout;
   const prompt = buildGameplayPrompt();
   const failures = [];
@@ -316,7 +325,10 @@ async function analyzeGameplayFrames(frames, {
       failures.push(`${provider.name}: circuit open`);
       continue;
     }
-    const requestTimeout = deadline - now();
+    const remainingBudget = deadline - now();
+    // Reserve time for fallback providers instead of letting one stalled model consume
+    // the entire live-capture deadline. Each provider gets an equal share, capped at 45s.
+    const requestTimeout = Math.min(remainingBudget, providerTimeout, Math.ceil(totalTimeout / providers.length));
     if (requestTimeout < 1000) {
       failures.push('overall gameplay vision time limit reached');
       break;
@@ -334,8 +346,9 @@ async function analyzeGameplayFrames(frames, {
         let errorBody = null;
         try { errorBody = await response.json(); } catch {}
         const error = requestError(provider, response, providerErrorDetail(errorBody));
-        if (typeof circuitBreaker.record === 'function') circuitBreaker.record(circuitKey,
-          error.status >= 500 ? 503 : error.status);
+        const invalidCredential = isInvalidProviderCredential(error.status, error.detail);
+        if (typeof circuitBreaker.record === 'function') circuitBreaker.record(circuitKey, error.status,
+          { retryAfterMs: error.retryAfterMs, permanent: invalidCredential });
         failures.push(`${provider.name}: HTTP ${error.status}${error.detail ? ` (${error.detail})` : ''}`);
         continue;
       }
@@ -353,8 +366,16 @@ async function analyzeGameplayFrames(frames, {
     }
   }
   const error = new Error(`All configured gameplay vision providers failed (${failures.join('; ')})`);
-  error.code = 'GAMEPLAY_VISION_PROVIDERS_FAILED';
-  error.status = 503;
+  const allCredentialsInvalid = providers.length > 0 && providers.every((provider) =>
+    circuitBreaker.isPermanent?.(`${provider.name}:${provider.model}`) === true);
+  const remainingCooldowns = providers.map((provider) =>
+    typeof circuitBreaker.remaining === 'function'
+      ? circuitBreaker.remaining(`${provider.name}:${provider.model}`) : 0)
+    .filter((remaining) => Number.isFinite(remaining) && remaining > 0);
+  error.code = allCredentialsInvalid ? 'GAMEPLAY_VISION_CREDENTIALS_INVALID' : 'GAMEPLAY_VISION_PROVIDERS_FAILED';
+  error.status = allCredentialsInvalid ? 400 : 503;
+  error.retryable = !allCredentialsInvalid;
+  error.retryAfterMs = remainingCooldowns.length ? Math.max(...remainingCooldowns) : 60000;
   throw error;
 }
 
