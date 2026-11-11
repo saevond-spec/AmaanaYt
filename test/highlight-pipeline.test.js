@@ -800,6 +800,7 @@ test('transient failures use bounded backoff attempts, while authorization error
   }
   assert.equal(h.drafts.get(h.batch.id).nextClipAttemptAt, null);
   assert.equal(isTransientError({ status: 429 }), true);
+  assert.equal(isTransientError({ status: 503, retryable: false }), false);
   assert.equal(isTransientError({ statusCode: 503 }), true);
   assert.equal(isTransientError({ code: 'ECONNRESET' }), true);
   assert.equal(isTransientError({ status: 403 }), false);

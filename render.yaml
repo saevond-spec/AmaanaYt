@@ -66,6 +66,8 @@ services:
       - key: VIDEO_ANALYSIS_TIMEOUT_MS
         value: '180000'
       - key: HIGHLIGHT_AUTO_PUBLISH
-        value: 'true'
+        value: 'false'
+      - key: LIVE_HIGHLIGHT_AUTO_PUBLISH
+        value: 'false'
       - key: UPLOAD_DIR
         value: /tmp/uploads

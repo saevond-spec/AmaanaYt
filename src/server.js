@@ -496,7 +496,10 @@ async function processTwitchClipDraft(id) {
         latest.status !== 'uploading_private_to_youtube' && Number(latest.clipAttemptCount) < 8 &&
         isRetryableCommunityClipError(error)) {
       const attempt = Math.max(1, Number(latest.clipAttemptCount) || 1);
-      const nextClipAttemptAt = new Date(Date.now() + clipRetryDelayMs(attempt, id)).toISOString();
+      const requestedRetryAfter = Number(error.retryAfterMs);
+      const retryDelayMs = Math.min(6 * 60 * 60 * 1000, Math.max(clipRetryDelayMs(attempt, id),
+        Number.isFinite(requestedRetryAfter) && requestedRetryAfter > 0 ? requestedRetryAfter : 0));
+      const nextClipAttemptAt = new Date(Date.now() + retryDelayMs).toISOString();
       await store.updateDraft(id, {
         status: 'clip_retry_wait', productionState: 'retry_scheduled', nextClipAttemptAt,
         error: cleanText(error.message, 500)
@@ -538,8 +541,8 @@ const processHighlightBatch = createHighlightProcessor({
   buildHighlightTimeline, buildHighlightDescription, cleanText,
   maxAutoAttempts: highlightMaxAutoAttempts,
   autoPublish: process.env.HIGHLIGHT_AUTO_PUBLISH === 'true',
-  // Only new, evidence-gated live batches use the live autopilot default.
-  liveAutoPublish: process.env.LIVE_HIGHLIGHT_AUTO_PUBLISH !== 'false',
+  // Publication is opt-in for every highlight path and stays disabled by default.
+  liveAutoPublish: process.env.LIVE_HIGHLIGHT_AUTO_PUBLISH === 'true',
   canAutoPublish: () => youtube.canApprove(),
   logError: (id, error) => console.error('Highlight batch ' + id + ' failed:', error.message),
   logHeld: (id, reason) => console.warn(JSON.stringify({

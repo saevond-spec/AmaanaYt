@@ -268,9 +268,23 @@ function createModelCircuitBreaker({ now = Date.now } = {}) {
       failures.delete(model);
       return 0;
     },
-    record(model, status) {
+    isPermanent(model) {
+      return failures.get(model)?.permanent === true;
+    },
+    record(model, status, { retryAfterMs, permanent = false } = {}) {
+      if (permanent) {
+        failures.set(model, { consecutive: 3, blockedUntil: Number.POSITIVE_INFINITY, permanent: true });
+        return;
+      }
+      if (Number(status) === 429) {
+        const requestedDelay = Number(retryAfterMs);
+        const delay = Number.isFinite(requestedDelay) && requestedDelay > 0 ? requestedDelay : 60000;
+        failures.set(model, { consecutive: 1,
+          blockedUntil: now() + Math.min(6 * 60 * 60 * 1000, Math.max(60000, delay)) });
+        return;
+      }
       const previous = failures.get(model);
-      if (status !== 503) { failures.delete(model); return; }
+      if (Number(status) !== 503) { failures.delete(model); return; }
       const consecutive = (previous?.consecutive || 0) + 1;
       failures.set(model, { consecutive,
         blockedUntil: consecutive >= 3 ? now() + 30 * 60 * 1000 : 0 });

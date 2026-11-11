@@ -191,6 +191,7 @@ function clipRetryDelayMs(attempt, jobId = '') {
 }
 
 function isRetryableCommunityClipError(error) {
+  if (error?.retryable === false) return false;
   const status = Number(error?.status || error?.statusCode || error?.response?.status);
   if ([408, 425, 429].includes(status) || status >= 500 && status <= 599) return true;
   const code = String(error?.code || '').toUpperCase();
